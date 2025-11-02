@@ -11,16 +11,12 @@ function Require-Command($name, $hint) {
 }
 
 function Start-MediaMTX {
-    # Prefer native EXE; fall back to Docker if missing.
     $exe = Join-Path $PSScriptRoot "mediamtx.exe"
 
     if (Test-Path $exe) {
         Write-Host "`nStarting local mediamtx.exe on rtsp://127.0.0.1:8554 ..."
-        # Start hidden, no args
         $proc = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds 1
-
-        # Optional: verify port 8554 is listening (best-effort)
         try {
             $ok = Test-NetConnection 127.0.0.1 -Port 8554 -WarningAction SilentlyContinue
             if (-not $ok.TcpTestSucceeded) {
@@ -79,11 +75,9 @@ function Ensure-FFmpeg {
 
   if (Get-Command winget -ErrorAction SilentlyContinue) {
     try {
-      # Try Microsoft’s package first
       winget install -e --id FFmpeg.FFmpeg --accept-source-agreements --accept-package-agreements | Out-Null
       if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { $installed = $true }
       if (-not $installed) {
-        # Fallback to Gyan builds
         winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements | Out-Null
         if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { $installed = $true }
       }
@@ -118,13 +112,13 @@ function Ensure-FFmpeg {
 
 
 # ---- Prereqs ----
-# Docker optional; we'll fall back to mediamtx.exe if needed
 Ensure-FFmpeg
 
 # ---- Basic prompts ----
 $N   = Read-Host "How many cameras? [3]"; if ([string]::IsNullOrWhiteSpace($N)) { $N = 3 } else { $N = [int]$N }
 $RES = Read-Host "Output resolution WxH [1280x720]"; if ([string]::IsNullOrWhiteSpace($RES)) { $RES = "1280x720" }
 $FPS = Read-Host "Output FPS [30]"; if ([string]::IsNullOrWhiteSpace($FPS)) { $FPS = 30 } else { $FPS = [int]$FPS }
+$VIEW = Read-Host "Launch viewer after streams are running? [Y]"; if ([string]::IsNullOrWhiteSpace($VIEW)) { $VIEW = "Y" }
 
 # ---- Start MediaMTX server ----
 $mediaMtxMode = Start-MediaMTX
@@ -154,16 +148,16 @@ for ($i = 0; $i -lt $N; $i++) {
   $offs += [double]$o
 }
 
-# ---- Launch single publisher (N inputs -> N RTSP outputs) ----
+# ---- Launch single publisher ----
 $logDir   = Join-Path $env:TEMP "rtsp_cam_logs"
 $pidsPath = Join-Path $env:TEMP "rtsp_ffmpeg_pids.txt"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-Set-Content -Path $pidsPath -Value ""  # truncate
+Set-Content -Path $pidsPath -Value ""
 
 $log = Join-Path $logDir "mux.log"
-$vcodec = "libx264"  # you confirmed libx264 exists
+$vcodec = "libx264"
 
-# Build inputs: for each cam add -re -stream_loop -1 -itsoffset X -i "file"
+# ---- Build inputs ----
 $inList = @()
 for ($i = 0; $i -lt $N; $i++) {
   Write-Host "Muxing cam${i}: $($files[$i]) (offset $($offs[$i])s) -> rtsp://127.0.0.1:8554/cam$($i)"
@@ -174,14 +168,14 @@ for ($i = 0; $i -lt $N; $i++) {
   )
 }
 
-# Build filter graph: [0:v]... -> [v0], [1:v]... -> [v1], ...
+# ---- Build filter graph ----
 $chains = @()
 for ($i = 0; $i -lt $N; $i++) {
   $chains += "[${i}:v]scale=$RES,fps=$FPS,format=yuv420p[v$i]"
 }
 $filter = ($chains -join ';')
 
-# Build outputs: map each [vX] to its RTSP URL with per-output options
+# ---- Build outputs ----
 $outList = @()
 for ($i = 0; $i -lt $N; $i++) {
   $url = "rtsp://127.0.0.1:8554/cam$($i)"
@@ -194,11 +188,10 @@ for ($i = 0; $i -lt $N; $i++) {
   )
 }
 
-# Compose final arg string
+# ---- Compose final arg string ----
 $argList   = @('-hide_banner','-loglevel','info','-nostdin') + $inList + @('-filter_complex', "`"$filter`"") + $outList
 $argString = $argList -join ' '
 
-# One ffmpeg process, single log, shared clock for all outputs
 $proc = Start-Process -FilePath "ffmpeg" `
           -ArgumentList $argString `
           -RedirectStandardError $log `
@@ -219,10 +212,22 @@ function Get-ViewerCmd([string]$u) {
   else { return "# Install a viewer: winget install Gyan.FFmpeg (ffplay), or winget install VideoLAN.VLC, or winget install Shinchiro.MPV" }
 }
 
+$urls = @()
 Write-Host "`n== Streams (copy/paste to view) =="
 for ($i = 0; $i -lt $N; $i++) {
   $u = "rtsp://127.0.0.1:8554/cam$($i)"
+  $urls += $u
   Write-Host "  $(Get-ViewerCmd $u)"
+}
+
+if ($VIEW -match '^(y|yes)$') {
+  Write-Host "`nLaunching viewers..."
+  $launchAt = (Get-Date).AddSeconds(2)  # common start ~2s in the future
+  foreach ($u in $urls) {
+    $ms = [int][Math]::Max(0, ($launchAt - (Get-Date)).TotalMilliseconds)
+    $cmd = "Start-Sleep -Milliseconds $ms; ffplay -rtsp_transport tcp -fflags nobuffer -flags low_delay -framedrop `"$u`""
+    Start-Process powershell -ArgumentList "-NoProfile","-Command",$cmd -WindowStyle Hidden
+  }
 }
 
 Write-Host "`nLogs live at: $logDir"
