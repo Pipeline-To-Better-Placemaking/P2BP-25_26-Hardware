@@ -1,2 +1,7 @@
 *.avi
 *.log
+.venv
+tracks/
+/tracks
+*.csv
+*.pt
