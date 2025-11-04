@@ -2,6 +2,10 @@
 # You need ffmpeg installed to use this script
 set -euo pipefail
 
+# Resolve script directory and config path
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MEDIAMTX_CFG="$SCRIPT_DIR/mediamtx.yml"
+
 echo "=== RTSP multi-cam from files (MediaMTX + FFmpeg) ==="
 
 read -rp "How many cameras? [3]: " N
@@ -15,7 +19,9 @@ FPS="${FPS:-30}"
 
 echo "Starting MediaMTX on rtsp://127.0.0.1:8554 ..."
 sudo docker rm -f mediamtx >/dev/null 2>&1 || true
-sudo docker run -d --name mediamtx --network host bluenviron/mediamtx:latest >/dev/null
+sudo docker run -d --name mediamtx --network host \
+  -v "$MEDIAMTX_CFG:/mediamtx.yml:ro" \
+  bluenviron/mediamtx:latest >/dev/null
 sleep 1
 sudo docker logs --tail=10 mediamtx || true
 
