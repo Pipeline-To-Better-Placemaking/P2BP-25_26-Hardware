@@ -11,11 +11,12 @@ function Require-Command($name, $hint) {
 }
 
 function Start-MediaMTX {
-    $exe = Join-Path $PSScriptRoot "mediamtx.exe"
+  $exe = Join-Path $PSScriptRoot "mediamtx.exe"
+  $cfg = Join-Path $PSScriptRoot "mediamtx.yml"
 
     if (Test-Path $exe) {
         Write-Host "`nStarting local mediamtx.exe on rtsp://127.0.0.1:8554 ..."
-        $proc = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru
+    $proc = Start-Process -FilePath $exe -ArgumentList "`"$cfg`"" -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds 1
         try {
             $ok = Test-NetConnection 127.0.0.1 -Port 8554 -WarningAction SilentlyContinue

@@ -1,0 +1,5 @@
+rtspAddress: :8554
+logLevel: debug
+paths:
+  all:
+    source: publisher
