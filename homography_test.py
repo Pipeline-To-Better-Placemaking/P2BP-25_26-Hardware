@@ -117,20 +117,36 @@ for r in results:
         axis_x = max(4, int((x2-x1) * 0.6))
         axis_y = max(2, int((y2-y1) * 0.08))
         center = (int(feet_px[0]), int(feet_px[1] - axis_y//2))
+        gx, gy = homography_transform(HOMOGRAPHIES['cam0'], feet_px)
+
         cv2.ellipse(
             frame,
             center,
             (axis_x, axis_y),
             0,
-            0, 270,
+            20, 270,
             color_based_on_id(tid),
             2
         )
 
-        cv2.putText(frame, f'{tid}', (center[0]+5, center[1]-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_based_on_id(tid), 1)
+        text_lines = [
+            f"{tid}",
+            f"({int(gx)}, {int(gy)})"
+        ]
+        for i, line in enumerate(text_lines):
+            cv2.putText(
+                frame,
+                line,
+                (center[0]+5, center[1]-10 + i * 12),   # shift each line down by 12 pixels
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                color_based_on_id(tid),
+                1
+            )
+        #cv2.putText(frame, f'{tid} ({int(gx)}, {int(gy)})', (center[0]+5, center[1]-10),
+                    #cv2.FONT_HERSHEY_SIMPLEX, 0.4, color_based_on_id(tid), 1)
 
-        gx, gy = homography_transform(HOMOGRAPHIES['cam0'], feet_px)
+        
         print(f"ID: {tid}, Feet Pixel: {feet_px}, gx:{gx:2f}, gy:{gy:2f}")
 
         if tid != -1:
