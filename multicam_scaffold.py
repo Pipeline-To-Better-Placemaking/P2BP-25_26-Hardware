@@ -34,21 +34,16 @@ SOURCES = {
     # 'cam1': 'rtsp://user:pass@192.168.1.20:554/stream',
     'cam0': 'rtsp://127.0.0.1:8554/cam0',
     'cam1': 'rtsp://127.0.0.1:8554/cam1',
-    'cam2': 'rtsp://127.0.0.1:8554/cam2',
-    'cam3': 'rtsp://127.0.0.1:8554/cam3',
-    'cam4': 'rtsp://127.0.0.1:8554/cam0',
-    'cam5': 'rtsp://127.0.0.1:8554/cam1',
-    'cam6': 'rtsp://127.0.0.1:8554/cam2',
-    'cam7': 'rtsp://127.0.0.1:8554/cam3',
-    'cam8': 'rtsp://127.0.0.1:8554/cam0',
-    'cam9': 'rtsp://127.0.0.1:8554/cam1',
-    'cam10': 'rtsp://127.0.0.1:8554/cam2',
-    'cam11': 'rtsp://127.0.0.1:8554/cam3'
+    # 'cam2': 'rtsp://127.0.0.1:8554/cam2',
+    # 'cam3': 'rtsp://127.0.0.1:8554/cam3',
 }
 
 HOMOGRAPHIES = {
-    'cam0': None,
     # 'cam1': 'homography_cam1.yml',
+    'cam0': "4p-c0-homography.yml",
+    'cam1': "4p-c1-homography.yml",
+    'cam2': "4p-c2-homography.yml",
+    'cam3': "4p-c3-homography.yml",
 }
 
 MODEL_PATH = 'yolov10m.pt'
@@ -159,6 +154,14 @@ def appearance_distance(f1, f2):
     f2 = f2 / (np.linalg.norm(f2) + 1e-9)
     dot = np.clip(np.dot(f1, f2), -1.0, 1.0)
     return 1.0 - dot
+
+def valid_ground(pt):
+        return (
+            pt is not None
+            and isinstance(pt, (list, tuple))
+            and len(pt) == 2
+            and all(v is not None for v in pt)
+        )
 
 # --------------------------- TRACK & TRACKER ---------------------------
 class Track:
@@ -328,6 +331,7 @@ class CrossCameraManager:
         cutoff = now - max(60, ASSOCIATION_TIME_WINDOW * 3)
         self.paused_tracks = [p for p in self.paused_tracks if p['last_time'] >= cutoff]
 
+
     def try_associate(self, new_tracklets):
         """Attempt to associate new tracklets with paused tracks from other cameras."""
         n, m = len(self.paused_tracks), len(new_tracklets)
@@ -342,10 +346,15 @@ class CrossCameraManager:
                     cost[i, j] = 1e6
                     continue
                 app = appearance_distance(p['feature'], nv['feature'])
-                if p['last_pos_ground'] is None or nv['start_pos_ground'] is None:
+                if not valid_ground(p['last_pos_ground']) or not valid_ground(nv['start_pos_ground']):
                     spatial = 50.0
                 else:
-                    spatial = float(np.linalg.norm(np.array(p['last_pos_ground']) - np.array(nv['start_pos_ground'])))
+                    spatial = float(
+                        np.linalg.norm(
+                            np.array(p['last_pos_ground'], dtype=float)
+                            - np.array(nv['start_pos_ground'], dtype=float)
+                        )
+                    )
                 spatial_n = min(spatial / 10.0, 1.0)
                 cost[i, j] = CROSS_APPEARANCE_WEIGHT * app + CROSS_SPATIAL_WEIGHT * spatial_n
 
