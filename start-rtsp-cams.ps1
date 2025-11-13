@@ -116,9 +116,9 @@ function Ensure-FFmpeg {
 Ensure-FFmpeg
 
 # ---- Basic prompts ----
-$N   = Read-Host "How many cameras? [3]"; if ([string]::IsNullOrWhiteSpace($N)) { $N = 3 } else { $N = [int]$N }
-$RES = Read-Host "Output resolution WxH [1280x720]"; if ([string]::IsNullOrWhiteSpace($RES)) { $RES = "1280x720" }
-$FPS = Read-Host "Output FPS [30]"; if ([string]::IsNullOrWhiteSpace($FPS)) { $FPS = 30 } else { $FPS = [int]$FPS }
+$N   = Read-Host "How many cameras? [4]"; if ([string]::IsNullOrWhiteSpace($N)) { $N = 4 } else { $N = [int]$N }
+$RES = Read-Host "Output resolution WxH [360x288]"; if ([string]::IsNullOrWhiteSpace($RES)) { $RES = "360x288" }
+$FPS = Read-Host "Output FPS [25]"; if ([string]::IsNullOrWhiteSpace($FPS)) { $FPS = 25 } else { $FPS = [int]$FPS }
 $VIEW = Read-Host "Launch viewer after streams are running? [Y]"; if ([string]::IsNullOrWhiteSpace($VIEW)) { $VIEW = "Y" }
 
 # ---- Start MediaMTX server ----
@@ -132,7 +132,7 @@ if (-not (Wait-RTSPReady -Port 8554 -TimeoutSec 20)) {
 $files = @()
 $offs  = @()
 for ($i = 0; $i -lt $N; $i++) {
-  $default = "4p-c$($i).avi"
+  $default = "videos/4p-c$($i).avi"
   $f = Read-Host "Path for cam$i file [$default]"
   if ([string]::IsNullOrWhiteSpace($f)) { $f = $default }
 

@@ -8,14 +8,14 @@ MEDIAMTX_CFG="$SCRIPT_DIR/mediamtx.yml"
 
 echo "=== RTSP multi-cam from files (MediaMTX + FFmpeg) ==="
 
-read -rp "How many cameras? [3]: " N
-N="${N:-3}"
+read -rp "How many cameras? [4]: " N
+N="${N:-4}"
 
-read -rp "Output resolution WxH [1280x720]: " RES
-RES="${RES:-1280x720}"
+read -rp "Output resolution WxH [360x288]: " RES
+RES="${RES:-360x288}"
 
-read -rp "Output FPS [30]: " FPS
-FPS="${FPS:-30}"
+read -rp "Output FPS [25]: " FPS
+FPS="${FPS:-25}"
 
 echo "Starting MediaMTX on rtsp://127.0.0.1:8554 ..."
 sudo docker rm -f mediamtx >/dev/null 2>&1 || true
@@ -29,7 +29,7 @@ sudo docker logs --tail=10 mediamtx || true
 
 declare -a FILES OFFS
 for ((i=0; i<N; i++)); do
-  default="4p-c${i}.avi"
+  default="videos/4p-c${i}.avi"
   read -rp "Path for cam${i} file [${default}]: " f
   f="${f:-$default}"
   if [[ ! -e "$f" ]]; then
