@@ -5,3 +5,5 @@ tracks/
 /tracks
 *.csv
 *.pt
+/videos
+videos/

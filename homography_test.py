@@ -112,7 +112,6 @@ for r in results:
         feet_px = ((x1 + x2) / 2, y2)
         # cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
         # cv2.putText(frame, f'ID {tid}', (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-
         
         axis_x = max(4, int((x2-x1) * 0.6))
         axis_y = max(2, int((y2-y1) * 0.08))
