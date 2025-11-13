@@ -19,22 +19,54 @@ import numpy as np
 from datetime import datetime
 from scipy.optimize import linear_sum_assignment
 from ultralytics import YOLO
+try:
+    import torch  # for CUDA availability check
+    _CUDA_AVAILABLE = torch.cuda.is_available()
+    _CUDA_VERSION = getattr(torch.version, 'cuda', None)
+except Exception:
+    torch = None
+    _CUDA_AVAILABLE = False
+    _CUDA_VERSION = None
 
 # --------------------------- CONFIG ---------------------------
 SOURCES = {
-    'cam0': 0,  # 0 for local webcam
+    # 'cam0': 0,  # 0 for local webcam
     # 'cam1': 'rtsp://user:pass@192.168.1.20:554/stream',
+    'cam0': 'rtsp://127.0.0.1:8554/cam0',
+    'cam1': 'rtsp://127.0.0.1:8554/cam1',
+    # 'cam2': 'rtsp://127.0.0.1:8554/cam2',
+    # 'cam3': 'rtsp://127.0.0.1:8554/cam3',
 }
 
 HOMOGRAPHIES = {
-    'cam0': None,
     # 'cam1': 'homography_cam1.yml',
+    'cam0': "4p-c0-homography.yml",
+    'cam1': "4p-c1-homography.yml",
+    'cam2': "4p-c2-homography.yml",
+    'cam3': "4p-c3-homography.yml",
 }
 
-MODEL_PATH = 'yolov8n.pt'
+MODEL_PATH = 'yolov10m.pt'
 CONF_THRESH = 0.35
-DEVICE = 'cpu'  # 'cuda' or 'cpu'
+# Device selection: 'auto' (default), 'cuda', or 'cpu'. Env override: YOLO_DEVICE
+DEVICE = os.environ.get('YOLO_DEVICE', 'auto')
+if DEVICE == 'auto':
+    DEVICE = 'cuda' if _CUDA_AVAILABLE else 'cpu'
 MAX_MISSED = 12
+MODEL_IMAGE_SIZE = 640
+USE_HALF_PRECISION = DEVICE != 'cpu'
+
+CAPTURE_BACKEND = cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else None
+CAPTURE_BUFFER = 2
+FRAME_QUEUE_SIZE = 4
+RECONNECT_DELAY = 2.0
+MAX_RECONNECT_ATTEMPTS = 5
+FRAME_SKIP = 0  # set >0 to skip frames for performance (process every FRAME_SKIP+1 frame)
+
+RTSP_CAPTURE_OPTIONS = "rtsp_transport;tcp|max_delay;0|fflags;nobuffer|flags;low_delay|timeout;5000000"
+os.environ.setdefault('OPENCV_FFMPEG_CAPTURE_OPTIONS', RTSP_CAPTURE_OPTIONS)
+
+DETECTOR_LOCK = threading.Lock()
 
 # Cross-camera association parameters
 ASSOCIATION_TIME_WINDOW = 8.0
@@ -122,6 +154,14 @@ def appearance_distance(f1, f2):
     f2 = f2 / (np.linalg.norm(f2) + 1e-9)
     dot = np.clip(np.dot(f1, f2), -1.0, 1.0)
     return 1.0 - dot
+
+def valid_ground(pt):
+        return (
+            pt is not None
+            and isinstance(pt, (list, tuple))
+            and len(pt) == 2
+            and all(v is not None for v in pt)
+        )
 
 # --------------------------- TRACK & TRACKER ---------------------------
 class Track:
@@ -291,6 +331,7 @@ class CrossCameraManager:
         cutoff = now - max(60, ASSOCIATION_TIME_WINDOW * 3)
         self.paused_tracks = [p for p in self.paused_tracks if p['last_time'] >= cutoff]
 
+
     def try_associate(self, new_tracklets):
         """Attempt to associate new tracklets with paused tracks from other cameras."""
         n, m = len(self.paused_tracks), len(new_tracklets)
@@ -305,10 +346,15 @@ class CrossCameraManager:
                     cost[i, j] = 1e6
                     continue
                 app = appearance_distance(p['feature'], nv['feature'])
-                if p['last_pos_ground'] is None or nv['start_pos_ground'] is None:
+                if not valid_ground(p['last_pos_ground']) or not valid_ground(nv['start_pos_ground']):
                     spatial = 50.0
                 else:
-                    spatial = float(np.linalg.norm(np.array(p['last_pos_ground']) - np.array(nv['start_pos_ground'])))
+                    spatial = float(
+                        np.linalg.norm(
+                            np.array(p['last_pos_ground'], dtype=float)
+                            - np.array(nv['start_pos_ground'], dtype=float)
+                        )
+                    )
                 spatial_n = min(spatial / 10.0, 1.0)
                 cost[i, j] = CROSS_APPEARANCE_WEIGHT * app + CROSS_SPATIAL_WEIGHT * spatial_n
 
@@ -341,26 +387,104 @@ class CrossCameraManager:
 # --------------------------- CAMERA WORKER ---------------------------
 class CameraWorker(threading.Thread):
     """Thread that captures frames, detects persons, and tracks per camera."""
-    def __init__(self, cam_id, source, homography, detector, out_queue, stop_event):
+    def __init__(self, cam_id, source, homography, detector, detector_lock, out_queue, stop_event):
         super().__init__(daemon=True)
         self.cam_id = cam_id
         self.source = source
         self.homography = homography
         self.detector = detector
+        self.detector_lock = detector_lock
         self.out_q = out_queue
         self.stop_event = stop_event
         self.tracker = SimpleTracker(cam_id)
+        self.frame_buffer = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
+        self._frame_counter = 0
 
-    def run(self):
-        cap = cv2.VideoCapture(self.source)
-        frame_idx = 0
+    def _open_capture(self):
+        cap = None
+        if CAPTURE_BACKEND is not None:
+            cap = cv2.VideoCapture(self.source, CAPTURE_BACKEND)
+        if cap is None or not cap.isOpened():
+            cap = cv2.VideoCapture(self.source)
+        if CAPTURE_BUFFER is not None:
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, CAPTURE_BUFFER)
+            except cv2.error:
+                pass
+        return cap
+
+    def _reader_loop(self):
+        cap = None
+        reconnect_attempts = 0
         while not self.stop_event.is_set():
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                cap = self._open_capture()
+                if not cap or not cap.isOpened():
+                    reconnect_attempts += 1
+                    if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+                        print(f"[{self.cam_id}] Unable to open stream after {reconnect_attempts} attempts.")
+                        reconnect_attempts = 0
+                    time.sleep(RECONNECT_DELAY)
+                    continue
+                reconnect_attempts = 0
+
             ret, frame = cap.read()
             if not ret:
-                print(f"[{self.cam_id}] Stream ended or cannot access source.")
-                break
+                reconnect_attempts += 1
+                if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+                    print(f"[{self.cam_id}] Read failed {reconnect_attempts} times, reopening stream.")
+                    cap.release()
+                    cap = None
+                    reconnect_attempts = 0
+                    time.sleep(RECONNECT_DELAY)
+                continue
+
+            reconnect_attempts = 0
             ts = time.time()
-            results = self.detector(frame, verbose=False, device=DEVICE)[0]
+            idx = self._frame_counter
+            self._frame_counter += 1
+
+            if FRAME_SKIP and (idx % (FRAME_SKIP + 1) != 0):
+                continue
+
+            if self.frame_buffer.full():
+                try:
+                    self.frame_buffer.get_nowait()
+                except queue.Empty:
+                    pass
+            try:
+                self.frame_buffer.put_nowait((idx, ts, frame))
+            except queue.Full:
+                pass
+
+        if cap is not None:
+            cap.release()
+
+    def _run_detector(self, frame):
+        try:
+            with self.detector_lock:
+                results = self.detector.predict(frame, imgsz=MODEL_IMAGE_SIZE, device=DEVICE,
+                                                half=USE_HALF_PRECISION, verbose=False)
+        except Exception as exc:
+            print(f"[{self.cam_id}] Detector failure: {exc}")
+            return None
+        return results[0] if results else None
+
+    def run(self):
+        reader = threading.Thread(target=self._reader_loop, daemon=True)
+        reader.start()
+
+        while not self.stop_event.is_set():
+            try:
+                frame_idx, ts, frame = self.frame_buffer.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            results = self._run_detector(frame)
+            if results is None:
+                continue
 
             # Extract person detections above confidence threshold
             dets = []
@@ -413,8 +537,7 @@ class CameraWorker(threading.Thread):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 self.stop_event.set()
                 break
-            frame_idx += 1
-        cap.release()
+        reader.join(timeout=2.0)
 
 # --------------------------- IO UTILITIES ---------------------------
 def write_csv_header():
@@ -437,6 +560,11 @@ def save_track_json(track: Track):
 def main():
     # Load YOLO detector
     detector = YOLO(MODEL_PATH)
+    try:
+        tv = torch.__version__ if torch is not None else 'n/a'
+    except Exception:
+        tv = 'n/a'
+    print(f"[INFO] Inference device: {DEVICE} | torch {tv} | cuda_version={_CUDA_VERSION} | cuda_available={_CUDA_AVAILABLE}")
 
     # Load homographies per camera
     homographies = {}
@@ -469,7 +597,7 @@ def main():
     # Start camera worker threads
     for cam, src in valid_sources.items():
         H = homographies.get(cam, None)
-        w = CameraWorker(cam, src, H, detector, q, stop_event)
+        w = CameraWorker(cam, src, H, detector, DETECTOR_LOCK, q, stop_event)
         workers[cam] = w
         w.start()
 
@@ -486,8 +614,6 @@ def main():
             terminated = item['terminated_tracks']
             new_tracklets = item['new_tracklets']
             active_tracks = item['active_tracks']
-            frame_idx = item['frame_idx']
-            ts = item['timestamp']
 
             manager.add_terminated_local_tracks(terminated)
             manager.try_associate(new_tracklets)
