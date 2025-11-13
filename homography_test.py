@@ -86,10 +86,13 @@ last_seen = {}
 frame_idx = 0
 
 results = model.track(
-    source=SOURCES['cam0'], 
-    tracker='bytetrack.yaml', 
-    device=DEVICE, 
-    classes=[0], 
+    source=SOURCES['cam0'],
+    tracker='bytetrack.yaml',
+    device=DEVICE,
+    classes=[0],
+    conf=0.35,         # match scaffold, not sure what default is
+    imgsz=512,         # default 640, reduced to match scaffold
+    half=(DEVICE != 'cpu'),
     show=False,
     stream=True,
     verbose=False

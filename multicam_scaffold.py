@@ -53,7 +53,7 @@ DEVICE = os.environ.get('YOLO_DEVICE', 'auto')
 if DEVICE == 'auto':
     DEVICE = 'cuda' if _CUDA_AVAILABLE else 'cpu'
 MAX_MISSED = 12
-MODEL_IMAGE_SIZE = 640
+MODEL_IMAGE_SIZE = 512   # was 640, hardware is tough enough as is
 USE_HALF_PRECISION = DEVICE != 'cpu'
 
 CAPTURE_BACKEND = cv2.CAP_FFMPEG if hasattr(cv2, 'CAP_FFMPEG') else None
@@ -61,7 +61,9 @@ CAPTURE_BUFFER = 2
 FRAME_QUEUE_SIZE = 4
 RECONNECT_DELAY = 2.0
 MAX_RECONNECT_ATTEMPTS = 5
-FRAME_SKIP = 0  # set >0 to skip frames for performance (process every FRAME_SKIP+1 frame)
+FRAME_SKIP = 2  # was 0 (then later +1) becomes process frames where idx % 3 == 0, so once every 3 frames rather than every frame
+
+ENABLE_VISUALIZATION = True  # we can set this to False later to disable drawing/windows for better performance during the gallery
 
 RTSP_CAPTURE_OPTIONS = "rtsp_transport;tcp|max_delay;0|fflags;nobuffer|flags;low_delay|timeout;5000000"
 os.environ.setdefault('OPENCV_FFMPEG_CAPTURE_OPTIONS', RTSP_CAPTURE_OPTIONS)
@@ -137,11 +139,13 @@ def crop_safe(frame, box):
         return None
     return frame[y1:y2, x1:x2]
 
-def color_hist_feature(crop, bins=32):
+def color_hist_feature(crop, bins=16): #from 32 to 16 halves feature dim
     """Compute normalized grayscale histogram as simple appearance feature."""
     if crop is None:
         return np.zeros(bins, dtype=float)
+    # shrink cropping
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA)
     hist = cv2.calcHist([gray], [0], None, [bins], [0, 256]).flatten()
     norm = np.linalg.norm(hist)
     return hist / norm if norm > 0 else hist
@@ -525,18 +529,19 @@ class CameraWorker(threading.Thread):
                 'active_tracks': list(self.tracker.tracks),
             })
 
-            # Visualization
-            vis = frame.copy()
-            for t in self.tracker.tracks:
-                x1, y1, x2, y2 = map(int, t.last_bbox)
-                gid = t.global_id if t.global_id is not None else -1
-                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 200, 0), 2)
-                cv2.putText(vis, f"L{t.local_id}/G{gid}", (x1, max(15, y1-10)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 2)
-            cv2.imshow(f"{self.cam_id}", vis)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                self.stop_event.set()
-                break
+            # Visualization (same idea as before but with the option to disable)
+            if ENABLE_VISUALIZATION:
+                vis = frame.copy()
+                for t in self.tracker.tracks:
+                    x1, y1, x2, y2 = map(int, t.last_bbox)
+                    gid = t.global_id if t.global_id is not None else -1
+                    cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 200, 0), 2)
+                    cv2.putText(vis, f"L{t.local_id}/G{gid}", (x1, max(15, y1-10)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 2)
+                cv2.imshow(f"{self.cam_id}", vis)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self.stop_event.set()
+                    break
         reader.join(timeout=2.0)
 
 # --------------------------- IO UTILITIES ---------------------------
