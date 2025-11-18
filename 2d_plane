@@ -1,0 +1,46 @@
+import numpy as np, cv2
+
+img = 255 * np.ones((400, 600, 3), dtype=np.uint8)
+
+box_top_left = (100, 50)
+box_bottom_right = (500, 350)
+
+# draw a black rectangle
+cv2.rectangle(img, box_top_left, box_bottom_right, (0, 0, 0), 2)
+
+num_cols = 5
+num_rows = 4
+
+x1, y1 = box_top_left
+x2, y2 = box_bottom_right
+
+cell_w = (x2 - x1) / num_cols
+cell_h = (y2 - y1) / num_rows
+
+dash_len = 8
+gap_len = 4
+
+# vertical lines
+for c in range(1, num_cols):
+    x = int(x1 + c * cell_w)
+    y = y1
+    while y < y2:
+        y_end = min(y + dash_len, y2)
+        cv2.line(img, (x, y), (x, y_end), (0, 0, 0), 1)
+        y += dash_len + gap_len
+
+# horizontal lines
+for r in range(1, num_rows):
+    y = int(y1 + r * cell_h)
+    x = x1
+    while x < x2:
+        x_end = min(x + dash_len, x2)
+        cv2.line(img, (x, y), (x_end, y), (0, 0, 0), 1)
+        x += dash_len + gap_len
+
+
+
+cv2.imshow("Box with Grid", img)
+
+cv2.waitKey(0)
+cv2.destroyAllWindows()
