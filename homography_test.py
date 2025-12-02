@@ -30,7 +30,7 @@ def load_homography(path):
         raise ValueError("Homography must be 3x3")
     return H
 
-STALE_FRAMES = 30  # frames
+STALE_FRAMES = 30  # frames to delete a dead trail
 
 SOURCES = {
     # 'cam0': 0,  # 0 for local webcam
@@ -41,12 +41,14 @@ SOURCES = {
     # 'cam3': 'rtsp://127.0.0.1:8554/cam3',
 }
 
+source_names = ['4p', 'terrace1', 'campus4', 'passageway1']
+source_name = source_names[0]
 HOMOGRAPHIES = {
     # 'cam1': 'homography_cam1.yml',
-    'cam0': load_homography("homographies/passageway1-c0-homography.yml"),
-    'cam1': load_homography("homographies/passageway1-c1-homography.yml"),
-    'cam2': load_homography("homographies/passageway1-c2-homography.yml"),
-    'cam3': load_homography("homographies/passageway1-c3-homography.yml"),
+    'cam0': load_homography(f"homographies/{source_name}-c0-homography.yml"),
+    'cam1': load_homography(f"homographies/{source_name}-c1-homography.yml"),
+    'cam2': load_homography(f"homographies/{source_name}-c2-homography.yml"),
+    'cam3': load_homography(f"homographies/{source_name}-c3-homography.yml"),
 }
 
 MODEL_PATH = 'yolov10m.pt'
@@ -74,6 +76,10 @@ def homography_transform(H, point):
 
     return transformed_point[0], transformed_point[1]
 
+def inverse_homography_transform(H, x, y):
+    v = H @ np.array([x, y, 1.0])
+    return (int(v[0]/v[2]), int(v[1]/v[2]))
+
 def color_based_on_id(tid):
     if tid == -1:
         return (0, 255, 0)
@@ -81,9 +87,36 @@ def color_based_on_id(tid):
     color = tuple(int(c) for c in np.random.randint(0, 255, size=3))
     return color
 
+
 trails = defaultdict(lambda: deque(maxlen=15))
+world = {}  # tid -> {"x": ..., "y": ...}
 last_seen = {}
 frame_idx = 0
+
+# This smooths out the coordinates to prevent jittery movement and "jumps" when the person is occluded or something
+def world_update(tid, meas, a=0.25, max_jump=70):
+    mx, my = meas
+    s = world.setdefault(tid, {"x": None, "y": None})
+
+    if s["x"] is None:
+        s["x"], s["y"] = mx, my
+        return mx, my
+
+    dx = mx - s["x"]
+    dy = my - s["y"]
+    dist = np.hypot(dx, dy)
+
+    if dist > max_jump:
+        # move only max_jump toward the measured position
+        scale = max_jump / dist
+        mx = s["x"] + dx * scale
+        my = s["y"] + dy * scale
+
+    # smoothly transition to the new position
+    s["x"] = (1 - a) * s["x"] + a * mx
+    s["y"] = (1 - a) * s["y"] + a * my
+    return s["x"], s["y"]
+
 
 results = model.track(
     source=SOURCES['cam0'], 
@@ -149,8 +182,10 @@ for r in results:
         print(f"ID: {tid}, Feet Pixel: {feet_px}, gx:{gx:2f}, gy:{gy:2f}")
 
         if tid != -1:
-            trails[tid].append(feet_px)
-            last_seen[tid] = frame_idx
+            world_pos = inverse_homography_transform(np.linalg.inv(HOMOGRAPHIES['cam0']), *world_update(tid, (gx, gy)))
+            print(f"    Smoothed World Pos: ({world_pos[0]}, {world_pos[1]})")
+            trails[tid].append(world_pos)
+            last_seen[tid] = frame_idx            
 
     # draw a trail behind each person
     for tid, pts in trails.items():
