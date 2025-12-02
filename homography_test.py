@@ -30,8 +30,36 @@ def load_homography(path):
         raise ValueError("Homography must be 3x3")
     return H
 
-STALE_FRAMES = 30  # frames to delete a dead trail
+STALE_FRAMES = 5  # frames to delete a dead trail
 
+# === World / top-view config for 6-people laboratory ===
+TV_ORIGIN_X = 0
+TV_ORIGIN_Y = 0
+TV_WIDTH    = 358   # top-view width in EPFL units
+TV_HEIGHT   = 360   # top-view height in EPFL units
+
+# Fixed world box in top-view coordinates
+WORLD_MIN_X = TV_ORIGIN_X
+WORLD_MAX_X = TV_ORIGIN_X + TV_WIDTH     # 358
+WORLD_MIN_Y = TV_ORIGIN_Y
+WORLD_MAX_Y = TV_ORIGIN_Y + TV_HEIGHT    # 360
+
+# White frame specs
+MAP_WIDTH  = 400
+MAP_HEIGHT = int(MAP_WIDTH * (TV_HEIGHT / TV_WIDTH))
+
+MAP_BOX_TOP_LEFT = (50, 50)
+MAP_BOX_BOTTOM_RIGHT = (MAP_WIDTH - 50, MAP_HEIGHT - 50)
+
+GRID_COLS = 56
+GRID_ROWS = 56
+
+# Rotate and/or flip the top-view
+TOPVIEW_ROTATION = 90
+TOPVIEW_FLIP_X   = True
+TOPVIEW_FLIP_Y   = False
+
+current_cam = 'cam0'
 SOURCES = {
     # 'cam0': 0,  # 0 for local webcam
     # 'cam1': 'rtsp://user:pass@192.168.1.20:554/stream',
@@ -50,6 +78,11 @@ HOMOGRAPHIES = {
     'cam2': load_homography(f"homographies/{source_name}-c2-homography.yml"),
     'cam3': load_homography(f"homographies/{source_name}-c3-homography.yml"),
 }
+H_INV = {
+    cam: (np.linalg.inv(H) if H is not None else None)
+    for cam, H in HOMOGRAPHIES.items()
+}
+
 
 MODEL_PATH = 'yolov10m.pt'
 DEVICE = os.environ.get('YOLO_DEVICE', 'auto')
@@ -89,7 +122,8 @@ def color_based_on_id(tid):
 
 
 trails = defaultdict(lambda: deque(maxlen=15))
-world = {}  # tid -> {"x": ..., "y": ...}
+TV_trails = defaultdict(lambda: deque(maxlen=15))
+world = {}
 last_seen = {}
 frame_idx = 0
 
@@ -119,7 +153,7 @@ def world_update(tid, meas, a=0.25, max_jump=70):
 
 
 results = model.track(
-    source=SOURCES['cam0'], 
+    source=SOURCES[current_cam], 
     tracker='bytetrack.yaml', 
     device=DEVICE, 
     classes=[0], 
@@ -130,13 +164,46 @@ results = model.track(
 
 for r in results:
     frame = r.orig_img.copy()
+
+    topview = 255 * np.ones((MAP_HEIGHT, MAP_WIDTH, 3), dtype=np.uint8)
+
+    # draw ground plane
+    cv2.rectangle(
+        topview,
+        MAP_BOX_TOP_LEFT,
+        MAP_BOX_BOTTOM_RIGHT,
+        (0, 0, 0),
+        2
+    )
+
+    # draw grid
+    x1_box, y1_box = MAP_BOX_TOP_LEFT
+    x2_box, y2_box = MAP_BOX_BOTTOM_RIGHT
+
+    cell_w = (x2_box - x1_box) / GRID_COLS
+    cell_h = (y2_box - y1_box) / GRID_ROWS
+
+    # vertical grid lines
+    for c in range(1, GRID_COLS):
+        x = int(x1_box + c * cell_w)
+        cv2.line(topview, (x, y1_box), (x, y2_box), (200, 200, 200), 1)
+
+    # horizontal grid lines
+    for r_grid in range(1, GRID_ROWS):
+        y = int(y1_box + r_grid * cell_h)
+        cv2.line(topview, (x1_box, y), (x2_box, y), (200, 200, 200), 1)
+
+    current_ground_points = []
+
     frame_idx += 1
     boxes = r.boxes
     if not boxes:
         cv2.imshow('Frame', frame)
+        cv2.imshow('TopView', topview)
         if cv2.waitKey(1) == 27:
             break
         continue
+
     
     for box in boxes:
         x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -149,7 +216,16 @@ for r in results:
         axis_x = max(4, int((x2-x1) * 0.6))
         axis_y = max(2, int((y2-y1) * 0.08))
         center = (int(feet_px[0]), int(feet_px[1] - axis_y//2))
-        gx, gy = homography_transform(HOMOGRAPHIES['cam0'], feet_px)
+        gx, gy = homography_transform(HOMOGRAPHIES[current_cam], feet_px)
+
+        # smooth ground plane coordinates
+        if tid != -1:
+            gx_s, gy_s = world_update(tid, (gx, gy))
+        else:
+            gx_s, gy_s = gx, gy
+
+        # store ground-plane point for this frame
+        current_ground_points.append((tid, gx_s, gy_s))
 
         cv2.ellipse(
             frame,
@@ -163,7 +239,7 @@ for r in results:
 
         text_lines = [
             f"{tid}",
-            f"({int(gx)}, {int(gy)})"
+            f"({int(gx_s)}, {int(gy_s)})"
         ]
         for i, line in enumerate(text_lines):
             cv2.putText(
@@ -181,11 +257,11 @@ for r in results:
         
         print(f"ID: {tid}, Feet Pixel: {feet_px}, gx:{gx:2f}, gy:{gy:2f}")
 
-        if tid != -1:
-            world_pos = inverse_homography_transform(np.linalg.inv(HOMOGRAPHIES['cam0']), *world_update(tid, (gx, gy)))
-            print(f"    Smoothed World Pos: ({world_pos[0]}, {world_pos[1]})")
-            trails[tid].append(world_pos)
-            last_seen[tid] = frame_idx            
+        if tid != -1 and H_INV[current_cam] is not None:
+            world_pos_px = inverse_homography_transform(H_INV[current_cam], gx_s, gy_s)
+            print(f"    Smoothed World Pos: ({gx_s}, {gy_s})")
+            trails[tid].append(world_pos_px)
+            last_seen[tid] = frame_idx
 
     # draw a trail behind each person
     for tid, pts in trails.items():
@@ -194,7 +270,69 @@ for r in results:
             p2 = pts[i]
             cv2.line(frame, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), color_based_on_id(tid), 2)
 
+    # draw current ground-plane points on Plane
+    world_w = max(WORLD_MAX_X - WORLD_MIN_X, 1e-6)
+    world_h = max(WORLD_MAX_Y - WORLD_MIN_Y, 1e-6)
+
+    x1_box, y1_box = MAP_BOX_TOP_LEFT
+    x2_box, y2_box = MAP_BOX_BOTTOM_RIGHT
+    box_w = x2_box - x1_box
+    box_h = y2_box - y1_box
+
+    for tid, gx, gy in current_ground_points:
+        tx = (gx - WORLD_MIN_X) / world_w
+        ty = (gy - WORLD_MIN_Y) / world_h
+
+        # apply rotation
+        if TOPVIEW_ROTATION == 0:
+            tx_r, ty_r = tx, ty
+        elif TOPVIEW_ROTATION == 90:
+            tx_r, ty_r = ty, 1.0 - tx
+        elif TOPVIEW_ROTATION == 180:
+            tx_r, ty_r = 1.0 - tx, 1.0 - ty
+        elif TOPVIEW_ROTATION == 270:
+            tx_r, ty_r = 1.0 - ty, tx
+        else:
+            tx_r, ty_r = tx, ty
+
+        if TOPVIEW_FLIP_X:
+            tx_r = 1.0 - tx_r
+        if TOPVIEW_FLIP_Y:
+            ty_r = 1.0 - ty_r
+
+        u = int(x1_box + tx_r * box_w)
+        v = int(y2_box - ty_r * box_h)
+
+        if tid != -1:
+            TV_trails[tid].append((tx_r, ty_r))
+
+        cv2.circle(topview, (u, v), 4, color_based_on_id(tid), -1)
+        cv2.putText(
+            topview,
+            str(tid),
+            (u + 6, v - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            color_based_on_id(tid),
+            1
+        )
+
+    # now draw the smoothed trails in top-view
+    for tid, pts in TV_trails.items():
+        for i in range(1, len(pts)):
+            p1 = pts[i - 1]
+            p2 = pts[i]
+
+            u1 = int(x1_box + p1[0] * box_w)
+            v1 = int(y2_box - p1[1] * box_h)
+            u2 = int(x1_box + p2[0] * box_w)
+            v2 = int(y2_box - p2[1] * box_h)
+
+            cv2.line(topview, (u1, v1), (u2, v2), color_based_on_id(tid), 2)
+
+
     cv2.imshow('Frame', frame)
+    cv2.imshow('TopView', topview)
     if cv2.waitKey(1) == 27:
         break
 
@@ -202,5 +340,6 @@ for r in results:
 
     for tid in stale_tids:
         trails.pop(tid, None)
+        TV_trails.pop(tid, None)
         last_seen.pop(tid, None)
 
