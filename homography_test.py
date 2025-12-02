@@ -32,15 +32,35 @@ def load_homography(path):
 
 STALE_FRAMES = 30  # frames
 
+# === World / top-view config for 6-people laboratory ===
+TV_ORIGIN_X = 0.0
+TV_ORIGIN_Y = 0.0
+TV_WIDTH    = 358.0   # top-view width in EPFL units
+TV_HEIGHT   = 360.0   # top-view height in EPFL units
+
+# Fixed world box in top-view coordinates
+WORLD_MIN_X = TV_ORIGIN_X
+WORLD_MAX_X = TV_ORIGIN_X + TV_WIDTH     # 358
+WORLD_MIN_Y = TV_ORIGIN_Y
+WORLD_MAX_Y = TV_ORIGIN_Y + TV_HEIGHT    # 360
+
 # White frame specs
-MAP_WIDTH, MAP_HEIGHT = 400, 400
+MAP_WIDTH  = 400
+MAP_HEIGHT = int(MAP_WIDTH * (TV_HEIGHT / TV_WIDTH))
 
 MAP_BOX_TOP_LEFT = (50, 50)
-MAP_BOX_BOTTOM_RIGHT = (350, 350) 
+MAP_BOX_BOTTOM_RIGHT = (MAP_WIDTH - 50, MAP_HEIGHT - 50)
 
-GRID_COLS = 4 
-GRID_ROWS = 4
+GRID_COLS = 56
+GRID_ROWS = 56
 
+# Rotate and/or flip the top-view
+TOPVIEW_ROTATION = 90
+TOPVIEW_FLIP_X   = True
+TOPVIEW_FLIP_Y   = False
+
+
+current_cam = 'cam0'
 SOURCES = {
     # 'cam0': 0,  # 0 for local webcam
     # 'cam1': 'rtsp://user:pass@192.168.1.20:554/stream',
@@ -50,12 +70,14 @@ SOURCES = {
     # 'cam3': 'rtsp://127.0.0.1:8554/cam3',
 }
 
+source_names = ['4p', 'terrace1', 'campus4', 'passageway1']
+source_name = source_names[0]
 HOMOGRAPHIES = {
     # 'cam1': 'homography_cam1.yml',
-    'cam0': load_homography("homographies/passageway1-c0-homography.yml"),
-    'cam1': load_homography("homographies/passageway1-c1-homography.yml"),
-    'cam2': load_homography("homographies/passageway1-c2-homography.yml"),
-    'cam3': load_homography("homographies/passageway1-c3-homography.yml"),
+    'cam0': load_homography(f"homographies/{source_name}-c0-homography.yml"),
+    'cam1': load_homography(f"homographies/{source_name}-c1-homography.yml"),
+    'cam2': load_homography(f"homographies/{source_name}-c2-homography.yml"),
+    'cam3': load_homography(f"homographies/{source_name}-c3-homography.yml"),
 }
 
 MODEL_PATH = 'yolov10m.pt'
@@ -91,14 +113,12 @@ def color_based_on_id(tid):
     return color
 
 trails = defaultdict(lambda: deque(maxlen=15))
+TV_trails = defaultdict(lambda: deque(maxlen=15))
 last_seen = {}
 frame_idx = 0
 
-world_min_x = world_max_x = None
-world_min_y = world_max_y = None
-
 results = model.track(
-    source=SOURCES['cam0'], 
+    source=SOURCES[current_cam], 
     tracker='bytetrack.yaml', 
     device=DEVICE, 
     classes=[0], 
@@ -160,21 +180,10 @@ for r in results:
         axis_x = max(4, int((x2-x1) * 0.6))
         axis_y = max(2, int((y2-y1) * 0.08))
         center = (int(feet_px[0]), int(feet_px[1] - axis_y//2))
-        gx, gy = homography_transform(HOMOGRAPHIES['cam0'], feet_px)
+        gx, gy = homography_transform(HOMOGRAPHIES[current_cam], feet_px)
 
         # store ground-plane point for this frame
         current_ground_points.append((tid, gx, gy))
-
-        # update global world bounds
-        if world_min_x is None:
-            world_min_x = world_max_x = gx
-            world_min_y = world_max_y = gy
-        else:
-            world_min_x = min(world_min_x, gx)
-            world_max_x = max(world_max_x, gx)
-            world_min_y = min(world_min_y, gy)
-            world_max_y = max(world_max_y, gy)
-
 
         cv2.ellipse(
             frame,
@@ -218,40 +227,59 @@ for r in results:
             cv2.line(frame, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), color_based_on_id(tid), 2)
 
     # draw current ground-plane points on Plane
-    if world_min_x is not None and world_max_x is not None:
-        x1_box, y1_box = MAP_BOX_TOP_LEFT
-        x2_box, y2_box = MAP_BOX_BOTTOM_RIGHT
-        box_w = x2_box - x1_box
-        box_h = y2_box - y1_box
+    world_w = max(WORLD_MAX_X - WORLD_MIN_X, 1e-6)
+    world_h = max(WORLD_MAX_Y - WORLD_MIN_Y, 1e-6)
 
-        world_w = max(world_max_x - world_min_x, 1e-6)
-        world_h = max(world_max_y - world_min_y, 1e-6)
+    x1_box, y1_box = MAP_BOX_TOP_LEFT
+    x2_box, y2_box = MAP_BOX_BOTTOM_RIGHT
+    box_w = x2_box - x1_box
+    box_h = y2_box - y1_box
 
-        for tid, gx, gy in current_ground_points:
-            tx = (gx - world_min_x) / world_w
-            ty = (gy - world_min_y) / world_h
+    for tid, gx, gy in current_ground_points:
+        tx = (gx - WORLD_MIN_X) / world_w  # 0 = left, 1 = right
+        ty = (gy - WORLD_MIN_Y) / world_h  # 0 = bottom, 1 = top
 
-            u = int(x1_box + tx * box_w)
-            v = int(y2_box - ty * box_h)
+        # rotate the grid if needed
+        if TOPVIEW_ROTATION == 0:
+            tx_r, ty_r = tx, ty
+        elif TOPVIEW_ROTATION == 90:
+            tx_r, ty_r = ty, 1.0 - tx
+        elif TOPVIEW_ROTATION == 180:
+            tx_r, ty_r = 1.0 - tx, 1.0 - ty
+        elif TOPVIEW_ROTATION == 270:
+            tx_r, ty_r = 1.0 - ty, tx
+        else:
+            tx_r, ty_r = tx, ty
 
-            # draw dot for this ID
-            cv2.circle(topview, (u, v), 4, color_based_on_id(tid), -1)
+        if TOPVIEW_FLIP_X:
+            tx_r = 1.0 - tx_r
+        if TOPVIEW_FLIP_Y:
+            ty_r = 1.0 - ty_r
 
-            # draw the ID next to the dot
-            cv2.putText(
-                topview,
-                str(tid),
-                (u + 6, v - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.4,
-                color_based_on_id(tid),
-                1
-            )
+        u = int(x1_box + tx_r * box_w)
+        v = int(y2_box - ty_r * box_h)
+        TV_trails[tid].append((tx_r, ty_r))
 
-    cv2.imshow('Frame', frame)
-    cv2.imshow('TopView', topview)
-    if cv2.waitKey(1) == 27:
-        break
+        cv2.circle(topview, (u, v), 4, color_based_on_id(tid), -1)
+        cv2.putText(
+            topview,
+            str(tid),
+            (u + 6, v - 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            color_based_on_id(tid),
+            1
+        )
+        # draw trails on top-view
+        pts = TV_trails[tid]
+        for i in range(1, len(pts)):
+            p1 = pts[i - 1]
+            p2 = pts[i]
+            u1 = int(x1_box + p1[0] * box_w)
+            v1 = int(y2_box - p1[1] * box_h)
+            u2 = int(x1_box + p2[0] * box_w)
+            v2 = int(y2_box - p2[1] * box_h)
+            cv2.line(topview, (u1, v1), (u2, v2), color_based_on_id(tid), 2)
 
 
     cv2.imshow('Frame', frame)

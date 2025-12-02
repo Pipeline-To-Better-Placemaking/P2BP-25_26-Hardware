@@ -1,6 +1,8 @@
 *.avi
 *.log
 .venv
+/videos
+videos/
 tracks/
 /tracks
 *.csv
