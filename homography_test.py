@@ -32,32 +32,74 @@ def load_homography(path):
 
 STALE_FRAMES = 5  # frames to delete a dead trail
 
-# === World / top-view config for 6-people laboratory ===
-TV_ORIGIN_X = 0
-TV_ORIGIN_Y = 0
-TV_WIDTH    = 358   # top-view width in EPFL units
-TV_HEIGHT   = 360   # top-view height in EPFL units
+# === World / top-view configurations
+# EPFL lab defaults
+DEFAULT_TV_WIDTH  = 358.0
+DEFAULT_TV_HEIGHT = 360.0
+DEFAULT_GRID      = 56
+DEFAULT_CELL_SIZE = DEFAULT_TV_WIDTH / DEFAULT_GRID  # ≈ 6.39 world units per cell
 
-# Fixed world box in top-view coordinates
+def _read_float_or_default(prompt, default):
+    s = input(f"{prompt} [{default}]: ").strip()
+    if not s:
+        return float(default)
+    try:
+        v = float(s)
+        return v if v > 0 else float(default)
+    except ValueError:
+        print("Invalid input, using default.")
+        return float(default)
+
+# Room parameters
+TV_ORIGIN_X = 0.0
+TV_ORIGIN_Y = 0.0
+TV_WIDTH  = _read_float_or_default("Enter FLOOR width (world units)",  DEFAULT_TV_WIDTH)
+TV_HEIGHT = _read_float_or_default("Enter FLOOR height (world units)", DEFAULT_TV_HEIGHT)
+
+# Cell size
+CELL_SIZE = _read_float_or_default("Enter CELL size (world units per grid cell)", DEFAULT_CELL_SIZE)
+
+# Compute grid counts from cell size
+GRID_COLS = max(1, round(TV_WIDTH  / CELL_SIZE))
+GRID_ROWS = max(1, round(TV_HEIGHT / CELL_SIZE))
+
+# World bounds
 WORLD_MIN_X = TV_ORIGIN_X
-WORLD_MAX_X = TV_ORIGIN_X + TV_WIDTH     # 358
+WORLD_MAX_X = TV_ORIGIN_X + TV_WIDTH
 WORLD_MIN_Y = TV_ORIGIN_Y
-WORLD_MAX_Y = TV_ORIGIN_Y + TV_HEIGHT    # 360
+WORLD_MAX_Y = TV_ORIGIN_Y + TV_HEIGHT
 
-# White frame specs
+# White box size calculations
 MAP_WIDTH  = 400
 MAP_HEIGHT = int(MAP_WIDTH * (TV_HEIGHT / TV_WIDTH))
-
 MAP_BOX_TOP_LEFT = (50, 50)
 MAP_BOX_BOTTOM_RIGHT = (MAP_WIDTH - 50, MAP_HEIGHT - 50)
 
-GRID_COLS = 56
-GRID_ROWS = 56
+# Orientation
+def _read_int_choice(prompt, default, choices):
+    s = input(f"{prompt} {choices} [{default}]: ").strip()
+    if not s:
+        return default
+    try:
+        v = int(s)
+        return v if v in choices else default
+    except ValueError:
+        return default
 
-# Rotate and/or flip the top-view
-TOPVIEW_ROTATION = 90
-TOPVIEW_FLIP_X   = True
-TOPVIEW_FLIP_Y   = False
+TOPVIEW_ROTATION = _read_int_choice("Enter rotation", 90, [0, 90, 180, 270])
+
+def _read_bool(prompt, default):
+    s = input(f"{prompt} (y/n) [{'y' if default else 'n'}]: ").strip().lower()
+    if not s:
+        return default
+    return s.startswith('y')
+
+TOPVIEW_FLIP_X = _read_bool("Flip X", True)
+TOPVIEW_FLIP_Y = _read_bool("Flip Y", False)
+
+print(f"[Config] floor={TV_WIDTH}x{TV_HEIGHT} units | cell≈{CELL_SIZE:.2f} | grid={GRID_COLS}x{GRID_ROWS}")
+print(f"[Config] rotation={TOPVIEW_ROTATION} flipX={TOPVIEW_FLIP_X} flipY={TOPVIEW_FLIP_Y}")
+
 
 current_cam = 'cam0'
 SOURCES = {
