@@ -1,0 +1,11 @@
+tracker_type: bytetrack  # we can do botsort or strongsort or something else 
+
+# ByteTrack parameters
+track_high_thresh: 0.6    # High confidence threshold
+track_low_thresh: 0.2     # Low confidence threshold  
+new_track_thresh: 0.7     # Threshold for new track
+track_buffer: 60          # Frames to keep lost tracks (increase for occlusions)
+match_thresh: 0.9         # Matching threshold (higher = stricter matching)
+
+# For handling occlusions
+lost_track_buffer: 90     # Keep tracks longer when occluded
