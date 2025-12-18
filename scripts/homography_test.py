@@ -126,7 +126,7 @@ H_INV = {
 }
 
 
-MODEL_PATH = 'yolov10m.pt'
+MODEL_PATH = 'models/yolov10m.pt'
 DEVICE = os.environ.get('YOLO_DEVICE', 'auto')
 if DEVICE == 'auto':
     DEVICE = 'cuda' if _CUDA_AVAILABLE else 'cpu'
