@@ -53,7 +53,7 @@ def scan_arp(arp_scan_bin: str, interface: str) -> List[Tuple[str, str]]:
     """
     proc = run_cmd(
         [arp_scan_bin, f"--interface={interface}", "--localnet"],
-        timeout=25.0,
+        timeout=300.0,
     )
 
     if proc.returncode != 0:
@@ -196,7 +196,7 @@ def auto_enroll_registry(
     start = time.time()
 
     while True:
-        seen = scan_arp_with_retry(arp_scan_bin, interface, timeout_sec=min(20.0, timeout_sec), sleep_sec=sleep_sec)
+        seen = scan_arp_with_retry(arp_scan_bin, interface, timeout_sec=timeout_sec, sleep_sec=sleep_sec)
 
 
         working_macs: List[str] = []
@@ -276,9 +276,9 @@ def main() -> int:
     ap.add_argument("--rtsp-path",      default="/Streaming/Channels/101")
     ap.add_argument("--registry",       default="camera_registry.json")
     ap.add_argument("--runtime",        default="cameras_runtime.json")
-    ap.add_argument("--timeout",        type=float, default=45.0, help="Overall timeout for initial enrollment.")
+    ap.add_argument("--timeout",        type=float, default=300.0, help="Overall timeout for initial enrollment.")
     ap.add_argument("--sleep",          type=float, default=2.0)
-    ap.add_argument("--scan-timeout",   type=float, default=20.0, help="Timeout for ARP scan phase when building runtime.")
+    ap.add_argument("--scan-timeout",   type=float, default=300.0, help="Timeout for ARP scan phase when building runtime.")
     args = ap.parse_args()
 
     require_root()

@@ -1,0 +1,17 @@
+[Unit]
+Description=Camera Scanner (discover cameras and write cameras_runtime.json)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/p2bp/camera/scripts/camera_scanner.py
+RemainAfterExit=yes
+
+# Safety / hygiene
+TimeoutStartSec=600
+WorkingDirectory=/opt/p2bp/camera
+User=root
+
+[Install]
+WantedBy=multi-user.target
