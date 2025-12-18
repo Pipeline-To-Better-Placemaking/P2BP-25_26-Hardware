@@ -29,7 +29,6 @@ echo "Installing P2BP Camera stack..."
 echo "Installing Python dependencies..."
 pip3 install --upgrade pip
 pip3 install --break-system-packages -r requirements.txt
-pip3 install --break-system-packages .
 
 # Create canonical directory and structure
 echo "Creating application directories..."
