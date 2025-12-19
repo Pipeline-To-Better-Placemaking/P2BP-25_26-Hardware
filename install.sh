@@ -25,6 +25,34 @@ fi
 
 echo "Installing P2BP Camera stack..."
 
+# Configure environment variables
+echo "Configuring API credentials..."
+
+read -s -p "Enter API Key: " API_KEY
+echo
+read -p "Enter API Endpoint URL: " API_ENDPOINT
+
+if [ -z "$API_KEY" ] || [ -z "$API_ENDPOINT" ]; then
+  echo "Error: API Key and Endpoint must not be empty"
+  exit 1
+fi
+
+# Create config directory
+sudo mkdir -p "$APP_ROOT/config"
+
+# Write environment file
+ENV_FILE="$APP_ROOT/config/agent.env"
+sudo tee "$ENV_FILE" > /dev/null <<EOF
+API_KEY=$API_KEY
+ENDPOINT=$API_ENDPOINT
+EOF
+
+# Secure permissions
+sudo chown root:root "$ENV_FILE"
+sudo chmod 600 "$ENV_FILE"
+
+echo "API credentials saved to $ENV_FILE"
+
 # Python packages
 echo "Installing Python dependencies..."
 pip3 install --upgrade pip
