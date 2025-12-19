@@ -253,6 +253,7 @@ def main():
             if old_config != new_config:
                 write_config_atomic(CONFIG_PATH, new_config)
                 logging.info("Config updated")
+                logging.info(f"New config:\n {new_config}")
 
         except Exception as e:
             logging.error(f"Heartbeat error: {e}")
