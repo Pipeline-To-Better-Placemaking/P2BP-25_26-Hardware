@@ -97,6 +97,13 @@ def get_service_state(name):
     except Exception as e:
         logging.error(f"Failed to get state for {name}: {e}")
         return {"Active": "unknown", "Sub": "unknown"}
+    
+def normalize_service_name(service_file):
+    # "heartbeat.service" → "heartbeat"
+    if service_file.endswith(".service"):
+        return service_file[:-8]
+    return service_file
+
 
 def discover_services(services_dir="/opt/p2bp/camera/services"):
     services = []
@@ -115,10 +122,14 @@ def get_all_service_states(services_dir="/opt/p2bp/camera/services"):
 
     service_files = discover_services(services_dir)
 
-    for service in service_files:
-        service_states[service] = get_service_state(service)
+    for service_file in service_files:
+        unit_name = service_file
+        display_name = normalize_service_name(service_file)
+
+        service_states[display_name] = get_service_state(unit_name)
 
     return service_states
+
 
 def get_gpu_and_memory_stats():
     try:
@@ -136,21 +147,21 @@ def get_gpu_and_memory_stats():
 
         stats = {}
 
-        # GPU
-        gpu_match = TEGRastats_RE_GPU.search(output)
-        if gpu_match:
-            stats["Gpu"] = {
-                "UtilizationPct": int(gpu_match.group(1)),
-                "FrequencyMhz": int(gpu_match.group(2)),
-            }
+        for line in output.splitlines():
+            gpu_match = TEGRastats_RE_GPU.search(line)
+            if gpu_match:
+                stats["Gpu"] = {
+                    "UtilizationPct": int(gpu_match.group(1)),
+                    "FrequencyMhz": int(gpu_match.group(2)),
+                }
 
-        # Memory
-        ram_match = TEGRastats_RE_RAM.search(output)
-        if ram_match:
-            stats["Memory"] = {
-                "UsedMb": int(ram_match.group(1)),
-                "TotalMb": int(ram_match.group(2)),
-            }
+            ram_match = TEGRastats_RE_RAM.search(line)
+            if ram_match:
+                stats["Memory"] = {
+                    "UsedMb": int(ram_match.group(1)),
+                    "TotalMb": int(ram_match.group(2)),
+                }
+
 
         return stats
 
