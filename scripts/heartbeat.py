@@ -180,6 +180,7 @@ def get_system_stats():
 
 def create_heartbeat_payload(): # create a payload for the heartbeat request
     return {
+        "Id": "0",
         "DeviceId": os.uname().nodename,
         "Timestamp": int(time.time()),
         "Services": get_all_service_states(),
