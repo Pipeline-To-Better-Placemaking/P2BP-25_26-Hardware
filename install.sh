@@ -25,23 +25,48 @@ fi
 
 echo "Installing P2BP Camera stack..."
 
+# Create canonical directory and structure
+echo "Creating application directories..."
+sudo mkdir -p $APP_ROOT/scripts
+sudo mkdir -p $APP_ROOT/config
+sudo mkdir -p $APP_ROOT/services
+
 # Configure environment variables
 echo "Configuring API credentials..."
 
-read -s -p "Enter API Key: " API_KEY
-echo
-read -p "Enter API Endpoint URL: " API_ENDPOINT
+ENV_FILE="$APP_ROOT/config/agent.env"
+EXISTING_API_KEY=""
+EXISTING_ENDPOINT=""
+
+# Check if env file already exists and load values
+if [ -f "$ENV_FILE" ]; then
+  echo "Existing API credentials found."
+  EXISTING_API_KEY=$(grep "^API_KEY=" "$ENV_FILE" | cut -d'=' -f2)
+  EXISTING_ENDPOINT=$(grep "^ENDPOINT=" "$ENV_FILE" | cut -d'=' -f2)
+  
+  read -p "Do you want to update the API credentials? (y/n): " UPDATE_CREDS
+  
+  if [[ ! "$UPDATE_CREDS" =~ ^[Yy]$ ]]; then
+    echo "Keeping existing API credentials"
+    API_KEY="$EXISTING_API_KEY"
+    API_ENDPOINT="$EXISTING_ENDPOINT"
+  else
+    read -s -p "Enter new API Key: " API_KEY
+    echo
+    read -p "Enter new API Endpoint URL: " API_ENDPOINT
+  fi
+else
+  read -s -p "Enter API Key: " API_KEY
+  echo
+  read -p "Enter API Endpoint URL: " API_ENDPOINT
+fi
 
 if [ -z "$API_KEY" ] || [ -z "$API_ENDPOINT" ]; then
   echo "Error: API Key and Endpoint must not be empty"
   exit 1
 fi
 
-# Create config directory
-sudo mkdir -p "$APP_ROOT/config"
-
 # Write environment file
-ENV_FILE="$APP_ROOT/config/agent.env"
 sudo tee "$ENV_FILE" > /dev/null <<EOF
 API_KEY=$API_KEY
 ENDPOINT=$API_ENDPOINT
@@ -58,11 +83,6 @@ echo "Installing Python dependencies..."
 pip3 install --upgrade pip
 pip3 install --break-system-packages -r requirements.txt
 
-# Create canonical directory and structure
-echo "Creating application directories..."
-sudo mkdir -p $APP_ROOT/scripts
-sudo mkdir -p $APP_ROOT/config
-
 # Install scripts
 echo "Installing scripts..."
 sudo rsync -a --delete scripts/ $APP_ROOT/scripts/
@@ -74,6 +94,7 @@ sudo chmod -R 755 /opt/p2bp
 # Install systemd units
 echo "Installing systemd services..."
 sudo cp services/*.service /etc/systemd/system/
+sudo cp services/*.service /opt/p2bp/camera/services/
 
 sudo systemctl daemon-reload
 
