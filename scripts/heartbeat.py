@@ -47,7 +47,7 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
         "Content-Type": "application/json",
     }
 
-    r = requests.post(f"{endpoint}/heartbeat", headers=headers, json=payload, timeout=5)
+    r = requests.post(f"{endpoint}/Heartbeat", headers=headers, json=payload, timeout=5)
     r.raise_for_status()
 
     try:
