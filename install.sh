@@ -80,8 +80,8 @@ echo "API credentials saved to $ENV_FILE"
 
 # Python packages
 echo "Installing Python dependencies..."
-pip3 install --upgrade pip
-pip3 install --break-system-packages -r requirements.txt
+sudo pip3 install --upgrade pip
+sudo pip3 install -r requirements.txt
 
 # Install scripts
 echo "Installing scripts..."

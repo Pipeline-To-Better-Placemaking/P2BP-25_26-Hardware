@@ -249,11 +249,11 @@ def main():
                 # as long as new_config is not None, send systemd signals
                 # this makes sure signals are sent even if the config file is not updated
                 send_systemd_signals(new_config)
+                logging.info(f"New config:\n {new_config}")
 
             if old_config != new_config:
                 write_config_atomic(CONFIG_PATH, new_config)
                 logging.info("Config updated")
-                logging.info(f"New config:\n {new_config}")
 
         except Exception as e:
             logging.error(f"Heartbeat error: {e}")
