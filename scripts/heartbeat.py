@@ -240,6 +240,7 @@ def main():
     while True:
         try:
             payload = create_heartbeat_payload()
+            logging.info(f"Sending heartbeat with payload:\n {payload}")
 
             new_config = send_heartbeat(api_key, endpoint, payload)
             old_config = load_local_config()
