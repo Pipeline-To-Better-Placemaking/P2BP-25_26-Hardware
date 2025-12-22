@@ -58,7 +58,6 @@ def create_heartbeat_payload(): # create a payload for the heartbeat request
     payload = heartbeat_payload.HeartbeatPayload.build(
         project_id="0",
         device_id=os.uname().nodename,
-        timestamp=int(time.time()),
         services=services,
         system=system,
     ).to_dict()
