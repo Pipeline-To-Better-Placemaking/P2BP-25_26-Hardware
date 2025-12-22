@@ -1,10 +1,6 @@
-# This file will constantly request the config file from the server (GET requests)
-# This happens in a set time interval (not decided yet)
-# It will replace the local config file if there are any changes
-# If there are any changes, it will send the necessary systemd signals to start/stop services
-# The heartbeat system will also monitor the status of the Jetson and report any issues (POST requests)
-# The health report can actually be combined with the config file request to reduce the number of requests
-
+# This script puts together a health report and sends it to the server
+# It expects a new config file in return and will update the local config file if there are any changes
+# It will also send systemd signals to start/stop services based on the new config file
 
 # first we load the .env file with the API key and endpoint
 import os
@@ -12,18 +8,17 @@ import time
 import json
 import requests
 import dotenv
-import subprocess
 import logging
-import re
+import scripts.json_models.heartbeat_payload as heartbeat_payload
+import scripts.systemd_services as systemd_services
+import scripts.system_stats as system_stats
+import scripts.config_io as config_io
+import scripts.signals as signals
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-
-TEGRastats_RE_GPU_UTIL = re.compile(r"GR3D_FREQ\s+(\d+)%")
-TEGRastats_RE_GPU_FREQ = re.compile(r"GR3D_FREQ\s+\d+%@(\d+)")
-TEGRastats_RE_RAM = re.compile(r"RAM\s+(\d+)/(\d+)MB")
 
 CONFIG_PATH = "/opt/p2bp/camera/config/config.json"
 SIGNAL_DIR = "/run/p2bp"
@@ -56,183 +51,19 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
     except ValueError:
         raise RuntimeError("Backend returned invalid JSON")
 
-def load_local_config(): # load the local copy of the config file
-    if not os.path.exists(CONFIG_PATH):
-        return None
-    try:
-        with open(CONFIG_PATH, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return None
-
-def write_config_atomic(path, data): # replace the local copy of the config file
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def get_service_state(name):
-    try:
-        result = subprocess.run(
-            ["systemctl", "show", name, "-p", "ActiveState", "-p", "SubState"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        state = {
-            "Active": "unknown",
-            "Sub": "unknown"
-        }
-
-        for line in result.stdout.splitlines():
-            if line.startswith("ActiveState="):
-                state["Active"] = line.split("=", 1)[1]
-            elif line.startswith("SubState="):
-                state["Sub"] = line.split("=", 1)[1]
-
-        return state
-    except Exception as e:
-        logging.error(f"Failed to get state for {name}: {e}")
-        return {"Active": "unknown", "Sub": "unknown"}
-    
-def normalize_service_name(service_file):
-    # "heartbeat.service" → "heartbeat"
-    if service_file.endswith(".service"):
-        return service_file[:-8]
-    return service_file
-
-def discover_services(services_dir="/opt/p2bp/camera/services"):
-    services = []
-
-    if not os.path.isdir(services_dir):
-        return services
-
-    for fname in os.listdir(services_dir):
-        if fname.endswith(".service"):
-            services.append(fname)
-
-    return sorted(services)
-
-def get_all_service_states(services_dir="/opt/p2bp/camera/services"):
-    service_states = {}
-
-    service_files = discover_services(services_dir)
-
-    for service_file in service_files:
-        unit_name = service_file
-        display_name = normalize_service_name(service_file)
-
-        service_states[display_name] = get_service_state(unit_name)
-
-    return service_states
-
-def get_gpu_and_memory_stats():
-    stats = {
-        "Gpu": {
-            "UtilizationPct": -1,
-            "FrequencyMhz": -1,
-        },
-        "Memory": {
-            "UsedMb": -1,
-            "TotalMb": -1,
-        },
-    }
-
-    try:
-        proc = subprocess.run(
-            ["tegrastats", "--interval", "1000", "--count", "1"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-
-        output = proc.stdout.strip()
-        if not output:
-            return stats
-
-        # GPU utilization (always present if GR3D_FREQ exists)
-        gpu_util = TEGRastats_RE_GPU_UTIL.search(output)
-        if gpu_util:
-            stats["Gpu"]["UtilizationPct"] = int(gpu_util.group(1))
-
-        # GPU frequency (only when GPU is active)
-        gpu_freq = TEGRastats_RE_GPU_FREQ.search(output)
-        if gpu_freq:
-            stats["Gpu"]["FrequencyMhz"] = int(gpu_freq.group(1))
-
-        # Memory
-        ram = TEGRastats_RE_RAM.search(output)
-        if ram:
-            stats["Memory"]["UsedMb"] = int(ram.group(1))
-            stats["Memory"]["TotalMb"] = int(ram.group(2))
-
-        return stats
-
-    except FileNotFoundError:
-        logging.error("tegrastats not found (not a Jetson?)")
-        return stats
-
-    except Exception as e:
-        logging.error(f"Failed to read GPU/memory stats: {e}")
-        return stats
-    
-def get_system_stats():
-    stats = {
-        "Gpu": {
-            "UtilizationPct": -1,
-            "FrequencyMhz": -1,
-        },
-        "Memory": {
-            "UsedMb": -1,
-            "TotalMb": -1,
-        },
-    }
-
-    gpu_mem = get_gpu_and_memory_stats()
-
-    # merge results into one dict
-    for key in gpu_mem:
-        stats[key].update(gpu_mem[key])
-
-    return stats
-
 def create_heartbeat_payload(): # create a payload for the heartbeat request
-    return {
-        "Id": "0",
-        "ProjectId": "0",
-        "DeviceId": os.uname().nodename,
-        "Timestamp": int(time.time()),
-        "Services": get_all_service_states(),
-        "System": get_system_stats(),
-    }
+    services = systemd_services.get_all_service_states()
+    system = system_stats.get_system_stats()
 
-def ensure_signal_dir_exists():
-    os.makedirs(SIGNAL_DIR, exist_ok=True)
+    payload = heartbeat_payload.HeartbeatPayload.build(
+        project_id="0",
+        device_id=os.uname().nodename,
+        timestamp=int(time.time()),
+        services=services,
+        system=system,
+    ).to_dict()
 
-def set_signal(name, enabled):
-    path = os.path.join(SIGNAL_DIR, name)
-
-    if enabled:
-        if not os.path.exists(path):
-            open(path, "w").close()
-            logging.info(f"Signal enabled: {name}")
-    else:
-        if os.path.exists(path):
-            os.remove(path)
-            logging.info(f"Signal disabled: {name}")
-
-def send_systemd_signals(config):
-    ensure_signal_dir_exists()
-
-    # Tracking service
-    tracking_cfg = config.get("tracking", {})
-    tracking_enabled = tracking_cfg.get("enabled", False)
-
-    set_signal("tracking.enabled", tracking_enabled)
+    return payload
 
 def main():
     api_key, endpoint = load_env()
@@ -243,16 +74,16 @@ def main():
             logging.info(f"Sending heartbeat with payload:\n {payload}")
 
             new_config = send_heartbeat(api_key, endpoint, payload)
-            old_config = load_local_config()
+            old_config = config_io.load_local_config(CONFIG_PATH)
 
             if new_config:
                 # as long as new_config is not None, send systemd signals
                 # this makes sure signals are sent even if the config file is not updated
-                send_systemd_signals(new_config)
+                signals.send_systemd_signals(SIGNAL_DIR, new_config)
                 logging.info(f"New config:\n {new_config}")
 
             if old_config != new_config:
-                write_config_atomic(CONFIG_PATH, new_config)
+                config_io.write_config_atomic(CONFIG_PATH, new_config)
                 logging.info("Config updated")
 
         except Exception as e:
