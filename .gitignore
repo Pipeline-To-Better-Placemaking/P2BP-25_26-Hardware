@@ -7,3 +7,6 @@ tracks/
 *.pt
 /videos
 videos/
+__pycache__/
+*.py[cod]
+*$py.class

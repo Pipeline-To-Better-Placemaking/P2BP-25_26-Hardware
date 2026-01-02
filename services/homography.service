@@ -1,0 +1,29 @@
+[Unit]
+Description=P2BP Homography Agent
+After=network-online.target camera-scanner.service
+Wants=network-online.target
+Requires=camera-scanner.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/p2bp/camera
+ExecStart=/usr/bin/python3 -m scripts.homography
+
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+ReadWritePaths=/opt/p2bp/camera /run/p2bp
+
+RuntimeDirectory=p2bp
+RuntimeDirectoryMode=0755
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

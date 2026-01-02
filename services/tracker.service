@@ -1,23 +1,28 @@
 [Unit]
-Description=P2BP Heartbeat Agent
+Description=P2BP Tracking Agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -m scripts.heartbeat
 WorkingDirectory=/opt/p2bp/camera
-Restart=always
-RestartSec=5
+ExecStart=/usr/bin/python3 -m scripts.tracker
 
-# Ensure runtime signal dir exists
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/p2bp/camera
+
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755
 
-# Environment
 EnvironmentFile=/opt/p2bp/camera/config/agent.env
 
-# Logging
 StandardOutput=journal
 StandardError=journal
 
