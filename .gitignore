@@ -7,3 +7,5 @@ tracks/
 *.pt
 /videos
 videos/
+/scripts/__pycache__/
+__pycache__/
