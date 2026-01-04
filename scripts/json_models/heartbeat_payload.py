@@ -1,20 +1,18 @@
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Optional
+from typing import Dict, List
 import time
-
-# #  return {
-#         "Id": "0",
-#         "ProjectId": "0",
-#         "DeviceId": os.uname().nodename,
-#         "Timestamp": int(time.time()),
-#         "Services": get_all_service_states(),
-#         "System": get_system_stats(),
-#     }
 
 @dataclass
 class ServiceState:
     Active: str = "unknown"
     Sub: str = "unknown"
+
+@dataclass
+class CameraState:
+    Mac: str = ""
+    Ip: str = ""
+    Resolution: List[int] = field(default_factory=lambda: [0, 0])
+    Online: bool = False
 
 @dataclass
 class GpuStats:
@@ -41,6 +39,7 @@ class HeartbeatPayload:
     DeviceId: str
     Timestamp: int
     Services: Dict[str, ServiceState]
+    Cameras: Dict[str, CameraState]
     System: SystemStats
 
     def to_dict(self) -> dict:
@@ -50,8 +49,9 @@ class HeartbeatPayload:
     def build(
         project_id: str, 
         device_id: str, 
-        services: Dict[str, ServiceState], 
-        system: SystemStats
+        services: Dict[str, ServiceState],
+        cameras: Dict[str, CameraState],
+        system: SystemStats,
     ) -> "HeartbeatPayload":
         return HeartbeatPayload(
             Id="0",
@@ -59,5 +59,6 @@ class HeartbeatPayload:
             DeviceId=device_id,
             Timestamp=int(time.time()),
             Services=services,
+            Cameras=cameras,
             System=system,
         )
