@@ -1,0 +1,34 @@
+{
+  "Tracking": {
+    "Enabled": true,
+    "Model": "Yolov10n",
+    "ConfidenceThreshold": 0.5,
+    "MaxFps": 30
+  },
+  "Camera": {
+    "Resolution": "3072x1728",
+    "Framerate": 30,
+    "Codec": "h.265"
+  },
+  "TrackingCameras": {
+    "d0:3b:f4:02:44:84": true,
+    "d0:3b:f4:02:44:85": false,
+    "d0:3b:f4:02:44:87": true,
+    "d0:3b:f4:02:44:e2": true
+  },
+  "CharucoBoard": {
+    "ReferencePoints": {
+      "P1": { "x": 123, "y": 456 },
+      "P2": { "x": 678, "y": 910 }
+    },
+    "Board": {
+      "SquaresX": 5,
+      "SquaresY": 7,
+      "SquareSize": 40,
+      "ArucoSize": 20
+    },
+    "BeginScanning": true
+  },
+  "HeartbeatInterval": 10,
+  "Version": "117"
+}
