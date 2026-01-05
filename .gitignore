@@ -6,3 +6,8 @@ tracks/
 *.csv
 *.pt
 .env
+/videos
+videos/
+__pycache__/
+*.py[cod]
+*$py.class
