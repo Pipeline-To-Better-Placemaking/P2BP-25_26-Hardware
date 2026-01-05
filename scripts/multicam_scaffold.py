@@ -46,7 +46,7 @@ HOMOGRAPHIES = {
     'cam3': "4p-c3-homography.yml",
 }
 
-MODEL_PATH = 'yolov10m.pt'
+MODEL_PATH = 'models/yolov10m.pt'
 CONF_THRESH = 0.35
 # Device selection: 'auto' (default), 'cuda', or 'cpu'. Env override: YOLO_DEVICE
 DEVICE = os.environ.get('YOLO_DEVICE', 'auto')
