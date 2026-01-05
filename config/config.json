@@ -27,7 +27,23 @@
       "SquareSize": 40,
       "ArucoSize": 20
     },
-    "BeginScanning": true
+    "BeginScanning": true,
+    "Status": "failed",
+    "LastRunUnix": 1767585714.2194586,
+    "Results": {
+      "d0:3b:f4:02:44:84": {
+        "ok": false,
+        "error": "failed to open rtsp"
+      },
+      "d0:3b:f4:02:44:87": {
+        "ok": false,
+        "error": "board not detected / homography failed"
+      },
+      "d0:3b:f4:02:44:e2": {
+        "ok": false,
+        "error": "board not detected / homography failed"
+      }
+    }
   },
   "HeartbeatInterval": 10,
   "Version": "117"
