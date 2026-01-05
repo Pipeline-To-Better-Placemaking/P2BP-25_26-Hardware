@@ -5,3 +5,4 @@ tracks/
 /tracks
 *.csv
 *.pt
+.env
