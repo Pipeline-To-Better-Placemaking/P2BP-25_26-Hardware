@@ -11,7 +11,7 @@ config.json:
     CharucoBoard:
         BeginScanning: bool
         ReferencePoints: { P1: {x,y}, P2: {x,y} }  (world coords)
-        Board: { SquaresX, SquaresY, SquareSize, ArucoSize, (optional) Dictionary, (optional) P1CornerId, (optional) P2CornerId }
+        Board: { SquaresX, SquaresY, SquareSize, ArucoSize, Dictionary, (optional) P1CornerId, (optional) P2CornerId }
 
 cameras_runtime.json: { <camera_key>: { rtsp, ip, mac, resolution:[w,h] } }
 
@@ -114,24 +114,24 @@ def dict_constant_from_name(name: str):
 
 @dataclass
 class BoardSpec:
-    dictionary_name: str = "DICT_4X4_50"
-    squares_x: int = 5
-    squares_y: int = 7
-    square_length: float = 40.0 #world units (in mm?)
-    marker_length: float = 20.0
+    dictionary_name: str
+    squares_x: int
+    squares_y: int
+    square_length: float #world units (in mm?)
+    marker_length: float
     
     #backup being right side top and bottom inner corners
     p1_corner_id: Optional[int] = None
     p2_corner_id: Optional[int] = None
 
 def board_from_new_config(charuco_cfg: Dict) -> BoardSpec:
-    b = (charuco_cfg or {}).get("Board", {}) if isinstance(charuco_cfg, dict) else {}
+    b = charuco_cfg["Board"]
     return BoardSpec(
-        dictionary_name=b.get("Dictionary", "DICT_4X4_50"),
-        squares_x=int(b.get("SquaresX", 5)),
-        squares_y=int(b.get("SquaresY", 7)),
-        square_length=float(b.get("SquareSize", 40.0)),
-        marker_length=float(b.get("ArucoSize", 20.0)),
+        dictionary_name=b["Dictionary"],
+        squares_x=int(b["SquaresX"]),
+        squares_y=int(b["SquaresY"]),
+        square_length=float(b["SquareSize"]),
+        marker_length=float(b["ArucoSize"]),
         p1_corner_id=(int(b["P1CornerId"]) if b.get("P1CornerId") is not None else None),
         p2_corner_id=(int(b["P2CornerId"]) if b.get("P2CornerId") is not None else None),
     )
@@ -353,29 +353,26 @@ def run_once(base_dir: Path) -> None:
     config = load_json(cfg_path)
     cams = load_json(cams_path)
 
-    cbcfg = config.get("CharucoBoard", {})
-    if not bool(cbcfg.get("BeginScanning", False)):
+    cbcfg = config["CharucoBoard"]
+    if not bool(cbcfg["BeginScanning"]):
         print("CharucoBoard.BeginScanning is false; nothing to do.")
         return
 
-    ref = cbcfg.get("ReferencePoints", {})
-    p1_world = parse_xy(ref.get("P1"))
-    p2_world = parse_xy(ref.get("P2"))
+    ref = cbcfg["ReferencePoints"]
+    p1_world = parse_xy(ref["P1"])
+    p2_world = parse_xy(ref["P2"])
 
     board_spec = board_from_new_config(cbcfg)
 
     #tuning (beyond config)
-    ransac_thresh_px = float(cbcfg.get("RansacReprojThresholdPx", 4.0))
-    min_corners = int(cbcfg.get("MinCorners", 12))
-    frames_to_try = int(cbcfg.get("FramesToAverage", 15))
-    max_seconds_per_cam = float(cbcfg.get("MaxSecondsPerCam", 3.0))
+    ransac_thresh_px = float(cbcfg["RansacReprojThresholdPx"])
+    min_corners = int(cbcfg["MinCorners"])
+    frames_to_try = int(cbcfg["FramesToAverage"])
+    max_seconds_per_cam = float(cbcfg["MaxSecondsPerCam"])
 
     #output naming from config.json
-    res_str = config.get("Camera", {}).get("Resolution", "3072x1728")
-    try:
-        res_w, res_h = parse_resolution_str(res_str)
-    except Exception:
-        res_w, res_h = 3072, 1728
+    res_str = config["Camera"]["Resolution"]
+    res_w, res_h = parse_resolution_str(res_str)
 
     board, aruco_dict = build_charuco_board(board_spec)
 
@@ -388,7 +385,6 @@ def run_once(base_dir: Path) -> None:
     print(f"Running scan for {len(cam_keys)} camera(s). P1_id={p1_id}, P2_id={p2_id}")
 
     #CharucoBoard status
-    config.setdefault("CharucoBoard", {})
     config["CharucoBoard"]["Status"] = "running"
     config["CharucoBoard"]["LastRunUnix"] = time.time()
     config["CharucoBoard"]["Results"] = {}
@@ -401,7 +397,7 @@ def run_once(base_dir: Path) -> None:
     any_success = False
 
     for cam_key in cam_keys:
-        cam_info = cams.get(cam_key, {})
+        cam_info = cams[cam_key]
         rtsp = cam_info.get("rtsp")
         if not rtsp:
             config["CharucoBoard"]["Results"][cam_key] = {"ok": False, "error": "missing rtsp"}
@@ -485,7 +481,6 @@ def run_once(base_dir: Path) -> None:
 
     #finalize
     config = load_json(cfg_path)
-    config.setdefault("CharucoBoard", {})
     config["CharucoBoard"]["BeginScanning"] = False
     config["CharucoBoard"]["Status"] = "done" if any_success else "failed"
     config["CharucoBoard"]["LastRunUnix"] = time.time()
@@ -501,8 +496,8 @@ def run_service(base_dir: Path, poll_seconds: float) -> None:
         try:
             if cfg_path.exists():
                 config = load_json(cfg_path)
-                cbcfg = config.get("CharucoBoard", {})
-                if bool(cbcfg.get("BeginScanning", False)):
+                cbcfg = config["CharucoBoard"]
+                if bool(cbcfg["BeginScanning"]):
                     run_once(base_dir=base_dir)
         except KeyboardInterrupt:
             print("Exiting.")
@@ -511,7 +506,6 @@ def run_service(base_dir: Path, poll_seconds: float) -> None:
             #crash control
             try:
                 config = load_json(cfg_path) if cfg_path.exists() else {}
-                config.setdefault("CharucoBoard", {})
                 config["CharucoBoard"]["Status"] = "failed"
                 config["CharucoBoard"]["Error"] = str(e)
                 config["CharucoBoard"]["LastRunUnix"] = time.time()
