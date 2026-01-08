@@ -39,21 +39,29 @@ EXISTING_API_KEY=""
 EXISTING_ENDPOINT=""
 
 # Check if env file already exists and load values
+
 if [ -f "$ENV_FILE" ]; then
   echo "Existing API credentials found."
   EXISTING_API_KEY=$(grep "^API_KEY=" "$ENV_FILE" | cut -d'=' -f2)
   EXISTING_ENDPOINT=$(grep "^ENDPOINT=" "$ENV_FILE" | cut -d'=' -f2)
-  
-  read -p "Do you want to update the API credentials? (y/n): " UPDATE_CREDS
-  
-  if [[ ! "$UPDATE_CREDS" =~ ^[Yy]$ ]]; then
-    echo "Keeping existing API credentials"
-    API_KEY="$EXISTING_API_KEY"
-    API_ENDPOINT="$EXISTING_ENDPOINT"
-  else
+
+  # Prompt to update API Key
+  read -p "Do you want to update the API Key? (y/n): " UPDATE_API_KEY
+  if [[ "$UPDATE_API_KEY" =~ ^[Yy]$ ]]; then
     read -s -p "Enter new API Key: " API_KEY
     echo
+  else
+    echo "Keeping existing API Key"
+    API_KEY="$EXISTING_API_KEY"
+  fi
+
+  # Prompt to update API Endpoint
+  read -p "Do you want to update the API Endpoint? (y/n): " UPDATE_API_ENDPOINT
+  if [[ "$UPDATE_API_ENDPOINT" =~ ^[Yy]$ ]]; then
     read -p "Enter new API Endpoint URL: " API_ENDPOINT
+  else
+    echo "Keeping existing API Endpoint"
+    API_ENDPOINT="$EXISTING_ENDPOINT"
   fi
 else
   read -s -p "Enter API Key: " API_KEY

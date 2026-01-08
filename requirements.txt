@@ -1,6 +1,6 @@
 --find-links https://download.pytorch.org/whl/nightly/cu121
 ultralytics==8.0.74
-opencv-python==4.7.0.72
+opencv-contrib-python
 numpy>=1.25.0
 scipy>=1.10.1
 PyYAML>=6.0
