@@ -12,28 +12,45 @@
   },
   "TrackingCameras": {
     "d0:3b:f4:02:44:84": true,
-    "d0:3b:f4:02:44:85": false,
+    "d0:3b:f4:02:44:85": true,
     "d0:3b:f4:02:44:87": true,
     "d0:3b:f4:02:44:e2": true
   },
   "CharucoBoard": {
     "ReferencePoints": {
-      "P1": { "x": 123, "y": 456 },
-      "P2": { "x": 678, "y": 910 }
+      "P1": {
+        "x": 2712,
+        "y": 2453
+      },
+      "P2": {
+        "x": 2857,
+        "y": 2742
+      }
     },
     "Board": {
       "SquaresX": 5,
       "SquaresY": 7,
-      "SquareSize": 40,
-      "ArucoSize": 20
+      "SquareSize": 80,
+      "ArucoSize": 40,
+      "Dictionary": "DICT_6X6_250"
     },
     "BeginScanning": true,
     "Status": "failed",
-    "LastRunUnix": 1767585714.2194586,
+    "LastRunUnix": 1767897219.1707919,
+
+    "RansacReprojThresholdPx": 4.0,
+    "MinCorners": 12,
+    "FramesToAverage": 15,
+    "MaxSecondsPerCam": 3.0,
+
     "Results": {
       "d0:3b:f4:02:44:84": {
         "ok": false,
-        "error": "failed to open rtsp"
+        "error": "board not detected / homography failed"
+      },
+      "d0:3b:f4:02:44:85": {
+        "ok": false,
+        "error": "board not detected / homography failed"
       },
       "d0:3b:f4:02:44:87": {
         "ok": false,
