@@ -1,0 +1,61 @@
+{
+  "Tracking": {
+    "Enabled": true,
+    "Model": "Yolov10n",
+    "ConfidenceThreshold": 0.5,
+    "MaxFps": 30
+  },
+  "Camera": {
+    "Resolution": "3072x1728",
+    "Framerate": 30,
+    "Codec": "h.265"
+  },
+  "TrackingCameras": {
+    "d0:3b:f4:02:44:84": true,
+    "d0:3b:f4:02:44:85": true,
+    "d0:3b:f4:02:44:87": true,
+    "d0:3b:f4:02:44:e2": true
+  },
+  "CharucoBoard": {
+    "ReferencePoints": {
+      "P1": {
+        "x": 2712,
+        "y": 2453
+      },
+      "P2": {
+        "x": 2857,
+        "y": 2742
+      }
+    },
+    "Board": {
+      "SquaresX": 5,
+      "SquaresY": 7,
+      "SquareSize": 80,
+      "ArucoSize": 40,
+      "Dictionary": "DICT_6X6_250"
+    },
+    "BeginScanning": false,
+    "Status": "failed",
+    "LastRunUnix": 1767754829.3124804,
+    "Results": {
+      "d0:3b:f4:02:44:84": {
+        "ok": false,
+        "error": "board not detected / homography failed"
+      },
+      "d0:3b:f4:02:44:85": {
+        "ok": false,
+        "error": "board not detected / homography failed"
+      },
+      "d0:3b:f4:02:44:87": {
+        "ok": false,
+        "error": "board not detected / homography failed"
+      },
+      "d0:3b:f4:02:44:e2": {
+        "ok": false,
+        "error": "board not detected / homography failed"
+      }
+    }
+  },
+  "HeartbeatInterval": 10,
+  "Version": "117"
+}
