@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import yaml
 import sys
+import argparse
 
 """
 Camera Calibration with ChArUco
@@ -18,6 +19,73 @@ SQUARES_X, SQUARES_Y = 5, 7
 SQUARE_LENGTH, MARKER_LENGTH = 0.04, 0.02
 ARUCO_DICT = cv2.aruco.DICT_6X6_250
 
+
+def _get_cuda_device_count() -> int:
+    try:
+        if not hasattr(cv2, "cuda"):
+            return 0
+        return int(cv2.cuda.getCudaEnabledDeviceCount())
+    except Exception:
+        return 0
+
+
+def _enable_opencl() -> bool:
+    try:
+        if not hasattr(cv2, "ocl"):
+            return False
+        cv2.ocl.setUseOpenCL(True)
+        return bool(cv2.ocl.useOpenCL())
+    except Exception:
+        return False
+
+
+class _FramePreprocessor:
+    def __init__(self, accel: str):
+        cv2.setUseOptimized(True)
+
+        cuda_count = _get_cuda_device_count()
+        opencl_ok = _enable_opencl()
+
+        if accel == "auto":
+            if cuda_count > 0:
+                accel = "cuda"
+            elif opencl_ok:
+                accel = "opencl"
+            else:
+                accel = "cpu"
+
+        self.accel = accel
+        self.cuda_enabled = accel == "cuda" and cuda_count > 0
+        self.opencl_enabled = accel == "opencl" and opencl_ok
+
+        self._gpu_frame = None
+        if self.cuda_enabled:
+            try:
+                self._gpu_frame = cv2.cuda_GpuMat()
+            except Exception:
+                self.cuda_enabled = False
+                self.accel = "cpu"
+
+    def describe(self) -> str:
+        if self.cuda_enabled:
+            return "CUDA (preprocess only; ArUco/ChArUco detection still CPU)"
+        if self.opencl_enabled:
+            return "OpenCL via UMat (preprocess only; ArUco/ChArUco detection still CPU)"
+        return "CPU"
+
+    def to_gray(self, frame_bgr: np.ndarray) -> np.ndarray:
+        if self.cuda_enabled and self._gpu_frame is not None:
+            self._gpu_frame.upload(frame_bgr)
+            gpu_gray = cv2.cuda.cvtColor(self._gpu_frame, cv2.COLOR_BGR2GRAY)
+            return gpu_gray.download()
+
+        if self.opencl_enabled:
+            umat = cv2.UMat(frame_bgr)
+            gray_umat = cv2.cvtColor(umat, cv2.COLOR_BGR2GRAY)
+            return gray_umat.get()
+
+        return cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
 def create_board():
     """Generate ChArUco board PNG."""
     dictionary = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
@@ -30,8 +98,10 @@ def create_board():
     cv2.imwrite("charuco_board.png", img)
     print("✓ Saved charuco_board.png - Print on A4 paper")
 
-def calibrate(source, output):
+def calibrate(source, output, accel: str = "auto"):
     """Calibrate camera from video source."""
+    pre = _FramePreprocessor(accel)
+
     dictionary = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
     try:
         board = cv2.aruco.CharucoBoard((SQUARES_X, SQUARES_Y), SQUARE_LENGTH, MARKER_LENGTH, dictionary)
@@ -44,9 +114,14 @@ def calibrate(source, output):
     
     all_corners, all_ids = [], []
     cap = cv2.VideoCapture(source)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
     img_size = None
     
     print(f"\nCalibrating {source}")
+    print(f"Acceleration: {pre.describe()}")
     print("SPACE=capture frame, c=calibrate (need 15+), q=quit\n")
     
     while True:
@@ -56,7 +131,7 @@ def calibrate(source, output):
         if img_size is None:
             img_size = (frame.shape[1], frame.shape[0])
         
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = pre.to_gray(frame)
         display = frame.copy()
         
         # Detect markers
@@ -117,13 +192,25 @@ def calibrate(source, output):
         print("❌ Calibration failed")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  Create board:  python camera_calibration_minimal.py create")
-        print("  Calibrate cam: python camera_calibration_minimal.py rtsp://... output.yml")
-    elif sys.argv[1] == "create":
+    parser = argparse.ArgumentParser(description="Camera calibration with ChArUco")
+    parser.add_argument("source", nargs="?", help="Video source (rtsp://..., device index, or file) OR 'create'")
+    parser.add_argument("output", nargs="?", help="Output YAML path (required for calibration)")
+    parser.add_argument(
+        "--accel",
+        choices=["auto", "cpu", "opencl", "cuda"],
+        default="auto",
+        help="Acceleration for preprocessing. Note: ArUco/ChArUco detection still runs on CPU.",
+    )
+    args = parser.parse_args()
+
+    if not args.source:
+        parser.print_help()
+        raise SystemExit(2)
+
+    if args.source == "create":
         create_board()
-    elif len(sys.argv) == 3:
-        calibrate(sys.argv[1], sys.argv[2])
     else:
-        print("Error: Invalid arguments")
+        if not args.output:
+            print("Error: output.yml is required when calibrating")
+            raise SystemExit(2)
+        calibrate(args.source, args.output, accel=args.accel)
