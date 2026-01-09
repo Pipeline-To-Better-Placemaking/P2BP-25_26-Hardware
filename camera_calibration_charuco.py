@@ -3,6 +3,7 @@ import numpy as np
 import yaml
 import sys
 import argparse
+import time
 
 """
 Camera Calibration with ChArUco
@@ -98,7 +99,14 @@ def create_board():
     cv2.imwrite("charuco_board.png", img)
     print("✓ Saved charuco_board.png - Print on A4 paper")
 
-def calibrate(source, output, accel: str = "auto"):
+def calibrate(
+    source,
+    output,
+    accel: str = "auto",
+    target_fps: float | None = 10.0,
+    drop_old_frames: bool = True,
+    max_grabs: int = 8,
+):
     """Calibrate camera from video source."""
     pre = _FramePreprocessor(accel)
 
@@ -118,14 +126,39 @@ def calibrate(source, output, accel: str = "auto"):
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
+    if target_fps is not None:
+        try:
+            cap.set(cv2.CAP_PROP_FPS, float(target_fps))
+        except Exception:
+            pass
     img_size = None
     
     print(f"\nCalibrating {source}")
     print(f"Acceleration: {pre.describe()}")
+    if target_fps is None:
+        print("Frame rate: as fast as possible")
+    else:
+        print(f"Frame rate: target {target_fps:g} FPS (drops old frames: {drop_old_frames})")
     print("SPACE=capture frame, c=calibrate (need 15+), q=quit\n")
+
+    next_tick = time.perf_counter()
     
     while True:
+        if target_fps is not None and target_fps > 0:
+            now = time.perf_counter()
+            if now < next_tick:
+                time.sleep(max(0.0, next_tick - now))
+            next_tick = max(next_tick, time.perf_counter()) + (1.0 / float(target_fps))
+
         ret, frame = cap.read()
+        if drop_old_frames and max_grabs > 0:
+            # Pull a few extra frames to flush internal buffers and keep the newest.
+            for _ in range(int(max_grabs)):
+                ok, newer = cap.read()
+                if not ok:
+                    break
+                frame = newer
+                ret = True
         if not ret:
             continue
         if img_size is None:
@@ -201,6 +234,23 @@ if __name__ == "__main__":
         default="auto",
         help="Acceleration for preprocessing. Note: ArUco/ChArUco detection still runs on CPU.",
     )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=10.0,
+        help="Target processing FPS. Lower values reduce CPU load. Use 0 to disable throttling.",
+    )
+    parser.add_argument(
+        "--no-drop-old-frames",
+        action="store_true",
+        help="Do not flush buffered frames; may increase latency but keeps all frames.",
+    )
+    parser.add_argument(
+        "--max-grabs",
+        type=int,
+        default=8,
+        help="How many extra reads to flush per loop when dropping old frames.",
+    )
     args = parser.parse_args()
 
     if not args.source:
@@ -213,4 +263,12 @@ if __name__ == "__main__":
         if not args.output:
             print("Error: output.yml is required when calibrating")
             raise SystemExit(2)
-        calibrate(args.source, args.output, accel=args.accel)
+        target_fps = None if args.fps == 0 else float(args.fps)
+        calibrate(
+            args.source,
+            args.output,
+            accel=args.accel,
+            target_fps=target_fps,
+            drop_old_frames=not args.no_drop_old_frames,
+            max_grabs=args.max_grabs,
+        )
