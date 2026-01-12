@@ -25,6 +25,8 @@ fi
 
 echo "Installing P2BP Camera stack..."
 
+sudo apt install python3-pip -y
+
 # Create canonical directory and structure
 echo "Creating application directories..."
 sudo mkdir -p $APP_ROOT/scripts
@@ -79,6 +81,40 @@ sudo tee "$ENV_FILE" > /dev/null <<EOF
 API_KEY=$API_KEY
 ENDPOINT=$API_ENDPOINT
 EOF
+
+echo "Configuring deterministic link-local IP for eno1..."
+
+IFACE="eno1"
+
+# Set eno1 to a deterministic link-local IP based on its MAC address
+MAC=$(cat /sys/class/net/$IFACE/address | tr -d ':')
+
+BYTE1=$((0x${MAC:8:2}))
+BYTE2=$((0x${MAC:10:2}))
+
+[ "$BYTE1" -eq 0 ] && BYTE1=1
+[ "$BYTE2" -eq 0 ] && BYTE2=1
+
+IP_ADDR="169.254.$BYTE1.$BYTE2"
+
+NETD_DIR="/etc/systemd/network"
+NETD_FILE="$NETD_DIR/10-$IFACE-linklocal.network"
+
+sudo mkdir -p "$NETD_DIR"
+
+sudo tee "$NETD_FILE" > /dev/null <<EOF
+[Match]
+Name=$IFACE
+
+[Network]
+Address=$IP_ADDR/16
+LinkLocalAddressing=no
+EOF
+
+sudo systemctl enable systemd-networkd
+sudo systemctl restart systemd-networkd
+
+echo "Assigned $IP_ADDR/16 to $IFACE"
 
 # Secure permissions
 sudo chown root:root "$ENV_FILE"

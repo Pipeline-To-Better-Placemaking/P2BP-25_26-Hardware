@@ -220,7 +220,20 @@ def scan_cameras(
     for mac, ip in sorted(mac_to_ip.items()):
         res = ffprobe_resolution(ffprobe_bin, ip, user, password, port, rtsp_path)
         if res is None:
-            continue
+            # If RTSP isn't ready yet, try onboarding/activation once, then retry.
+            try:
+                from scripts.camera_onboard import onboard_camera
+
+                if onboard_camera(ip, mac):
+                    log("INFO", f"Onboarded camera, retrying RTSP: {mac} @ {ip}")
+                else:
+                    log("INFO", f"Onboard not applicable/failed, retrying RTSP anyway: {mac} @ {ip}")
+            except Exception as e:
+                log("WARN", f"Onboard attempt failed for {mac} @ {ip}: {e}")
+
+            res = ffprobe_resolution(ffprobe_bin, ip, user, password, port, rtsp_path)
+            if res is None:
+                continue
 
         w, h = res
         cameras[mac] = {

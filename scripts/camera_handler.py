@@ -82,6 +82,7 @@ class CameraController:
         """Force reload cameras_runtime.json from disk."""
         self._load_runtime()
 
+# Add camera type identifier + call to update settings in <camera type>_controller.py based on config changes
 
 # Module-level convenience functions
 def get_camera_states() -> Dict[str, dict]:
