@@ -9,7 +9,7 @@ ACTIVATION_ENDPOINT = "/ISAPI/System/activate"
 def first_time_activation(ip: str, timeout: int = 5) -> bool:
     url = f"http://{ip}/ISAPI/System/activate"
 
-    # payload could be json or xml
+    # 1) JSON attempts (newer firmware)
     for payload in (
         {"password": ACTIVATION_PASSWORD},
         {"Password": ACTIVATION_PASSWORD},
@@ -19,31 +19,41 @@ def first_time_activation(ip: str, timeout: int = 5) -> bool:
             if r.status_code in (200, 401):
                 time.sleep(1)
                 return True
-        except RequestException:
+        except requests.RequestException:
             pass
 
-    xml_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
+    # 2) XML attempts (older / strict firmware)
+    xml_payloads = [
+        f"""<?xml version="1.0" encoding="UTF-8"?>
 <ActivateInfo>
-    <password>{ACTIVATION_PASSWORD}</password>
+    <Password>{ACTIVATION_PASSWORD}</Password>
 </ActivateInfo>
+""",
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<Activate>
+    <Password>{ACTIVATION_PASSWORD}</Password>
+</Activate>
 """
+    ]
 
-    try:
-        r = requests.put(
-            url,
-            data=xml_payload,
-            headers={"Content-Type": "application/xml"},
-            timeout=timeout,
-        )
-        if r.status_code in (200, 401):
-            time.sleep(1)
-            return True
-    except RequestException as e:
-        raise RuntimeError(f"Activation request failed: {e}")
+    for xml in xml_payloads:
+        try:
+            r = requests.put(
+                url,
+                data=xml,
+                headers={"Content-Type": "application/xml"},
+                timeout=timeout,
+            )
+            if r.status_code in (200, 401):
+                time.sleep(1)
+                return True
+        except requests.RequestException:
+            pass
 
     raise RuntimeError(
         f"Activation failed: HTTP {r.status_code} – {r.text}"
     )
+
 
 
 def ensure_activated(ip: str, timeout: int = 5) -> bool:
