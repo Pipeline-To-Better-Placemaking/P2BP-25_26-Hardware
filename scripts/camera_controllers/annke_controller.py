@@ -7,30 +7,44 @@ ACTIVATION_PASSWORD = "Placemaking25"
 ACTIVATION_ENDPOINT = "/ISAPI/System/activate"
 
 def first_time_activation(ip: str, timeout: int = 5) -> bool:
-    url = f"http://{ip}{ACTIVATION_ENDPOINT}"
-    payload = {"password": ACTIVATION_PASSWORD}
+    url = f"http://{ip}/ISAPI/System/activate"
+
+    # payload could be json or xml
+    for payload in (
+        {"password": ACTIVATION_PASSWORD},
+        {"Password": ACTIVATION_PASSWORD},
+    ):
+        try:
+            r = requests.put(url, json=payload, timeout=timeout)
+            if r.status_code in (200, 401):
+                time.sleep(1)
+                return True
+        except RequestException:
+            pass
+
+    xml_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
+<ActivateInfo>
+    <password>{ACTIVATION_PASSWORD}</password>
+</ActivateInfo>
+"""
 
     try:
-        response = requests.put(url, json=payload, timeout=timeout)
+        r = requests.put(
+            url,
+            data=xml_payload,
+            headers={"Content-Type": "application/xml"},
+            timeout=timeout,
+        )
+        if r.status_code in (200, 401):
+            time.sleep(1)
+            return True
     except RequestException as e:
         raise RuntimeError(f"Activation request failed: {e}")
 
-    if response.status_code in (200, 401):
-        time.sleep(1)
-        return True
-
-    if response.status_code == 400:
-        payload = {"Password": ACTIVATION_PASSWORD}
-        response = requests.put(url, json=payload, timeout=timeout)
-        if response.status_code in (200, 401):
-            time.sleep(1)
-            return True
-        raise RuntimeError("Password rejected by camera firmware")
-
-
     raise RuntimeError(
-        f"Activation failed with status {response.status_code}: {response.text}"
+        f"Activation failed: HTTP {r.status_code} – {r.text}"
     )
+
 
 def ensure_activated(ip: str, timeout: int = 5) -> bool:
     try:
