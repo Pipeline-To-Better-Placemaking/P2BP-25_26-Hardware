@@ -83,40 +83,6 @@ API_KEY=$API_KEY
 ENDPOINT=$API_ENDPOINT
 EOF
 
-echo "Configuring deterministic link-local IP for eno1..."
-
-IFACE="eno1"
-
-# Set eno1 to a deterministic link-local IP based on its MAC address
-MAC=$(cat /sys/class/net/$IFACE/address | tr -d ':')
-
-BYTE1=$((0x${MAC:8:2}))
-BYTE2=$((0x${MAC:10:2}))
-
-[ "$BYTE1" -eq 0 ] && BYTE1=1
-[ "$BYTE2" -eq 0 ] && BYTE2=1
-
-IP_ADDR="169.254.$BYTE1.$BYTE2"
-
-NETD_DIR="/etc/systemd/network"
-NETD_FILE="$NETD_DIR/10-$IFACE-linklocal.network"
-
-sudo mkdir -p "$NETD_DIR"
-
-sudo tee "$NETD_FILE" > /dev/null <<EOF
-[Match]
-Name=$IFACE
-
-[Network]
-Address=$IP_ADDR/16
-LinkLocalAddressing=no
-EOF
-
-sudo systemctl enable systemd-networkd
-sudo systemctl restart systemd-networkd
-
-echo "Assigned $IP_ADDR/16 to $IFACE"
-
 # Secure permissions
 sudo chown root:root "$ENV_FILE"
 sudo chmod 600 "$ENV_FILE"
@@ -158,6 +124,46 @@ else
     sudo systemctl enable "$service_name"
     echo "  Enabled: $service_name"
   done
+fi
+
+# Configure deterministic link-local IP for eno1 (camera network)
+echo "Configuring deterministic link-local IP for eno1..."
+
+IFACE="eno1"
+if [ -e "/sys/class/net/$IFACE/address" ]; then
+  MAC=$(cat "/sys/class/net/$IFACE/address" | tr -d ':')
+  BYTE1=$((0x${MAC:8:2}))
+  BYTE2=$((0x${MAC:10:2}))
+
+  [ "$BYTE1" -eq 0 ] && BYTE1=1
+  [ "$BYTE2" -eq 0 ] && BYTE2=1
+
+  IP_ADDR="169.254.$BYTE1.$BYTE2"
+
+  if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
+    CON_NAME="eno1-linklocal"
+    if ! nmcli -t -f NAME connection show | grep -Fxq "$CON_NAME"; then
+      sudo nmcli connection add type ethernet ifname "$IFACE" con-name "$CON_NAME" \
+        ipv4.method manual ipv4.addresses "$IP_ADDR/16" ipv4.never-default yes \
+        ipv6.method ignore connection.autoconnect yes >/dev/null
+    else
+      sudo nmcli connection modify "$CON_NAME" \
+        connection.interface-name "$IFACE" \
+        ipv4.method manual ipv4.addresses "$IP_ADDR/16" ipv4.never-default yes \
+        ipv6.method ignore connection.autoconnect yes >/dev/null
+    fi
+
+    # Bring up only eno1 connection (should not impact USB Ethernet)
+    sudo nmcli connection up "$CON_NAME" >/dev/null || true
+    echo "Assigned $IP_ADDR/16 to $IFACE via NetworkManager ($CON_NAME)"
+  else
+    # Fallback: apply non-persistent address without restarting networking services
+    sudo ip link set "$IFACE" up || true
+    sudo ip addr add "$IP_ADDR/16" dev "$IFACE" 2>/dev/null || true
+    echo "Assigned $IP_ADDR/16 to $IFACE (non-persistent fallback)"
+  fi
+else
+  echo "Warning: $IFACE not found; skipping eno1 link-local configuration."
 fi
 
 echo "Installation complete."
