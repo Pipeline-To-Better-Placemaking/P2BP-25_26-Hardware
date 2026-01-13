@@ -129,6 +129,10 @@ sudo pip3 install --upgrade pip
 sudo pip3 install python-dotenv requests psutil
 sudo pip3 install -r requirements.txt --no-deps
 
+# Install Playwright browsers
+echo "Installing Playwright browsers..."
+sudo playwright install
+
 # Install scripts
 echo "Installing scripts..."
 sudo rsync -a --delete scripts/ $APP_ROOT/scripts/

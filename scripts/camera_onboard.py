@@ -21,8 +21,8 @@ def onboard_camera(cam_ip: str, cam_mac: str) -> bool:
     cam_type = _detect_camera_type(cam_mac)
     if cam_type == "ANNKE":
         from scripts.camera_controllers import annke_controller
-        if bool(annke_controller.first_time_activation(cam_ip)):
-            annke_controller.apply_defaults(cam_ip)
+        if bool(annke_controller.ensure_activated(cam_ip)):
+            #annke_controller.apply_defaults(cam_ip)
             return True
 
     return False
