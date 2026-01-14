@@ -1,67 +1,48 @@
 {
   "Tracking": {
-    "Enabled": true,
-    "Model": "Yolov10n",
+    "Enabled": false,
+    "Model": "new model lol",
     "ConfidenceThreshold": 0.5,
     "MaxFps": 30
   },
   "Camera": {
-    "Resolution": "3072x1728",
+    "Resolution": "1920x1080",
     "Framerate": 30,
     "Codec": "h.265"
   },
   "TrackingCameras": {
+    "d0:3b:f4:01:52:79": true,
+    "d0:3b:f4:01:52:91": false,
+    "d0:3b:f4:01:52:9a": false,
+    "d0:3b:f4:01:52:f1": true,
     "d0:3b:f4:02:44:84": true,
-    "d0:3b:f4:02:44:85": true,
+    "d0:3b:f4:02:44:85": false,
     "d0:3b:f4:02:44:87": true,
-    "d0:3b:f4:02:44:e2": true
+    "d0:3b:f4:02:44:e2": false
   },
   "CharucoBoard": {
     "ReferencePoints": {
       "P1": {
-        "x": 2712,
-        "y": 2453
+        "X": 9119,
+        "Y": 7977
       },
       "P2": {
-        "x": 2857,
-        "y": 2742
+        "X": 8337,
+        "Y": 8020
       }
     },
     "Board": {
       "SquaresX": 5,
       "SquaresY": 7,
-      "SquareSize": 80,
-      "ArucoSize": 40,
-      "Dictionary": "DICT_6X6_250"
+      "SquareSize": 156.5,
+      "ArucoSize": 116.75,
+      "Dictionary": "DICT_4X4_50"
     },
-    "BeginScanning": true,
+    "BeginScanning": false,
     "Status": "failed",
-    "LastRunUnix": 1767897219.1707919,
-
-    "RansacReprojThresholdPx": 4.0,
-    "MinCorners": 12,
-    "FramesToAverage": 15,
-    "MaxSecondsPerCam": 3.0,
-
-    "Results": {
-      "d0:3b:f4:02:44:84": {
-        "ok": false,
-        "error": "board not detected / homography failed"
-      },
-      "d0:3b:f4:02:44:85": {
-        "ok": false,
-        "error": "board not detected / homography failed"
-      },
-      "d0:3b:f4:02:44:87": {
-        "ok": false,
-        "error": "board not detected / homography failed"
-      },
-      "d0:3b:f4:02:44:e2": {
-        "ok": false,
-        "error": "board not detected / homography failed"
-      }
-    }
+    "Error": "Unsupported point format: {'X': 9119, 'Y': 7977}",
+    "LastRunUnix": 1768414875.858738
   },
-  "HeartbeatInterval": 10,
-  "Version": "117"
+  "HeartbeatInterval": 60,
+  "Version": "config version 1"
 }

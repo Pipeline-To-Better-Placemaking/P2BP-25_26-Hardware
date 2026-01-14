@@ -81,13 +81,18 @@ def safe_filename(s: str) -> str: #windows sucks bro
 
 
 #config parsing functions
-def parse_xy(v) -> np.ndarray: #takes in coordinates ([x, y] || {"x": x, "y": y} || "(x, y)" || "x,y" string) and returns np.array([x, y], dtype=float64)
+def parse_xy(v) -> np.ndarray: #takes in coordinates ([x, y] || {"x": x, "y": y} || {"X": X, "Y": Y} || "(x, y)" || "x,y" string) and returns np.array([x, y], dtype=float64)
     if v is None:
         raise ValueError("Missing required point value")
     if isinstance(v, (list, tuple)) and len(v) == 2:
         return np.array([float(v[0]), float(v[1])], dtype=np.float64)
-    if isinstance(v, dict) and "x" in v and "y" in v:
-        return np.array([float(v["x"]), float(v["y"])], dtype=np.float64)
+    if isinstance(v, dict):
+        # Accept either lowercase or capitalized keys (matches current config.json).
+        key_map = {str(k).lower(): k for k in v.keys()}
+        if "x" in key_map and "y" in key_map:
+            return np.array(
+                [float(v[key_map["x"]]), float(v[key_map["y"]])], dtype=np.float64
+            )
     if isinstance(v, str):
         s = v.strip().replace("(", "").replace(")", "")
         parts = [p.strip() for p in s.split(",") if p.strip()]
