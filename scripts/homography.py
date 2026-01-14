@@ -523,7 +523,8 @@ def main():
     parser.add_argument("--poll", type=float, default=1.0, help="Polling interval in seconds.")
     args = parser.parse_args()
 
-    base_dir = Path(__file__).resolve().parent
+    # Resolve to repo/app root (one level above scripts/).
+    base_dir = Path(__file__).resolve().parent.parent
     if args.once:
         run_once(base_dir=base_dir)
     else:
