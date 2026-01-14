@@ -63,9 +63,10 @@ class CameraController:
                 with open(CONFIG_PATH, "r") as f:
                     config_data = json.load(f)
                 cameras_config = config_data.get("TrackingCameras", {})
-                for mac, enabled in cameras_config.items():
-                    if mac in data and isinstance(enabled, bool):
-                        data[mac]["enabled"] = enabled
+                if isinstance(cameras_config, dict) and cameras_config is not None:
+                    for mac, enabled in cameras_config.items():
+                        if mac in data and isinstance(enabled, bool):
+                            data[mac]["enabled"] = enabled
             except (OSError, json.JSONDecodeError):
                 pass
 

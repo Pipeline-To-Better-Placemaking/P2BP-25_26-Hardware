@@ -34,9 +34,6 @@ class SystemStats:
 
 @dataclass
 class HeartbeatPayload:
-    #Id: str
-    #ProjectId: str
-    #DeviceId: str
     Timestamp: int
     Services: Dict[str, ServiceState]
     Cameras: Dict[str, CameraState]
@@ -47,16 +44,11 @@ class HeartbeatPayload:
 
     @staticmethod
     def build(
-        #project_id: str, 
-        #device_id: str, 
         services: Dict[str, ServiceState],
         cameras: Dict[str, CameraState],
         system: SystemStats,
     ) -> "HeartbeatPayload":
         return HeartbeatPayload(
-            #Id="0",
-            #ProjectId=project_id,
-            #DeviceId=device_id,
             Timestamp=int(time.time()),
             Services=services,
             Cameras=cameras,
