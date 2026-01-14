@@ -45,8 +45,10 @@ EXISTING_ENDPOINT=""
 
 if [ -f "$ENV_FILE" ]; then
   echo "Existing API credentials found."
-  EXISTING_API_KEY=$(grep "^API_KEY=" "$ENV_FILE" | cut -d'=' -f2)
-  EXISTING_ENDPOINT=$(grep "^ENDPOINT=" "$ENV_FILE" | cut -d'=' -f2)
+  EXISTING_API_KEY_LINE=$(grep -m1 "^API_KEY=" "$ENV_FILE" || true)
+  EXISTING_ENDPOINT_LINE=$(grep -m1 "^ENDPOINT=" "$ENV_FILE" || true)
+  EXISTING_API_KEY="${EXISTING_API_KEY_LINE#API_KEY=}"
+  EXISTING_ENDPOINT="${EXISTING_ENDPOINT_LINE#ENDPOINT=}"
 
   # Prompt to update API Key
   read -p "Do you want to update the API Key? (y/n): " UPDATE_API_KEY
