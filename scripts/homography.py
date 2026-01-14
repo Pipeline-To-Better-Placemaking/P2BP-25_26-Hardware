@@ -57,6 +57,35 @@ def load_json(path: Path) -> Dict:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+
+def _resolve_base_dir() -> Path:
+    """Resolve the app root that contains config/ and homographies/.
+
+    Prefer the current working directory (systemd sets WorkingDirectory=/opt/p2bp/camera),
+    but fall back to the repo root derived from this file location.
+    """
+    cwd = Path.cwd().resolve()
+    if (cwd / "config" / "config.json").exists():
+        return cwd
+    script_root = Path(__file__).resolve().parent.parent
+    if (script_root / "config" / "config.json").exists():
+        return script_root
+    return cwd
+
+
+def _get_float(d: Dict, key: str, default: float) -> float:
+    try:
+        return float(d.get(key, default))
+    except Exception:
+        return default
+
+
+def _get_int(d: Dict, key: str, default: int) -> int:
+    try:
+        return int(d.get(key, default))
+    except Exception:
+        return default
+
 def atomic_write_json(path: Path, data: Dict) -> None: #atomic wriitng to avoid partial writes
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
@@ -358,22 +387,26 @@ def run_once(base_dir: Path) -> None:
     config = load_json(cfg_path)
     cams = load_json(cams_path)
 
+    if "CharucoBoard" not in config or not isinstance(config["CharucoBoard"], dict):
+        raise SystemExit("Missing required config section: CharucoBoard")
     cbcfg = config["CharucoBoard"]
     if not bool(cbcfg["BeginScanning"]):
         print("CharucoBoard.BeginScanning is false; nothing to do.")
         return
 
+    if "ReferencePoints" not in cbcfg or not isinstance(cbcfg["ReferencePoints"], dict):
+        raise SystemExit("Missing required config section: CharucoBoard.ReferencePoints")
     ref = cbcfg["ReferencePoints"]
     p1_world = parse_xy(ref["P1"])
     p2_world = parse_xy(ref["P2"])
 
     board_spec = board_from_new_config(cbcfg)
 
-    #tuning (beyond config)
-    ransac_thresh_px = float(cbcfg["RansacReprojThresholdPx"])
-    min_corners = int(cbcfg["MinCorners"])
-    frames_to_try = int(cbcfg["FramesToAverage"])
-    max_seconds_per_cam = float(cbcfg["MaxSecondsPerCam"])
+    # Tuning parameters. Provide defaults so older/minimal config.json still works.
+    ransac_thresh_px = _get_float(cbcfg, "RansacReprojThresholdPx", 3.0)
+    min_corners = _get_int(cbcfg, "MinCorners", 8)
+    frames_to_try = _get_int(cbcfg, "FramesToAverage", 30)
+    max_seconds_per_cam = _get_float(cbcfg, "MaxSecondsPerCam", 5.0)
 
     #output naming from config.json
     res_str = config["Camera"]["Resolution"]
@@ -501,8 +534,8 @@ def run_service(base_dir: Path, poll_seconds: float) -> None:
         try:
             if cfg_path.exists():
                 config = load_json(cfg_path)
-                cbcfg = config["CharucoBoard"]
-                if bool(cbcfg["BeginScanning"]):
+                cbcfg = config.get("CharucoBoard") if isinstance(config, dict) else None
+                if isinstance(cbcfg, dict) and bool(cbcfg.get("BeginScanning")):
                     run_once(base_dir=base_dir)
         except KeyboardInterrupt:
             print("Exiting.")
@@ -511,6 +544,11 @@ def run_service(base_dir: Path, poll_seconds: float) -> None:
             #crash control
             try:
                 config = load_json(cfg_path) if cfg_path.exists() else {}
+                if not isinstance(config, dict):
+                    config = {}
+                config.setdefault("CharucoBoard", {})
+                if not isinstance(config["CharucoBoard"], dict):
+                    config["CharucoBoard"] = {}
                 config["CharucoBoard"]["Status"] = "failed"
                 config["CharucoBoard"]["Error"] = str(e)
                 config["CharucoBoard"]["LastRunUnix"] = time.time()
@@ -528,8 +566,8 @@ def main():
     parser.add_argument("--poll", type=float, default=1.0, help="Polling interval in seconds.")
     args = parser.parse_args()
 
-    # Resolve to repo/app root (one level above scripts/).
-    base_dir = Path(__file__).resolve().parent.parent
+    base_dir = _resolve_base_dir()
+    print(f"Base dir: {base_dir}")
     if args.once:
         run_once(base_dir=base_dir)
     else:
