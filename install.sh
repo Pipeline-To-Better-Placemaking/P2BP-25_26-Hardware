@@ -25,6 +25,9 @@ fi
 
 echo "Installing P2BP Camera stack..."
 
+sudo apt install python3-pip -y
+sudo apt install -y python3-opencv
+
 # Create canonical directory and structure
 echo "Creating application directories..."
 sudo mkdir -p $APP_ROOT/scripts
@@ -39,21 +42,29 @@ EXISTING_API_KEY=""
 EXISTING_ENDPOINT=""
 
 # Check if env file already exists and load values
+
 if [ -f "$ENV_FILE" ]; then
   echo "Existing API credentials found."
   EXISTING_API_KEY=$(grep "^API_KEY=" "$ENV_FILE" | cut -d'=' -f2)
   EXISTING_ENDPOINT=$(grep "^ENDPOINT=" "$ENV_FILE" | cut -d'=' -f2)
-  
-  read -p "Do you want to update the API credentials? (y/n): " UPDATE_CREDS
-  
-  if [[ ! "$UPDATE_CREDS" =~ ^[Yy]$ ]]; then
-    echo "Keeping existing API credentials"
-    API_KEY="$EXISTING_API_KEY"
-    API_ENDPOINT="$EXISTING_ENDPOINT"
-  else
+
+  # Prompt to update API Key
+  read -p "Do you want to update the API Key? (y/n): " UPDATE_API_KEY
+  if [[ "$UPDATE_API_KEY" =~ ^[Yy]$ ]]; then
     read -s -p "Enter new API Key: " API_KEY
     echo
+  else
+    echo "Keeping existing API Key"
+    API_KEY="$EXISTING_API_KEY"
+  fi
+
+  # Prompt to update API Endpoint
+  read -p "Do you want to update the API Endpoint? (y/n): " UPDATE_API_ENDPOINT
+  if [[ "$UPDATE_API_ENDPOINT" =~ ^[Yy]$ ]]; then
     read -p "Enter new API Endpoint URL: " API_ENDPOINT
+  else
+    echo "Keeping existing API Endpoint"
+    API_ENDPOINT="$EXISTING_ENDPOINT"
   fi
 else
   read -s -p "Enter API Key: " API_KEY
@@ -84,6 +95,10 @@ sudo pip3 install --upgrade pip
 sudo pip3 install python-dotenv requests psutil
 sudo pip3 install -r requirements.txt --no-deps
 
+# Install Playwright browsers
+echo "Installing Playwright browsers..."
+sudo playwright install
+
 # Install scripts
 echo "Installing scripts..."
 sudo rsync -a --delete scripts/ $APP_ROOT/scripts/
@@ -109,6 +124,46 @@ else
     sudo systemctl enable "$service_name"
     echo "  Enabled: $service_name"
   done
+fi
+
+# Configure deterministic link-local IP for eno1 (camera network)
+echo "Configuring deterministic link-local IP for eno1..."
+
+IFACE="eno1"
+if [ -e "/sys/class/net/$IFACE/address" ]; then
+  MAC=$(cat "/sys/class/net/$IFACE/address" | tr -d ':')
+  BYTE1=$((0x${MAC:8:2}))
+  BYTE2=$((0x${MAC:10:2}))
+
+  [ "$BYTE1" -eq 0 ] && BYTE1=1
+  [ "$BYTE2" -eq 0 ] && BYTE2=1
+
+  IP_ADDR="169.254.$BYTE1.$BYTE2"
+
+  if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
+    CON_NAME="eno1-linklocal"
+    if ! nmcli -t -f NAME connection show | grep -Fxq "$CON_NAME"; then
+      sudo nmcli connection add type ethernet ifname "$IFACE" con-name "$CON_NAME" \
+        ipv4.method manual ipv4.addresses "$IP_ADDR/16" ipv4.never-default yes \
+        ipv6.method ignore connection.autoconnect yes >/dev/null
+    else
+      sudo nmcli connection modify "$CON_NAME" \
+        connection.interface-name "$IFACE" \
+        ipv4.method manual ipv4.addresses "$IP_ADDR/16" ipv4.never-default yes \
+        ipv6.method ignore connection.autoconnect yes >/dev/null
+    fi
+
+    # Bring up only eno1 connection (should not impact USB Ethernet)
+    sudo nmcli connection up "$CON_NAME" >/dev/null || true
+    echo "Assigned $IP_ADDR/16 to $IFACE via NetworkManager ($CON_NAME)"
+  else
+    # Fallback: apply non-persistent address without restarting networking services
+    sudo ip link set "$IFACE" up || true
+    sudo ip addr add "$IP_ADDR/16" dev "$IFACE" 2>/dev/null || true
+    echo "Assigned $IP_ADDR/16 to $IFACE (non-persistent fallback)"
+  fi
+else
+  echo "Warning: $IFACE not found; skipping eno1 link-local configuration."
 fi
 
 echo "Installation complete."

@@ -14,6 +14,7 @@ import scripts.systemd_services as systemd_services
 import scripts.system_stats as system_stats
 import scripts.config_io as config_io
 import scripts.signals as signals
+import scripts.camera_handler as camera_handler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +44,7 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
         "Content-Type": "application/json",
     }
 
-    r = requests.post(f"{endpoint}/Heartbeat", headers=headers, json=payload, timeout=5)
+    r = requests.post(f"{endpoint}/Device/heartbeat", headers=headers, json=payload, timeout=5)
     r.raise_for_status()
 
     try:
@@ -54,12 +55,20 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
 def create_heartbeat_payload(): # create a payload for the heartbeat request
     services = systemd_services.get_all_service_states()
     system = system_stats.get_system_stats()
+    camera_dicts = camera_handler.get_camera_states()
+
+    # Convert dicts to CameraState dataclasses
+    cameras = {
+        mac: heartbeat_payload.CameraState(**state)
+        for mac, state in camera_dicts.items()
+    }
 
     payload = heartbeat_payload.HeartbeatPayload.build(
-        project_id="0",
-        device_id=os.uname().nodename,
+        #project_id="0",
+        #device_id=os.uname().nodename,
         services=services,
         system=system,
+        cameras=cameras,
     ).to_dict()
 
     return payload

@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+camera_scanner.py
+
+Scans the local network for RTSP-capable cameras and writes a runtime JSON file
+with each camera keyed by its MAC address.
+
+Output format (cameras_runtime.json):
+{
+  "aa:bb:cc:dd:ee:ff": {
+    "mac": "aa:bb:cc:dd:ee:ff",
+    "ip": "192.168.1.100",
+    "rtsp": "rtsp://user:pass@192.168.1.100:554/path",
+    "resolution": [1920, 1080]
+  },
+  ...
+}
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +24,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -22,7 +38,9 @@ def log(level: str, msg: str) -> None:
 
 def require_root() -> None:
     if hasattr(os, "geteuid") and os.geteuid() != 0:
-        raise PermissionError("This script is intended to run as root (e.g., via systemd User=root).")
+        raise PermissionError(
+            "This script is intended to run as root (e.g., via systemd User=root)."
+        )
 
 def which_or_fail(name: str, extra_paths: Optional[List[str]] = None) -> str:
     path = shutil.which(name)
@@ -96,7 +114,9 @@ def scan_arp_with_retry(
                 last_err = str(e)
 
         if time.time() - start > timeout_sec:
-            raise TimeoutError(f"ARP scan did not succeed within {timeout_sec}s. Last error: {last_err}")
+            raise TimeoutError(
+                f"ARP scan did not succeed within {timeout_sec}s. Last error: {last_err}"
+            )
         time.sleep(sleep_sec)
 
 def ffprobe_resolution(
@@ -105,10 +125,10 @@ def ffprobe_resolution(
     user: str,
     password: str,
     port: int,
-    path: str
+    path: str,
 ) -> Optional[Tuple[int, int]]:
     """
-    Returns (width,height) if RTSP stream is valid, else None.
+    Returns (width, height) if RTSP stream is valid, else None.
     """
     url = f"rtsp://{user}:{password}@{ip}:{port}{path}"
     cmd = [
@@ -142,26 +162,6 @@ def ffprobe_resolution(
     except ValueError:
         return None
 
-def load_registry(path: str) -> Dict:
-    """
-    Boot-safe: if file missing or corrupted, returns empty registry shape.
-    """
-    if not os.path.exists(path):
-        return {"cameras": {}}
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        log("WARN", f"Registry unreadable/corrupted; starting fresh: {path}")
-        return {"cameras": {}}
-
-    if not isinstance(data, dict):
-        return {"cameras": {}}
-    cams = data.get("cameras")
-    if not isinstance(cams, dict):
-        data["cameras"] = {}
-    return data
-
 def save_json_atomic(path: str, data: Dict) -> None:
     out_path = os.path.abspath(path)
     out_dir = os.path.dirname(out_path) or "."
@@ -174,7 +174,7 @@ def save_json_atomic(path: str, data: Dict) -> None:
         os.fsync(f.fileno())
     os.replace(tmp, out_path)
 
-def auto_enroll_registry(
+def scan_cameras(
     arp_scan_bin: str,
     ffprobe_bin: str,
     interface: str,
@@ -184,149 +184,129 @@ def auto_enroll_registry(
     rtsp_path: str,
     timeout_sec: float,
     sleep_sec: float,
-) -> Dict:
+) -> Dict[str, Dict]:
     """
-    Auto-enroll cameras deterministically:
-      - scan LAN
-      - test RTSP on fixed path
-      - collect MACs that work
-      - sort by MAC
-      - assign cam0..camN
+    Scans the network and returns a dict of RTSP-ready cameras keyed by MAC address.
+
+    Returns:
+        {
+            "aa:bb:cc:dd:ee:ff": {
+                "mac": "aa:bb:cc:dd:ee:ff",
+                "ip": "192.168.1.100",
+                "rtsp": "rtsp://...",
+                "resolution": [w, h]
+            },
+            ...
+        }
     """
-    start = time.time()
+    seen = scan_arp_with_retry(
+        arp_scan_bin, interface, timeout_sec=timeout_sec, sleep_sec=sleep_sec
+    )
 
-    while True:
-        seen = scan_arp_with_retry(arp_scan_bin, interface, timeout_sec=timeout_sec, sleep_sec=sleep_sec)
-
-
-        working_macs: List[str] = []
-        for mac, ip in seen:
-            res = ffprobe_resolution(ffprobe_bin, ip, user, password, port, rtsp_path)
-            if res is not None:
-                working_macs.append(mac)
-
-        working_macs = sorted(set(working_macs))
-        if working_macs:
-            cameras = {}
-            for idx, mac in enumerate(working_macs):
-                cameras[f"cam{idx}"] = {"mac": mac, "rtsp_path": rtsp_path}
-            return {"cameras": cameras}
-
-        if time.time() - start > timeout_sec:
-            raise TimeoutError(f"No RTSP-ready cameras found within {timeout_sec}s.")
-        time.sleep(sleep_sec)
-
-def build_runtime(
-    arp_scan_bin: str,
-    ffprobe_bin: str,
-    registry: Dict,
-    interface: str,
-    user: str,
-    password: str,
-    port: int,
-    scan_timeout_sec: float,
-    sleep_sec: float,
-) -> Dict:
-    """
-    Builds cameras_runtime.json by:
-      - scanning ARP to map MAC->IP
-      - for each registered cam, find its current IP
-      - probe RTSP once (readiness + resolution)
-    """
-    seen = scan_arp_with_retry(arp_scan_bin, interface, timeout_sec=scan_timeout_sec, sleep_sec=sleep_sec)
-
+    # Build MAC -> IP mapping (warn on duplicates)
     mac_to_ip: Dict[str, str] = {}
     for mac, ip in seen:
-        # detect MAC address duplicates
         if mac in mac_to_ip and mac_to_ip[mac] != ip:
-            log("WARN", f"Duplicate MAC seen with different IPs: {mac} -> {mac_to_ip[mac]} and {ip} (keeping latest)")
+            log(
+                "WARN",
+                f"Duplicate MAC with different IPs: {mac} -> {mac_to_ip[mac]} and {ip} (keeping latest)",
+            )
         mac_to_ip[mac] = ip
 
-    runtime: Dict[str, Dict] = {}
-    for cam_name, cam_info in registry.get("cameras", {}).items():
-        mac = str(cam_info.get("mac", "")).lower().strip()
-        path = str(cam_info.get("rtsp_path", "")).strip()
-        if not mac or not path:
-            continue
+    log("INFO", f"ARP scan found {len(mac_to_ip)} unique MAC addresses")
 
-        ip = mac_to_ip.get(mac)
-        if not ip:
-            continue
-
-        res = ffprobe_resolution(ffprobe_bin, ip, user, password, port, path)
+    # Probe each device for RTSP
+    cameras: Dict[str, Dict] = {}
+    for mac, ip in sorted(mac_to_ip.items()):
+        res = ffprobe_resolution(ffprobe_bin, ip, user, password, port, rtsp_path)
         if res is None:
-            continue
+            # If RTSP isn't ready yet, try onboarding/activation once, then retry.
+            try:
+                from scripts.camera_onboard import onboard_camera
+
+                if onboard_camera(ip, mac):
+                    log("INFO", f"Onboarded camera, retrying RTSP: {mac} @ {ip}")
+                else:
+                    log("INFO", f"Onboard not applicable/failed, retrying RTSP anyway: {mac} @ {ip}")
+            except Exception as e:
+                log("WARN", f"Onboard attempt failed for {mac} @ {ip}: {e}")
+
+            res = ffprobe_resolution(ffprobe_bin, ip, user, password, port, rtsp_path)
+            if res is None:
+                continue
 
         w, h = res
-        runtime[cam_name] = {
+        cameras[mac] = {
             "mac": mac,
             "ip": ip,
-            "rtsp": f"rtsp://{user}:{password}@{ip}:{port}{path}",
+            "rtsp": f"rtsp://{user}:{password}@{ip}:{port}{rtsp_path}",
             "resolution": [w, h],
         }
+        log("OK", f"Found camera: {mac} @ {ip} ({w}x{h})")
 
-    return runtime
+    return cameras
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--iface",          default="eno1")
-    ap.add_argument("--user",           default="admin")
-    ap.add_argument("--password",       default="Placemaking25")
-    ap.add_argument("--port",           type=int, default=554)
-    ap.add_argument("--rtsp-path",      default="/Streaming/Channels/101")
-    ap.add_argument("--registry",       default="config/camera_registry.json")
-    ap.add_argument("--runtime",        default="config/cameras_runtime.json")
-    ap.add_argument("--timeout",        type=float, default=300.0, help="Overall timeout for initial enrollment.")
-    ap.add_argument("--sleep",          type=float, default=2.0)
-    ap.add_argument("--scan-timeout",   type=float, default=300.0, help="Timeout for ARP scan phase when building runtime.")
+    ap = argparse.ArgumentParser(
+        description="Scan network for RTSP cameras and output runtime config keyed by MAC address."
+    )
+    ap.add_argument("--iface", default="eno1", help="Network interface to scan")
+    ap.add_argument("--user", default="admin", help="RTSP username")
+    ap.add_argument("--password", default="Placemaking25", help="RTSP password")
+    ap.add_argument("--port", type=int, default=554, help="RTSP port")
+    ap.add_argument("--rtsp-path", default="/Streaming/Channels/101", help="RTSP path")
+    ap.add_argument(
+        "--output",
+        default="config/cameras_runtime.json",
+        help="Output runtime JSON file",
+    )
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Timeout for ARP scan (seconds)",
+    )
+    ap.add_argument(
+        "--sleep",
+        type=float,
+        default=2.0,
+        help="Sleep between retries (seconds)",
+    )
     args = ap.parse_args()
 
     require_root()
 
-    # make sure arp-scan and ffprobe are installed
-    arp_scan_bin = which_or_fail("arp-scan", extra_paths=["/usr/sbin/arp-scan", "/sbin/arp-scan"])
-    ffprobe_bin = which_or_fail("ffprobe", extra_paths=["/usr/bin/ffprobe", "/bin/ffprobe"])
+    arp_scan_bin = which_or_fail(
+        "arp-scan", extra_paths=["/usr/sbin/arp-scan", "/sbin/arp-scan"]
+    )
+    ffprobe_bin = which_or_fail(
+        "ffprobe", extra_paths=["/usr/bin/ffprobe", "/bin/ffprobe"]
+    )
 
-    log("INFO", f"Using iface={args.iface}")
-    log("INFO", f"Registry={os.path.abspath(args.registry)} Runtime={os.path.abspath(args.runtime)}")
+    log("INFO", f"Interface: {args.iface}")
+    log("INFO", f"Output: {os.path.abspath(args.output)}")
 
-    # 1) Load/create registry
-    registry = load_registry(args.registry)
-    if not registry.get("cameras"):
-        log("INFO", "No cameras in registry; performing first-run auto-enroll...")
-        registry = auto_enroll_registry(
-            arp_scan_bin=arp_scan_bin,
-            ffprobe_bin=ffprobe_bin,
-            interface=args.iface,
-            user=args.user,
-            password=args.password,
-            port=args.port,
-            rtsp_path=args.rtsp_path,
-            timeout_sec=args.timeout,
-            sleep_sec=args.sleep,
-        )
-        save_json_atomic(args.registry, registry)
-        log("OK", f"Auto-enrolled and wrote registry: {args.registry} (count={len(registry.get('cameras', {}))})")
-
-    # 2) Build runtime (always, since IPs can change)
-    runtime = build_runtime(
+    cameras = scan_cameras(
         arp_scan_bin=arp_scan_bin,
         ffprobe_bin=ffprobe_bin,
-        registry=registry,
         interface=args.iface,
         user=args.user,
         password=args.password,
         port=args.port,
-        scan_timeout_sec=args.scan_timeout,
+        rtsp_path=args.rtsp_path,
+        timeout_sec=args.timeout,
         sleep_sec=args.sleep,
     )
-    save_json_atomic(args.runtime, runtime)
-    log("OK", f"Wrote runtime config: {args.runtime} (ready={len(runtime)}/{len(registry.get('cameras', {}))})")
 
-    if len(runtime) == 0:
-        log("WARN", "No cameras are RTSP-ready right now.")
+    save_json_atomic(args.output, cameras)
+    log("OK", f"Wrote {args.output} ({len(cameras)} cameras)")
+
+    if len(cameras) == 0:
+        log("WARN", "No RTSP-capable cameras found.")
         return 2
+
     return 0
+
 
 if __name__ == "__main__":
     try:
