@@ -80,10 +80,14 @@ if [ -z "$API_KEY" ] || [ -z "$API_ENDPOINT" ]; then
 fi
 
 # Write environment file
-sudo tee "$ENV_FILE" > /dev/null <<EOF
+
+# Write env atomically to avoid partial/corrupted files if the script fails later.
+TMP_ENV_FILE=$(sudo mktemp "$APP_ROOT/config/agent.env.tmp.XXXXXX")
+sudo tee "$TMP_ENV_FILE" > /dev/null <<EOF
 API_KEY=$API_KEY
 ENDPOINT=$API_ENDPOINT
 EOF
+sudo mv -f "$TMP_ENV_FILE" "$ENV_FILE"
 
 # Secure permissions
 sudo chown root:root "$ENV_FILE"
@@ -95,6 +99,11 @@ echo "API credentials saved to $ENV_FILE"
 echo "Installing Python dependencies..."
 sudo pip3 install --upgrade pip
 sudo pip3 install python-dotenv requests psutil
+
+# Jetson images often ship python3-sympy via apt (distutils-installed). Pip cannot uninstall
+# those cleanly, so install our pinned SymPy over it explicitly.
+sudo pip3 install --ignore-installed sympy==1.12.1 mpmath==1.3.0
+
 sudo pip3 install -r requirements.txt --no-deps
 
 # Install Playwright browsers
