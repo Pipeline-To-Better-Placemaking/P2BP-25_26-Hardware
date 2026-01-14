@@ -5,6 +5,7 @@ from typing import Dict, List, Optional
 
 # cameras_runtime is at config/cameras_runtime.json
 RUNTIME_PATH = "config/cameras_runtime.json"
+CONFIG_PATH = "config/config.json"
 REFRESH_INTERVAL = 30  # seconds between automatic file re-reads
 
 
@@ -15,6 +16,7 @@ class Camera:
         self.ip: str = camera_info.get('ip', "")
         self.resolution: List[int] = camera_info.get('resolution', [0, 0])
         self.rtsp: str = camera_info.get('rtsp', "")
+        self.enabled: bool = camera_info.get('enabled', False)
 
     def to_state_dict(self) -> dict:
         # In PascalCase to match the .NET backend
@@ -22,9 +24,8 @@ class Camera:
             "Mac": self.mac,
             "Ip": self.ip,
             "Resolution": self.resolution,
-            "Online": True,
+            "Enabled": self.enabled,
         }
-
 
 # camera controller class (singleton)
 class CameraController:
@@ -56,6 +57,17 @@ class CameraController:
 
         if not isinstance(data, dict):
             return
+
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r") as f:
+                    config_data = json.load(f)
+                cameras_config = config_data.get("TrackingCameras", {})
+                for mac, enabled in cameras_config.items():
+                    if mac in data and isinstance(enabled, bool):
+                        data[mac]["enabled"] = enabled
+            except (OSError, json.JSONDecodeError):
+                pass
 
         self.cameras.clear()
         for mac, info in data.items():

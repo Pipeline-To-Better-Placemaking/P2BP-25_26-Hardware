@@ -64,8 +64,6 @@ def create_heartbeat_payload(): # create a payload for the heartbeat request
     }
 
     payload = heartbeat_payload.HeartbeatPayload.build(
-        #project_id="0",
-        #device_id=os.uname().nodename,
         services=services,
         system=system,
         cameras=cameras,
