@@ -12,7 +12,7 @@ class CameraState:
     Mac: str = ""
     Ip: str = ""
     Resolution: List[int] = field(default_factory=lambda: [0, 0])
-    Online: bool = False
+    Enabled: bool = False
 
 @dataclass
 class GpuStats:
