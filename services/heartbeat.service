@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 -I -m scripts.heartbeat
+ExecStart=/usr/bin/python3 -s -m scripts.heartbeat
 WorkingDirectory=/opt/p2bp/camera
 Restart=always
 RestartSec=5
