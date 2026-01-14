@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/p2bp/camera
-ExecStart=/usr/bin/python3 -m scripts.tracker
+ExecStart=/usr/bin/python3 -I -m scripts.tracker
 
 NoNewPrivileges=true
 ProtectSystem=strict
