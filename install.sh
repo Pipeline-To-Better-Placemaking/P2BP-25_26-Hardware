@@ -27,6 +27,7 @@ echo "Installing P2BP Camera stack..."
 
 sudo apt install python3-pip -y
 sudo apt install -y python3-opencv
+sudo apt install -y arp-scan
 
 # Create canonical directory and structure
 echo "Creating application directories..."
