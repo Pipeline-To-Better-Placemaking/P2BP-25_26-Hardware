@@ -64,6 +64,76 @@ def iface_is_up(interface: str) -> bool:
     except OSError:
         return True
 
+def _iface_has_mac(interface: str) -> bool:
+    return os.path.exists(f"/sys/class/net/{interface}/address")
+
+def _iface_is_virtual_or_non_eth(interface: str) -> bool:
+    # Skip loopback and common non-physical interfaces
+    if interface == "lo":
+        return True
+    for prefix in (
+        "docker",
+        "br-",
+        "veth",
+        "virbr",
+        "vmnet",
+        "zt",
+        "tailscale",
+        "wg",
+        "tun",
+        "tap",
+        "wlan",
+        "wl",
+    ):
+        if interface.startswith(prefix):
+            return True
+    return False
+
+def _iface_is_usb_ethernet(interface: str) -> bool:
+    # USB ethernet adapters are commonly named enx<MAC>
+    return interface.startswith("enx")
+
+def _iface_is_pci(interface: str) -> bool:
+    # Prefer interfaces whose device subsystem is PCI
+    subsystem_path = f"/sys/class/net/{interface}/device/subsystem"
+    if not os.path.exists(subsystem_path):
+        return False
+    try:
+        real = os.path.realpath(subsystem_path)
+        return os.path.basename(real) == "pci"
+    except OSError:
+        return False
+
+def select_pci_eth_iface(preferred: Optional[List[str]] = None) -> Optional[str]:
+    """Select the most likely PCI Ethernet interface.
+
+    Priority:
+      1) Preferred names if present (e.g., eno1, enP8p1s0)
+      2) Any interface backed by PCI subsystem
+
+    Excludes USB ethernet (enx*) and common virtual/non-physical interfaces.
+    """
+    preferred = preferred or []
+
+    for candidate in preferred:
+        if _iface_has_mac(candidate):
+            return candidate
+
+    try:
+        ifaces = sorted(os.listdir("/sys/class/net"))
+    except OSError:
+        return None
+
+    for iface in ifaces:
+        if _iface_is_virtual_or_non_eth(iface) or _iface_is_usb_ethernet(iface):
+            continue
+        if not _iface_has_mac(iface):
+            continue
+        if _iface_is_pci(iface):
+            return iface
+
+    return None
+
 def scan_arp(arp_scan_bin: str, interface: str) -> List[Tuple[str, str]]:
     """
     Returns list of (mac_lower, ip) discovered by arp-scan.
@@ -250,7 +320,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Scan network for RTSP cameras and output runtime config keyed by MAC address."
     )
-    ap.add_argument("--iface", default="eno1", help="Network interface to scan")
+    ap.add_argument(
+        "--iface",
+        default="auto",
+        help="Network interface to scan (default: auto-detect PCI ethernet; try eno1/enP8p1s0 first)",
+    )
     ap.add_argument("--user", default="admin", help="RTSP username")
     ap.add_argument("--password", default="Placemaking25", help="RTSP password")
     ap.add_argument("--port", type=int, default=554, help="RTSP port")
@@ -276,6 +350,14 @@ def main() -> int:
 
     require_root()
 
+    iface = args.iface
+    if iface.strip().lower() == "auto":
+        iface = select_pci_eth_iface(preferred=["eno1", "enP8p1s0"]) or ""
+    if not iface or not os.path.exists(f"/sys/class/net/{iface}"):
+        raise RuntimeError(
+            "No suitable ethernet interface found. Specify one explicitly with --iface <name>."
+        )
+
     arp_scan_bin = which_or_fail(
         "arp-scan", extra_paths=["/usr/sbin/arp-scan", "/sbin/arp-scan"]
     )
@@ -283,13 +365,13 @@ def main() -> int:
         "ffprobe", extra_paths=["/usr/bin/ffprobe", "/bin/ffprobe"]
     )
 
-    log("INFO", f"Interface: {args.iface}")
+    log("INFO", f"Interface: {iface}")
     log("INFO", f"Output: {os.path.abspath(args.output)}")
 
     cameras = scan_cameras(
         arp_scan_bin=arp_scan_bin,
         ffprobe_bin=ffprobe_bin,
-        interface=args.iface,
+        interface=iface,
         user=args.user,
         password=args.password,
         port=args.port,
