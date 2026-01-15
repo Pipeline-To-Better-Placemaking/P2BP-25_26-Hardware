@@ -110,20 +110,18 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
                     page.click('button:has-text("Login")')
 
                 print("[ANNKE] Logged in to camera.")
-                page.wait_for_load_state("domcontentloaded")
+                # Post-login is often SPA-driven; wait for the top nav to appear.
+                page.wait_for_selector("ul#nav", timeout=timeout_ms)
 
             # Navigate: Configuration -> Image -> OSD Settings.
-            # Some firmwares keep the URL as /doc/page/config.asp while using JS navigation.
-            # Prefer the on-page jumpTo('config') hook.
-            # Wait for top nav to exist (post-login screens are JS-driven).
-            page.wait_for_selector("#nav", timeout=timeout_ms)
+            page.wait_for_selector("ul#nav", timeout=timeout_ms)
 
-            config_nav = page.locator('#nav a[ng-click*="jumpTo(\'config\')"]:visible')
+            config_nav = page.locator('ul#nav a[ng-click*="jumpTo(\'config\')"]')
             if config_nav.count() > 0:
                 config_nav.first.click()
             else:
-                # Text fallback (seen in the header nav)
-                config_by_text = page.locator('#nav a:has-text("Configuration"):visible')
+                # Text fallback
+                config_by_text = page.locator('ul#nav a:has-text("Configuration")')
                 if config_by_text.count() > 0:
                     config_by_text.first.click()
                 else:
@@ -132,15 +130,17 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
                     except Exception:
                         pass
 
-            # Wait until the Configuration left menu is visible.
-            # (On some firmwares, #menu isn't reliable for visibility, but the Image item is.)
-            page.wait_for_selector('div[name="image"]', timeout=timeout_ms)
+            # Wait until we're actually on the Configuration view.
+            try:
+                page.wait_for_selector("body#config", timeout=timeout_ms)
+            except PlaywrightTimeout:
+                page.wait_for_selector("#menu", timeout=timeout_ms)
 
-            image_menu = page.locator('div[name="image"] .menu-title, div[name="image"]')
+            image_menu = page.locator('#menu div[name="image"] .menu-title, #menu div[name="image"], div[name="image"]')
             if image_menu.count() > 0:
                 image_menu.click()
 
-            # Click the OSD tab; don't depend on URL changes.
+            # Click the OSD tab
             osd_tab = page.locator('#tabs li[module="osd"] a, #tabs a[href*="config/image/osd.asp"], #tabs a:has-text("OSD Settings")')
             if osd_tab.count() > 0:
                 osd_tab.first.click()
