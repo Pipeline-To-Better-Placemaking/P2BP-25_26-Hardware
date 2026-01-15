@@ -35,6 +35,7 @@ echo "Creating application directories..."
 sudo mkdir -p $APP_ROOT/scripts
 sudo mkdir -p $APP_ROOT/config
 sudo mkdir -p $APP_ROOT/services
+sudo mkdir -p $APP_ROOT/osnet
 
 # Configure environment variables
 echo "Configuring API credentials..."
@@ -115,6 +116,14 @@ sudo playwright install
 # Install scripts
 echo "Installing scripts..."
 sudo rsync -a --delete scripts/ $APP_ROOT/scripts/
+
+# Install OSNet assets (models/weights/code)
+if [ -d "osnet" ]; then
+  echo "Installing osnet..."
+  sudo rsync -a --delete osnet/ $APP_ROOT/osnet/
+else
+  echo "Warning: osnet directory not found; skipping osnet install."
+fi
 
 # Set app root directory permissions
 sudo chown -R root:root /opt/p2bp
