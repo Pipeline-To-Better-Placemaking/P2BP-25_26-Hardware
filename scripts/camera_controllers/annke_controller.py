@@ -6,6 +6,8 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 
 ACTIVATION_PASSWORD = "Placemaking25"
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = ACTIVATION_PASSWORD
 STATUS_ENDPOINT = "/ISAPI/System/status"
 
 PLAYWRIGHT_ARGS = [
@@ -65,6 +67,102 @@ def _activate_via_browser(ip: str, headless: bool = True) -> None:
         time.sleep(2)
 
         browser.close()
+
+
+def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -> bool:
+    """Disable OSD overlay text (Display Name + Display Date) via the camera web UI.
+
+    Flow (matches UI): Login -> Configuration -> Image -> OSD Settings -> uncheck -> Save.
+    Idempotent: leaves checkboxes unchecked if already unchecked.
+    """
+
+    if not _is_activated(ip):
+        print(f"[ANNKE] Camera {ip} appears not activated; cannot disable OSD.")
+        return False
+
+    login_url = f"http://{ip}/doc/page/login.asp"
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=PLAYWRIGHT_ARGS,
+            )
+
+            page = browser.new_page()
+            page.set_default_timeout(timeout_ms)
+            page.goto(login_url, wait_until="domcontentloaded")
+
+            # If we landed on the activation screen, we can't proceed with login/settings.
+            if page.locator("#activePassword").count() > 0:
+                print(f"[ANNKE] Camera {ip} is showing activation UI; cannot disable OSD.")
+                browser.close()
+                return False
+
+            # Login (if prompted).
+            if page.locator("#username").count() > 0:
+                page.fill("#username", ADMIN_USERNAME)
+                page.fill("#password", ADMIN_PASSWORD)
+
+                login_btn = page.locator('button[ng-click="login()"]')
+                if login_btn.count() > 0:
+                    login_btn.click()
+                else:
+                    page.click('button:has-text("Login")')
+
+                page.wait_for_load_state("domcontentloaded")
+
+            # Navigate: Configuration -> Image -> OSD Settings.
+            config_nav = page.locator('#nav a:has-text("Configuration")')
+            if config_nav.count() > 0:
+                config_nav.click()
+                page.wait_for_load_state("domcontentloaded")
+
+            image_menu = page.locator('#menu div[name="image"] .menu-title')
+            if image_menu.count() > 0:
+                image_menu.click()
+                page.wait_for_load_state("domcontentloaded")
+
+            osd_tab = page.locator('#tabs a:has-text("OSD Settings")')
+            if osd_tab.count() > 0:
+                osd_tab.click()
+                page.wait_for_load_state("domcontentloaded")
+            else:
+                # Fallback to direct URL in case the tab isn't present yet.
+                page.goto(f"http://{ip}/doc/page/config/image/osd.asp", wait_until="domcontentloaded")
+
+            # Toggle checkboxes (selectors derived from saved HTML).
+            display_name = page.locator('input[ng-model="oOsdParams.bDisplayName"]')
+            display_date = page.locator('input[ng-model="oOsdParams.bDisplayDate"]')
+
+            display_name.wait_for()
+            display_date.wait_for()
+
+            if display_name.is_checked():
+                display_name.uncheck()
+
+            if display_date.is_checked():
+                display_date.uncheck()
+
+            # Save.
+            save_btn = page.locator('button.btn-save')
+            if save_btn.count() == 0:
+                save_btn = page.locator('button[ng-click="save()"]')
+            save_btn.click()
+
+            # Give UI time to apply.
+            time.sleep(1)
+
+            browser.close()
+
+    except PlaywrightTimeout as e:
+        print(f"[ANNKE] OSD UI timeout for {ip}: {e}")
+        return False
+    except Exception as e:
+        print(f"[ANNKE] Failed to disable OSD for {ip}: {e}")
+        return False
+
+    return True
 
 def ensure_activated(ip: str, headless: bool = True) -> bool:
     """

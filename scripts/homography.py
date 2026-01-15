@@ -88,15 +88,27 @@ def _get_int(d: Dict, key: str, default: int) -> int:
 
 def atomic_write_json(path: Path, data: Dict) -> None: #atomic wriitng to avoid partial writes
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    # Preferred: atomic replace via temp file in the same directory.
+    # Under some deployments (e.g., systemd sandboxing or restrictive directory perms),
+    # creating a temp file in config/ may be disallowed even if the target file itself
+    # is writable. In that case, fall back to an in-place write.
+    tmp_path: Optional[str] = None
     try:
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, sort_keys=False)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        tmp_path = None
+    except PermissionError:
+        # Fallback: write directly to the file (non-atomic).
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
     finally:
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
@@ -530,17 +542,41 @@ def run_once(base_dir: Path) -> None:
 def run_service(base_dir: Path, poll_seconds: float) -> None:
     cfg_path = base_dir / "config" / "config.json"
     print(f"Watching: {cfg_path}")
+    last_begin_scanning: Optional[bool] = None
+    last_cfg_mtime: Optional[float] = None
     while True:
         try:
             if cfg_path.exists():
+                try:
+                    mtime = cfg_path.stat().st_mtime
+                except OSError:
+                    mtime = None
                 config = load_json(cfg_path)
                 cbcfg = config.get("CharucoBoard") if isinstance(config, dict) else None
-                if isinstance(cbcfg, dict) and bool(cbcfg.get("BeginScanning")):
-                    run_once(base_dir=base_dir)
+                if isinstance(cbcfg, dict):
+                    begin = bool(cbcfg.get("BeginScanning"))
+
+                    # Avoid infinite rescans if we cannot write BeginScanning back to false.
+                    # Only trigger when BeginScanning transitions false->true, OR when the
+                    # config file changes on disk while BeginScanning is true.
+                    should_trigger = False
+                    if begin:
+                        if last_begin_scanning is False or last_begin_scanning is None:
+                            should_trigger = True
+                        elif mtime is not None and last_cfg_mtime is not None and mtime != last_cfg_mtime:
+                            should_trigger = True
+
+                    last_begin_scanning = begin
+                    if mtime is not None:
+                        last_cfg_mtime = mtime
+
+                    if should_trigger:
+                        run_once(base_dir=base_dir)
         except KeyboardInterrupt:
             print("Exiting.")
             return
         except Exception as e:
+            print(f"Error in homography service loop: {e}")
             #crash control
             try:
                 config = load_json(cfg_path) if cfg_path.exists() else {}
