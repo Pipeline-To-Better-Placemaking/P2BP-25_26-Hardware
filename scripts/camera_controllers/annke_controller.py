@@ -115,16 +115,19 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
             # Navigate: Configuration -> Image -> OSD Settings.
             # Some firmwares keep the URL as /doc/page/config.asp while using JS navigation.
             # Prefer the on-page jumpTo('config') hook.
-            config_nav = page.locator(
-                'a[ng-click="jumpTo(\'config\')"], a[ng-click="jumpTo(\"config\")"]'
-            )
+            config_nav = page.locator('a[ng-click*="jumpTo(\'config\')"]')
             if config_nav.count() > 0:
                 config_nav.first.click()
             else:
-                try:
-                    page.evaluate("typeof jumpTo === 'function' && jumpTo('config')")
-                except Exception:
-                    pass
+                # Text fallback (seen in the header nav)
+                config_by_text = page.locator('#nav a:has-text("Configuration")')
+                if config_by_text.count() > 0:
+                    config_by_text.first.click()
+                else:
+                    try:
+                        page.evaluate("typeof jumpTo === 'function' && jumpTo('config')")
+                    except Exception:
+                        pass
 
             # Wait for the config menu to appear.
             page.wait_for_selector("#menu", timeout=timeout_ms)
