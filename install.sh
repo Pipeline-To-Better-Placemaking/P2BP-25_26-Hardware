@@ -137,12 +137,62 @@ else
   done
 fi
 
-# Configure deterministic link-local IP for eno1 (camera network)
-echo "Configuring deterministic link-local IP for eno1..."
+# Configure deterministic link-local IP for the PCI Ethernet interface (camera network)
+echo "Configuring deterministic link-local IP for the PCI Ethernet interface..."
 
-IFACE="eno1"
-if [ -e "/sys/class/net/$IFACE/address" ]; then
-  MAC=$(cat "/sys/class/net/$IFACE/address" | tr -d ':')
+# Some Jetson images name the onboard/PCI NIC differently (e.g. eno1, enP8p1s0, enp*).
+# We prefer known names when present, otherwise auto-detect a PCI NIC. We intentionally
+# avoid USB Ethernet adapters, which often appear as enx<MAC>.
+
+select_pci_eth_iface() {
+  # Prefer known/expected names first
+  for candidate in "eno1" "enP8p1s0"; do
+    if [ -e "/sys/class/net/$candidate/address" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  # Auto-detect a PCI NIC
+  for iface_path in /sys/class/net/*; do
+    iface=$(basename "$iface_path")
+
+    # Skip loopback and common non-physical interfaces
+    case "$iface" in
+      lo|docker*|br-*|veth*|virbr*|vmnet*|zt*|tailscale*|wg*|tun*|tap*|wlan*|wl*)
+        continue
+        ;;
+    esac
+
+    # Skip USB ethernet (typically enx<MAC>)
+    case "$iface" in
+      enx*)
+        continue
+        ;;
+    esac
+
+    # Must have a MAC address
+    [ -e "/sys/class/net/$iface/address" ] || continue
+
+    # Prefer interfaces whose device subsystem is PCI
+    if [ -e "/sys/class/net/$iface/device/subsystem" ]; then
+      subsystem=$(basename "$(readlink -f "/sys/class/net/$iface/device/subsystem")")
+      if [ "$subsystem" = "pci" ]; then
+        echo "$iface"
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
+IFACE=""
+IFACE=$(select_pci_eth_iface 2>/dev/null || true)
+if [ -n "$IFACE" ] && [ -e "/sys/class/net/$IFACE/address" ]; then
+  echo "Selected interface: $IFACE"
+
+  MAC=$(tr -d ':' < "/sys/class/net/$IFACE/address")
   BYTE1=$((0x${MAC:8:2}))
   BYTE2=$((0x${MAC:10:2}))
 
@@ -152,7 +202,8 @@ if [ -e "/sys/class/net/$IFACE/address" ]; then
   IP_ADDR="169.254.$BYTE1.$BYTE2"
 
   if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager; then
-    CON_NAME="eno1-linklocal"
+    # Keep connection name stable even if IFACE changes.
+    CON_NAME="p2bp-linklocal"
     if ! nmcli -t -f NAME connection show | grep -Fxq "$CON_NAME"; then
       sudo nmcli connection add type ethernet ifname "$IFACE" con-name "$CON_NAME" \
         ipv4.method manual ipv4.addresses "$IP_ADDR/16" ipv4.never-default yes \
@@ -164,7 +215,7 @@ if [ -e "/sys/class/net/$IFACE/address" ]; then
         ipv6.method ignore connection.autoconnect yes >/dev/null
     fi
 
-    # Bring up only eno1 connection (should not impact USB Ethernet)
+    # Bring up only the selected PCI ethernet connection (should not impact USB Ethernet)
     sudo nmcli connection up "$CON_NAME" >/dev/null || true
     echo "Assigned $IP_ADDR/16 to $IFACE via NetworkManager ($CON_NAME)"
   else
@@ -174,7 +225,7 @@ if [ -e "/sys/class/net/$IFACE/address" ]; then
     echo "Assigned $IP_ADDR/16 to $IFACE (non-persistent fallback)"
   fi
 else
-  echo "Warning: $IFACE not found; skipping eno1 link-local configuration."
+  echo "Warning: No suitable PCI ethernet interface found; skipping link-local configuration."
 fi
 
 echo "Installation complete."

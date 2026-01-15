@@ -11,7 +11,13 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from osnet_ibn1_lite.encoder import OsNetEncoder
+try:
+    from osnet_ibn1_lite.encoder import OsNetEncoder
+except Exception as e:
+    OsNetEncoder = None  # type: ignore
+    _OSNET_IMPORT_ERROR = e
+else:
+    _OSNET_IMPORT_ERROR = None
 
 try:
     # When running as `python scripts/tracker.py`.
@@ -43,18 +49,58 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 YOLO_MODEL: Optional[YOLO] = None
 YOLO_LOCK = threading.Lock()
 
-osnet = OsNetEncoder(
-    input_width=704,
-    input_height=480,
-    weight_filepath=os.path.join(BASE_DIR, "osnet_ibn1_lite", "model_weights.pth.tar-40"),
-    batch_size=32,
-    num_classes=2022,
-    patch_height=256,
-    patch_width=128,
-    norm_mean=[0.485, 0.456, 0.406],
-    norm_std=[0.229, 0.224, 0.225],
-    GPU=(DEVICE == "cuda"),
-)
+osnet = None
+
+
+def _require_osnet() -> bool:
+    """Ensure OSNet is available; log and return False if not.
+
+    We intentionally avoid raising a full traceback under systemd because Ubuntu's
+    crash reporter may try to write to /var/crash, which is blocked by
+    ProtectSystem=strict.
+    """
+
+    global osnet
+
+    if _OSNET_IMPORT_ERROR is not None or OsNetEncoder is None:
+        print(
+            "[FATAL] OSNet is required but could not be imported. "
+            "Ensure the osnet_ibn1_lite package is present under /opt/p2bp/camera/osnet_ibn1_lite "
+            "(or installed on PYTHONPATH). "
+            f"Import error: {_OSNET_IMPORT_ERROR}"
+        )
+        return False
+
+    weights_path = os.environ.get("OSNET_WEIGHTS_PATH") or os.path.join(
+        BASE_DIR, "osnet_ibn1_lite", "model_weights.pth.tar-40"
+    )
+    if not os.path.isabs(weights_path):
+        weights_path = os.path.join(BASE_DIR, weights_path)
+    if not os.path.exists(weights_path):
+        print(
+            "[FATAL] OSNet weights missing. Expected weights at: "
+            f"{weights_path}"
+        )
+        return False
+
+    try:
+        osnet = OsNetEncoder(
+            input_width=704,
+            input_height=480,
+            weight_filepath=weights_path,
+            batch_size=32,
+            num_classes=2022,
+            patch_height=256,
+            patch_width=128,
+            norm_mean=[0.485, 0.456, 0.406],
+            norm_std=[0.229, 0.224, 0.225],
+            GPU=(DEVICE == "cuda"),
+        )
+    except Exception as e:
+        print(f"[FATAL] OSNet initialization failed: {e}")
+        return False
+
+    return True
 
 
 def _load_app_config() -> Dict[str, Any]:
@@ -262,6 +308,10 @@ class CameraThread(threading.Thread):
     def run(self):
         last_process = 0.0
         while True:
+            if osnet is None:
+                print("[FATAL] OSNet is required but was not initialized; stopping camera thread")
+                return
+
             if self.frame_queue.empty():
                 time.sleep(0.001)
                 continue
@@ -351,6 +401,9 @@ class CameraThread(threading.Thread):
 
 # ---------------- MAIN ----------------
 def main():
+    if not _require_osnet():
+        return
+
     cfg = _load_app_config()
     tracking_cfg = cfg.get("Tracking", {}) if isinstance(cfg.get("Tracking"), dict) else {}
     enabled = bool(tracking_cfg.get("Enabled", True))
