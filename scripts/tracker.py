@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -11,6 +12,36 @@ import cv2
 import numpy as np
 import torch
 from ultralytics import YOLO
+
+
+def _patch_torch_load_weights_only_default() -> None:
+    """PyTorch 2.6 changed torch.load(weights_only=...) default behavior.
+
+    Some older Ultralytics weights (and older ultralytics versions) expect
+    torch.load(..., weights_only=False). When the default is weights_only=True,
+    loading can fail with errors like:
+      Weights only load failed ... Unsupported global: GLOBAL torch.nn.modules.container.Sequential
+
+    This is a targeted compatibility shim for loading local model weights.
+    """
+
+    try:
+        import inspect
+
+        sig = inspect.signature(torch.load)
+        if "weights_only" not in sig.parameters:
+            return
+    except Exception:
+        # If we can't introspect, don't patch.
+        return
+
+    original_load = torch.load
+
+    def _patched_load(*args, **kwargs):  # type: ignore
+        kwargs.setdefault("weights_only", False)
+        return original_load(*args, **kwargs)
+
+    torch.load = _patched_load  # type: ignore
 
 # PyTorch 2.6 changed torch.load() defaults/behavior around "weights_only" and safe
 # unpickling, which can break older Ultralytics weight loading with errors like:
@@ -79,8 +110,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ---------------- MODELS ----------------
-YOLO_MODEL: Optional[YOLO] = None
-YOLO_LOCK = threading.Lock()
+_BOOTSTRAP_YOLO_MODEL: Optional[YOLO] = None
+
+STOP_EVENT = threading.Event()
 
 osnet = None
 
@@ -157,14 +189,85 @@ def _load_app_config() -> Dict[str, Any]:
     return data
 
 
+def _has_gui_display() -> bool:
+    """Best-effort check whether a GUI display is available.
+
+    Under systemd services there is usually no DISPLAY/WAYLAND_DISPLAY, and
+    calling cv2.imshow() can hang or error.
+    """
+
+    # Windows/macOS generally have a GUI session.
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return True
+
+    # Linux/Unix: require an actual display environment.
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _should_show_preview(tracking_cfg: Dict[str, Any]) -> bool:
+    # Allow explicit override via environment.
+    env = os.environ.get("P2BP_TRACKER_PREVIEW")
+    if env is not None:
+        return env.strip().lower() in ("1", "true", "yes", "on")
+
+    # Config flag (default False for systemd safety).
+    return bool(tracking_cfg.get("Preview", False))
+
+
+def _configure_ultralytics_dirs() -> None:
+    """Configure Ultralytics settings/cache to be service-friendly.
+
+    Ultralytics downloads model weights to a cache directory (not the working
+    directory). Under systemd, HOME/XDG paths can be non-writable or unexpected.
+    We prefer to keep caches inside the repo root so they are permitted by
+    ReadWritePaths.
+    """
+
+    try:
+        os.makedirs(MODELS_YOLO_DIR, exist_ok=True)
+    except Exception:
+        # If we can't create the directory, Ultralytics will fall back to its
+        # default cache locations.
+        return
+
+    # Steer caches/config into the service working directory if not already set.
+    # (Do not override if the unit file sets these explicitly.)
+    os.environ.setdefault("HOME", BASE_DIR)
+    os.environ.setdefault("XDG_CACHE_HOME", os.path.join(BASE_DIR, ".cache"))
+    os.environ.setdefault("YOLO_CONFIG_DIR", os.path.join(BASE_DIR, ".config", "Ultralytics"))
+
+    # Best-effort: update Ultralytics internal settings if available.
+    try:
+        from ultralytics.utils import SETTINGS  # type: ignore
+
+        try:
+            SETTINGS["weights_dir"] = MODELS_YOLO_DIR
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _resolve_yolo_weights(model_setting: str) -> str:
     # Allows either friendly names (from config.json) or direct paths.
     mapping = {
-        "Yolov10n": "yolov10n.pt",
-        "Yolov10m": "yolov10m.pt",
-        "Yolov8n": "yolov8n.pt",
+        "yolov10n": "yolov10n.pt",
+        "yolov10m": "yolov10m.pt",
+        "yolov8n": "yolov8n.pt",
     }
-    candidate = mapping.get(model_setting, model_setting)
+
+    raw = str(model_setting).strip()
+    key = raw.strip().lower()
+    candidate = mapping.get(key, raw)
+
+    # Normalize common cases like "yolov8n" -> "yolov8n.pt".
+    # If the user already provided an extension (e.g., .pt), keep it.
+    if isinstance(candidate, str):
+        cand = candidate.strip()
+        cand_lower = cand.lower()
+        if cand_lower.startswith("yolov") and "." not in os.path.basename(cand) and not cand_lower.endswith(".pt"):
+            candidate = f"{cand}.pt"
+
     if os.path.isabs(candidate):
         return candidate
 
@@ -180,6 +283,57 @@ def _resolve_yolo_weights(model_setting: str) -> str:
 
     # Back-compat: workspace-root-relative paths.
     return os.path.join(BASE_DIR, candidate)
+
+
+def _build_yolo_model(model_setting: str) -> YOLO:
+    """Create a YOLO model, downloading weights if needed."""
+
+    weights_path = _resolve_yolo_weights(model_setting)
+    if os.path.exists(weights_path):
+        return YOLO(weights_path)
+
+    # If missing, attempt to let Ultralytics auto-download into our weights_dir.
+    print(f"[WARN] YOLO weights not found at {weights_path}; attempting auto-download via Ultralytics")
+    _configure_ultralytics_dirs()
+
+    # Use a stem/filename for Ultralytics auto-download (it does not download to
+    # arbitrary non-existent paths).
+    mapping = {
+        "yolov10n": "yolov10n.pt",
+        "yolov10m": "yolov10m.pt",
+        "yolov8n": "yolov8n.pt",
+    }
+    raw = str(model_setting).strip()
+    candidate = mapping.get(raw.lower(), raw)
+    candidate = os.path.basename(str(candidate))
+    if candidate.lower().startswith("yolov") and "." not in candidate and not candidate.lower().endswith(".pt"):
+        candidate = f"{candidate}.pt"
+    return YOLO(candidate)
+
+
+def _yolo_weights_spec_for_threads(model_setting: str) -> str:
+    """Return a weights spec that each camera thread can pass to YOLO(...).
+
+    Prefer an absolute path under models/yolo when present; otherwise return a
+    model filename (e.g. "yolov8n.pt") which Ultralytics can resolve from its
+    cache.
+    """
+
+    weights_path = _resolve_yolo_weights(model_setting)
+    if os.path.exists(weights_path):
+        return weights_path
+
+    mapping = {
+        "yolov10n": "yolov10n.pt",
+        "yolov10m": "yolov10m.pt",
+        "yolov8n": "yolov8n.pt",
+    }
+    raw = str(model_setting).strip()
+    candidate = mapping.get(raw.lower(), raw)
+    candidate = os.path.basename(str(candidate))
+    if candidate.lower().startswith("yolov") and "." not in candidate and not candidate.lower().endswith(".pt"):
+        candidate = f"{candidate}.pt"
+    return candidate
 
 
 def _safe_float(x: Any, default: float) -> float:
@@ -309,17 +463,26 @@ class CameraThread(threading.Thread):
         self,
         mac: str,
         cam: Any,
+        yolo_weights: str,
         conf_thresh: float,
         imgsz: int,
         max_fps: int,
         min_box: int,
         undistorter: Undistorter,
+        stop_event: threading.Event,
     ):
-        super().__init__(daemon=True)
+        super().__init__(daemon=False)
         self.mac = mac
         self.cam = cam
+        self.stop_event = stop_event
         self.display_name = getattr(cam, "name", None) or getattr(cam, "ip", None) or mac
-        self.cap = cv2.VideoCapture(getattr(cam, "rtsp"))
+        self.rtsp = str(getattr(cam, "rtsp"))
+        self.cap = cv2.VideoCapture(self.rtsp, cv2.CAP_FFMPEG)
+        try:
+            # Reduce latency/backlog when possible.
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        except Exception:
+            pass
         self.frame_queue = Queue(maxsize=5)
         self.frame_id = 0
         self.frame = None
@@ -328,6 +491,9 @@ class CameraThread(threading.Thread):
         self.next_sid = 0
         self.tracks_local: Dict[int, Dict[str, Any]] = {}
         self.output_tracks: Dict[int, Dict[str, Any]] = {}
+
+        # Per-camera YOLO instance so ByteTrack state does not bleed across cameras.
+        self.yolo = YOLO(yolo_weights)
 
         self.conf_thresh = conf_thresh
         self.imgsz = imgsz
@@ -341,15 +507,46 @@ class CameraThread(threading.Thread):
             except Exception:
                 self.homography = None
 
-        threading.Thread(target=self.read_frames, daemon=True).start()
+        self._reader_thread = threading.Thread(target=self.read_frames, daemon=True)
+        self._reader_thread.start()
 
     def read_frames(self):
-        while True:
-            ret, frame = self.cap.read()
-            if ret:
-                if self.frame_queue.full():
-                    self.frame_queue.get_nowait()
-                self.frame_queue.put(frame)
+        consecutive_failures = 0
+        while not self.stop_event.is_set():
+            try:
+                ret, frame = self.cap.read()
+            except Exception:
+                ret, frame = False, None
+
+            if ret and frame is not None:
+                consecutive_failures = 0
+                try:
+                    if self.frame_queue.full():
+                        self.frame_queue.get_nowait()
+                    self.frame_queue.put(frame)
+                except Exception:
+                    pass
+                continue
+
+            consecutive_failures += 1
+            # Backoff a bit on read failures.
+            time.sleep(0.05)
+
+            # If the stream stalls, try reopening.
+            if consecutive_failures >= 100 and not self.stop_event.is_set():
+                consecutive_failures = 0
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                try:
+                    self.cap = cv2.VideoCapture(self.rtsp, cv2.CAP_FFMPEG)
+                    try:
+                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
     def _get_sid(self, bt_id):
         if bt_id in self.bt_to_sid:
@@ -362,7 +559,7 @@ class CameraThread(threading.Thread):
 
     def run(self):
         last_process = 0.0
-        while True:
+        while not self.stop_event.is_set():
             if osnet is None:
                 print("[FATAL] OSNet is required but was not initialized; stopping camera thread")
                 return
@@ -384,15 +581,15 @@ class CameraThread(threading.Thread):
             # Undistort (if intrinsics available for this camera).
             frame = self.undistorter.undistort(frame)
 
-            if YOLO_MODEL is None:
-                # Should be initialized in main() before threads start.
-                time.sleep(0.01)
-                continue
-
-            with YOLO_LOCK:
-                results = YOLO_MODEL.track(frame, conf=self.conf_thresh, imgsz=self.imgsz,
-                                           classes=[0], persist=True,
-                                           tracker="bytetrack.yaml", verbose=False)
+            results = self.yolo.track(
+                frame,
+                conf=self.conf_thresh,
+                imgsz=self.imgsz,
+                classes=[0],
+                persist=True,
+                tracker="bytetrack.yaml",
+                verbose=False,
+            )
 
             if not results or results[0].boxes is None or results[0].boxes.id is None:
                 self.frame = frame
@@ -454,6 +651,11 @@ class CameraThread(threading.Thread):
 
             self.frame = frame
 
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
 # ---------------- MAIN ----------------
 def main():
     if not _require_osnet():
@@ -470,13 +672,18 @@ def main():
     conf_thresh = _safe_float(tracking_cfg.get("ConfidenceThreshold"), DEFAULT_CONF_THRESH)
     max_fps = _safe_int(tracking_cfg.get("MaxFps"), DEFAULT_MAX_FPS)
 
-    weights_path = _resolve_yolo_weights(model_setting)
-    if not os.path.exists(weights_path):
-        print(f"[WARN] YOLO weights not found at {weights_path}; falling back to model_setting={model_setting}")
-        weights_path = model_setting
+    _patch_torch_load_weights_only_default()
 
-    global YOLO_MODEL
-    YOLO_MODEL = YOLO(weights_path)
+    # Bootstrap once to (a) validate weights load and (b) trigger an auto-download
+    # if needed. Each camera thread will still use its own YOLO instance.
+    global _BOOTSTRAP_YOLO_MODEL
+    _BOOTSTRAP_YOLO_MODEL = _build_yolo_model(model_setting)
+    yolo_weights_spec = _yolo_weights_spec_for_threads(model_setting)
+
+    show_preview = _should_show_preview(tracking_cfg)
+    if show_preview and not _has_gui_display():
+        print("[WARN] Tracking preview requested but no GUI display detected; disabling preview.")
+        show_preview = False
 
     tracking_cams = cfg.get("TrackingCameras", {}) if isinstance(cfg.get("TrackingCameras"), dict) else {}
     enabled_macs = [mac for mac, on in tracking_cams.items() if bool(on)]
@@ -485,108 +692,142 @@ def main():
         return
 
     cams: List[CameraThread] = []
-    for i, mac in enumerate(enabled_macs):
-        cam = camera_handler.get_camera(mac)
-        if cam is None:
-            print(f"[WARN] Camera not found in runtime file for MAC: {mac}")
-            continue
 
-        rtsp = getattr(cam, "rtsp", None)
-        if not isinstance(rtsp, str) or not rtsp.strip():
-            print(f"[WARN] Camera {mac} has no RTSP URL; skipping")
-            continue
+    def _handle_stop(signum, frame):  # type: ignore
+        STOP_EVENT.set()
 
-        # Preferred: use scaled intrinsics from camera_handler (already adjusted to config Camera.Resolution).
-        K = getattr(cam, "camera_matrix", None)
-        dist = getattr(cam, "distortion_coefficients", None)
-        declared_size: Optional[Tuple[int, int]] = None
-        try:
-            res = getattr(cam, "resolution", None)
-            if isinstance(res, (list, tuple)) and len(res) == 2:
-                declared_size = (int(res[0]), int(res[1]))
-        except Exception:
-            declared_size = None
+    try:
+        signal.signal(signal.SIGINT, _handle_stop)
+    except Exception:
+        pass
+    try:
+        signal.signal(signal.SIGTERM, _handle_stop)
+    except Exception:
+        pass
 
-        K_np: Optional[np.ndarray] = None
-        dist_np: Optional[np.ndarray] = None
-        if K is not None and dist is not None:
+    try:
+        for i, mac in enumerate(enabled_macs):
+            cam = camera_handler.get_camera(mac)
+            if cam is None:
+                print(f"[WARN] Camera not found in runtime file for MAC: {mac}")
+                continue
+
+            rtsp = getattr(cam, "rtsp", None)
+            if not isinstance(rtsp, str) or not rtsp.strip():
+                print(f"[WARN] Camera {mac} has no RTSP URL; skipping")
+                continue
+
+            # Preferred: use scaled intrinsics from camera_handler (already adjusted to config Camera.Resolution).
+            K = getattr(cam, "camera_matrix", None)
+            dist = getattr(cam, "distortion_coefficients", None)
+            declared_size: Optional[Tuple[int, int]] = None
             try:
-                K_np = np.array(K, dtype=np.float64)
-                if K_np.shape != (3, 3):
+                res = getattr(cam, "resolution", None)
+                if isinstance(res, (list, tuple)) and len(res) == 2:
+                    declared_size = (int(res[0]), int(res[1]))
+            except Exception:
+                declared_size = None
+
+            K_np: Optional[np.ndarray] = None
+            dist_np: Optional[np.ndarray] = None
+            if K is not None and dist is not None:
+                try:
+                    K_np = np.array(K, dtype=np.float64)
+                    if K_np.shape != (3, 3):
+                        K_np = None
+                except Exception:
                     K_np = None
-            except Exception:
-                K_np = None
-            try:
-                dist_np = np.array(dist, dtype=np.float64).reshape(-1)
-            except Exception:
-                dist_np = None
+                try:
+                    dist_np = np.array(dist, dtype=np.float64).reshape(-1)
+                except Exception:
+                    dist_np = None
 
-        intrinsics_path: Optional[str] = None
-        intrinsics_source = "camera_handler" if (K_np is not None and dist_np is not None) else "legacy"
-        if K_np is None or dist_np is None:
-            # Fallback (legacy): Intrinsics file per camera: /config/<cameraname>.json
-            # We try a few reasonable names since config.json only has MACs.
-            cam_name = getattr(cam, "name", None) or f"cam{i}"
-            candidates = [
-                os.path.join(CONFIG_DIR, f"{mac}.json"),
-                os.path.join(CONFIG_DIR, f"{cam_name}.json"),
-                os.path.join(CONFIG_DIR, f"{cam_name}.intrinsics.json"),
-                os.path.join(CONFIG_DIR, f"cam{i}.json"),
-                os.path.join(CONFIG_DIR, f"{mac.replace(':', '_')}.json"),
-                os.path.join(CONFIG_DIR, f"{getattr(cam, 'ip', '')}.json") if getattr(cam, "ip", "") else "",
-            ]
-            candidates = [p for p in candidates if p]
-            intrinsics_path = next((p for p in candidates if os.path.exists(p)), None)
-            if intrinsics_path is None:
-                print(
-                    f"[WARN] No intrinsics provided by camera_handler for {mac} and no legacy intrinsics JSON found "
-                    f"(tried: {', '.join(os.path.basename(p) for p in candidates)})"
-                )
+            intrinsics_path: Optional[str] = None
+            intrinsics_source = "camera_handler" if (K_np is not None and dist_np is not None) else "legacy"
+            if K_np is None or dist_np is None:
+                # Fallback (legacy): Intrinsics file per camera: /config/<cameraname>.json
+                cam_name = getattr(cam, "name", None) or f"cam{i}"
+                candidates = [
+                    os.path.join(CONFIG_DIR, f"{mac}.json"),
+                    os.path.join(CONFIG_DIR, f"{cam_name}.json"),
+                    os.path.join(CONFIG_DIR, f"{cam_name}.intrinsics.json"),
+                    os.path.join(CONFIG_DIR, f"cam{i}.json"),
+                    os.path.join(CONFIG_DIR, f"{mac.replace(':', '_')}.json"),
+                    os.path.join(CONFIG_DIR, f"{getattr(cam, 'ip', '')}.json") if getattr(cam, "ip", "") else "",
+                ]
+                candidates = [p for p in candidates if p]
+                intrinsics_path = next((p for p in candidates if os.path.exists(p)), None)
+                if intrinsics_path is None:
+                    print(
+                        f"[WARN] No intrinsics provided by camera_handler for {mac} and no legacy intrinsics JSON found "
+                        f"(tried: {', '.join(os.path.basename(p) for p in candidates)})"
+                    )
+                else:
+                    print(f"[INFO] Using legacy intrinsics for {mac}: {os.path.relpath(intrinsics_path, BASE_DIR)}")
             else:
-                print(f"[INFO] Using legacy intrinsics for {mac}: {os.path.relpath(intrinsics_path, BASE_DIR)}")
-        else:
-            print(f"[INFO] Using camera_handler intrinsics for {mac}")
+                print(f"[INFO] Using camera_handler intrinsics for {mac}")
 
-        # Prevent accidental double-scaling:
-        # - camera_handler already scales intrinsics to the configured resolution.
-        # - only apply dynamic scaling when using legacy per-camera JSON intrinsics.
-        expected_size_for_scaling = declared_size if intrinsics_source == "legacy" else None
+            expected_size_for_scaling = declared_size if intrinsics_source == "legacy" else None
+            undistorter = Undistorter(
+                K=K_np,
+                dist=dist_np,
+                expected_size=expected_size_for_scaling,
+                intrinsics_path=intrinsics_path,
+            )
+            if (K_np is not None or dist_np is not None) and not undistorter.ready():
+                print(f"[WARN] camera_handler intrinsics present but invalid for {mac}")
+            if intrinsics_path and not undistorter.ready():
+                print(f"[WARN] Intrinsics file exists but could not be parsed: {intrinsics_path}")
 
-        undistorter = Undistorter(
-            K=K_np,
-            dist=dist_np,
-            expected_size=expected_size_for_scaling,
-            intrinsics_path=intrinsics_path,
-        )
-        if (K_np is not None or dist_np is not None) and not undistorter.ready():
-            print(f"[WARN] camera_handler intrinsics present but invalid for {mac}")
-        if intrinsics_path and not undistorter.ready():
-            print(f"[WARN] Intrinsics file exists but could not be parsed: {intrinsics_path}")
+            c = CameraThread(
+                mac=mac,
+                cam=cam,
+                yolo_weights=yolo_weights_spec,
+                conf_thresh=conf_thresh,
+                imgsz=DEFAULT_IMG_SIZE,
+                max_fps=max_fps,
+                min_box=DEFAULT_MIN_BOX,
+                undistorter=undistorter,
+                stop_event=STOP_EVENT,
+            )
+            cams.append(c)
+            c.start()
 
-        c = CameraThread(
-            mac=mac,
-            cam=cam,
-            conf_thresh=conf_thresh,
-            imgsz=DEFAULT_IMG_SIZE,
-            max_fps=max_fps,
-            min_box=DEFAULT_MIN_BOX,
-            undistorter=undistorter,
-        )
-        cams.append(c)
-        c.start()
+        if not cams:
+            print("[WARN] No camera threads started; exiting.")
+            return
 
-    if not cams:
-        print("[WARN] No camera threads started; exiting.")
+        while not STOP_EVENT.is_set():
+            if show_preview:
+                for c in cams:
+                    if c.frame is not None:
+                        cv2.imshow(f"{c.display_name}", cv2.resize(c.frame, (640, 360)))
+                if cv2.waitKey(1) == 27:
+                    break
+            else:
+                time.sleep(0.25)
+
+    except Exception as e:
+        STOP_EVENT.set()
+        print(f"[FATAL] tracker main loop failed: {e}")
         return
 
-    while True:
+    finally:
+        STOP_EVENT.set()
         for c in cams:
-            if c.frame is not None:
-                cv2.imshow(f"{c.display_name}", cv2.resize(c.frame, (640,360)))
-        if cv2.waitKey(1) == 27:
-            break
-
-    cv2.destroyAllWindows()
+            try:
+                c.join(timeout=2.0)
+            except Exception:
+                pass
+            try:
+                c.cap.release()
+            except Exception:
+                pass
+        if show_preview:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
 
     export: Dict[str, Dict[str, Any]] = {}
     for c in cams:

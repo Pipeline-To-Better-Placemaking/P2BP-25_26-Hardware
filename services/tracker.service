@@ -8,6 +8,12 @@ Type=simple
 WorkingDirectory=/opt/p2bp/camera
 ExecStart=/usr/bin/python3 -s -m scripts.tracker
 
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/opt/p2bp/camera
+Environment=XDG_CACHE_HOME=/opt/p2bp/camera/.cache
+Environment=MPLCONFIGDIR=/opt/p2bp/camera/.cache/matplotlib
+Environment=YOLO_CONFIG_DIR=/opt/p2bp/camera/.config/Ultralytics
+
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
