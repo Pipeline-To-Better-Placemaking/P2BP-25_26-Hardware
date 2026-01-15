@@ -16,3 +16,4 @@ playwright
 pyee
 greenlet
 lap>=0.4
+typing_extensions
