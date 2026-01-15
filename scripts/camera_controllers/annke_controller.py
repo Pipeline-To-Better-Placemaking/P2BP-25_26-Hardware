@@ -93,14 +93,13 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
             page.set_default_timeout(timeout_ms)
             page.goto(login_url, wait_until="domcontentloaded")
 
-            # If we landed on the activation screen, we can't proceed with login/settings.
-            if page.locator("#activePassword").count() > 0:
+            if page.locator("#activePassword").is_visible():
                 print(f"[ANNKE] Camera {ip} is showing activation UI; cannot disable OSD.")
                 browser.close()
                 return False
 
-            # Login (if prompted).
-            if page.locator("#username").count() > 0:
+            # Login
+            if page.locator("#username").is_visible():
                 page.fill("#username", ADMIN_USERNAME)
                 page.fill("#password", ADMIN_PASSWORD)
 
