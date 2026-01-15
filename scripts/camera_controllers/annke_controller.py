@@ -115,12 +115,15 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
             # Navigate: Configuration -> Image -> OSD Settings.
             # Some firmwares keep the URL as /doc/page/config.asp while using JS navigation.
             # Prefer the on-page jumpTo('config') hook.
-            config_nav = page.locator('a[ng-click*="jumpTo(\'config\')"]')
+            # Wait for top nav to exist (post-login screens are JS-driven).
+            page.wait_for_selector("#nav", timeout=timeout_ms)
+
+            config_nav = page.locator('#nav a[ng-click*="jumpTo(\'config\')"]:visible')
             if config_nav.count() > 0:
                 config_nav.first.click()
             else:
                 # Text fallback (seen in the header nav)
-                config_by_text = page.locator('#nav a:has-text("Configuration")')
+                config_by_text = page.locator('#nav a:has-text("Configuration"):visible')
                 if config_by_text.count() > 0:
                     config_by_text.first.click()
                 else:
@@ -129,10 +132,11 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
                     except Exception:
                         pass
 
-            # Wait for the config menu to appear.
-            page.wait_for_selector("#menu", timeout=timeout_ms)
+            # Wait until the Configuration left menu is visible.
+            # (On some firmwares, #menu isn't reliable for visibility, but the Image item is.)
+            page.wait_for_selector('div[name="image"]', timeout=timeout_ms)
 
-            image_menu = page.locator('#menu div[name="image"] .menu-title')
+            image_menu = page.locator('div[name="image"] .menu-title, div[name="image"]')
             if image_menu.count() > 0:
                 image_menu.click()
 
