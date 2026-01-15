@@ -35,7 +35,7 @@ echo "Creating application directories..."
 sudo mkdir -p $APP_ROOT/scripts
 sudo mkdir -p $APP_ROOT/config
 sudo mkdir -p $APP_ROOT/services
-sudo mkdir -p $APP_ROOT/osnet
+sudo mkdir -p $APP_ROOT/models
 
 # Configure environment variables
 echo "Configuring API credentials..."
@@ -117,12 +117,17 @@ sudo playwright install
 echo "Installing scripts..."
 sudo rsync -a --delete scripts/ $APP_ROOT/scripts/
 
-# Install OSNet assets (models/weights/code)
-if [ -d "osnet" ]; then
-  echo "Installing osnet..."
-  sudo rsync -a --delete osnet/ $APP_ROOT/osnet/
+# Install models (OSNet + YOLO weights)
+if [ -d "models" ]; then
+  echo "Installing models..."
+  sudo rsync -a --delete models/ $APP_ROOT/models/
+elif [ -d "osnet" ]; then
+  # Back-compat: older repo layout had ./osnet at the root.
+  echo "Installing models (legacy osnet layout detected)..."
+  sudo mkdir -p $APP_ROOT/models/osnet
+  sudo rsync -a --delete osnet/ $APP_ROOT/models/osnet/
 else
-  echo "Warning: osnet directory not found; skipping osnet install."
+  echo "Warning: models directory not found; skipping models install."
 fi
 
 # Set app root directory permissions

@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import time
 from collections import deque
@@ -11,13 +12,32 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+# PyTorch 2.6 changed torch.load() defaults/behavior around "weights_only" and safe
+# unpickling, which can break older Ultralytics weight loading with errors like:
+#   Unsupported global: GLOBAL ultralytics.nn.tasks.DetectionModel
+# We proactively allowlist the Ultralytics model class when the API is available.
 try:
-    # Preferred layout: repo checked out under ./osnet/osnet_ibn1_lite/
-    from osnet.osnet_ibn1_lite.encoder import OsNetEncoder  # type: ignore
+    if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
+        from ultralytics.nn.tasks import DetectionModel  # type: ignore
+
+        torch.serialization.add_safe_globals([DetectionModel])  # type: ignore
+except Exception:
+    # Best-effort: if this fails, Ultralytics may still work (or fail with a clear error).
+    pass
+
+try:
+    # Preferred layout: OSNet code lives under ./models/osnet/<variant>/
+    _BASE_DIR_FOR_IMPORTS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    _MODELS_OSNET_DIR = os.path.join(_BASE_DIR_FOR_IMPORTS, "models", "osnet")
+    if os.path.isdir(_MODELS_OSNET_DIR) and _MODELS_OSNET_DIR not in sys.path:
+        sys.path.insert(0, _MODELS_OSNET_DIR)
+
+    # Import directly from the variant folder (models/osnet/osnet_ibn1_lite)
+    from osnet_ibn1_lite.encoder import OsNetEncoder  # type: ignore
 except Exception as e1:
     try:
-        # Legacy layout: ./osnet_ibn1_lite/
-        from osnet_ibn1_lite.encoder import OsNetEncoder  # type: ignore
+        # Legacy layout (older repo): ./osnet/osnet_ibn1_lite/ packaged as osnet.osnet_ibn1_lite
+        from osnet.osnet_ibn1_lite.encoder import OsNetEncoder  # type: ignore
     except Exception as e2:
         OsNetEncoder = None  # type: ignore
         _OSNET_IMPORT_ERROR = e2
@@ -39,6 +59,9 @@ except Exception:
 
 # ---------------- PATHS ----------------
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+MODELS_OSNET_DIR = os.path.join(MODELS_DIR, "osnet")
+MODELS_YOLO_DIR = os.path.join(MODELS_DIR, "yolo")
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.json")
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
 
@@ -75,7 +98,7 @@ def _require_osnet() -> bool:
     if _OSNET_IMPORT_ERROR is not None or OsNetEncoder is None:
         print(
             "[FATAL] OSNet is required but could not be imported. "
-            "Ensure the osnet repo is present under /opt/p2bp/camera/osnet/osnet_ibn1_lite "
+            "Ensure the OSNet code is present under /opt/p2bp/camera/models/osnet/osnet_ibn1_lite "
             "(or installed on PYTHONPATH). "
             f"Import error: {_OSNET_IMPORT_ERROR}"
         )
@@ -90,6 +113,8 @@ def _require_osnet() -> bool:
         candidates = [weights_path]
     else:
         candidates = [
+            os.path.join(MODELS_OSNET_DIR, "osnet_ibn1_lite", "model_weights.pth.tar-40"),
+            # Back-compat locations
             os.path.join(BASE_DIR, "osnet", "osnet_ibn1_lite", "model_weights.pth.tar-40"),
             os.path.join(BASE_DIR, "osnet_ibn1_lite", "model_weights.pth.tar-40"),
         ]
@@ -140,9 +165,20 @@ def _resolve_yolo_weights(model_setting: str) -> str:
         "Yolov8n": "yolov8n.pt",
     }
     candidate = mapping.get(model_setting, model_setting)
-    # Prefer workspace-root-relative paths.
     if os.path.isabs(candidate):
         return candidate
+
+    # If the config provides a subpath (e.g., "models/yolo/yolov10n.pt"), treat it as
+    # workspace-root-relative.
+    if "/" in candidate or "\\" in candidate:
+        return os.path.join(BASE_DIR, candidate)
+
+    # Prefer the new location: ./models/yolo/<file>.pt
+    models_path = os.path.join(MODELS_YOLO_DIR, candidate)
+    if os.path.exists(models_path):
+        return models_path
+
+    # Back-compat: workspace-root-relative paths.
     return os.path.join(BASE_DIR, candidate)
 
 
