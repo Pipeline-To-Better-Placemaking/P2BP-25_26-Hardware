@@ -2,6 +2,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -103,8 +104,12 @@ DEFAULT_CONF_THRESH = 0.35
 DEFAULT_MAX_FPS = 30
 DEFAULT_IMG_SIZE = 640
 DEFAULT_MIN_BOX = 56
-DEFAULT_TRACK_TTL = 2.0
+DEFAULT_TRACK_TTL = 60.0
 EMBED_INTERVAL_SEC = 1.0
+DEFAULT_EXPORT_INTERVAL_SEC = 2.0
+DEFAULT_MAX_TRACK_POINTS = 5000
+DEFAULT_MAX_VECTORS = 300
+DEFAULT_EVENTS_LOG_FLUSH_SEC = 1.0
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -383,6 +388,123 @@ def _try_load_intrinsics_json(path: str) -> Optional[Tuple[np.ndarray, np.ndarra
     return K, dist
 
 
+def _write_json_atomic(path: str, data: Any) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=os.path.basename(path) + ".", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = ""
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+class _EventLogger:
+    def __init__(self, path: str, flush_interval_sec: float = DEFAULT_EVENTS_LOG_FLUSH_SEC) -> None:
+        self.path = path
+        self.flush_interval_sec = max(0.0, float(flush_interval_sec))
+        self._q: "Queue[Optional[Dict[str, Any]]]" = Queue(maxsize=20000)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        try:
+            self._q.put(None, timeout=1.0)
+        except Exception:
+            pass
+        try:
+            self._thread.join(timeout=timeout)
+        except Exception:
+            pass
+
+    def log(self, event: Dict[str, Any]) -> None:
+        # Requirement: save ALL data collected. If disk can't keep up, we block.
+        self._q.put(event)
+
+    def _run(self) -> None:
+        last_flush = time.time()
+        # Line-buffered for timely writes; still explicitly flush periodically.
+        with open(self.path, "a", encoding="utf-8", buffering=1) as f:
+            while True:
+                item = self._q.get()
+                if item is None:
+                    break
+
+                try:
+                    f.write(json.dumps(item, separators=(",", ":")) + "\n")
+                except Exception:
+                    # Best-effort: if a single write fails, continue.
+                    pass
+
+                if self.flush_interval_sec > 0:
+                    now = time.time()
+                    if now - last_flush >= self.flush_interval_sec:
+                        try:
+                            f.flush()
+                        except Exception:
+                            pass
+                        last_flush = now
+
+
+def _export_tracks_by_camera(cams: List["CameraThread"], track_ttl_seconds: float) -> Dict[str, Dict[str, Any]]:
+    export: Dict[str, Dict[str, Any]] = {}
+    cutoff = time.time() - float(track_ttl_seconds)
+    for c in cams:
+        export[c.mac] = {}
+        for sid, data in c.output_tracks.items():
+            track = data.get("track", [])
+            if not track:
+                continue
+
+            # Best-effort TTL cleanup before export. (track times are ms)
+            last_t = float(track[-1].get("time", 0)) / 1000.0
+            if last_t < cutoff:
+                continue
+
+            export[c.mac][str(sid)] = {
+                "track": list(track) if isinstance(track, deque) else track,
+                "vectors": list(data.get("vectors", [])) if isinstance(data.get("vectors", []), deque) else data.get("vectors", []),
+            }
+    return export
+
+
+def _start_exporter_thread(
+    cams: List["CameraThread"],
+    output_path: str,
+    track_ttl_seconds: float,
+    export_interval_seconds: float,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    def _run() -> None:
+        # Give camera threads a moment to warm up before the first write.
+        next_write = time.time() + max(0.1, float(export_interval_seconds))
+        while not stop_event.is_set():
+            now = time.time()
+            if now >= next_write:
+                try:
+                    export = _export_tracks_by_camera(cams, track_ttl_seconds)
+                    _write_json_atomic(output_path, export)
+                except Exception:
+                    # Best-effort: avoid crashing the tracker due to exporter issues.
+                    pass
+                next_write = now + max(0.1, float(export_interval_seconds))
+            time.sleep(0.1)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
 class Undistorter:
     def __init__(
         self,
@@ -469,6 +591,10 @@ class CameraThread(threading.Thread):
         max_fps: int,
         min_box: int,
         undistorter: Undistorter,
+        output_retention_sec: float,
+        max_track_points: int,
+        max_vectors: int,
+        event_logger: Optional[_EventLogger],
         stop_event: threading.Event,
     ):
         super().__init__(daemon=False)
@@ -487,10 +613,14 @@ class CameraThread(threading.Thread):
         self.frame_id = 0
         self.frame = None
         self.bt_to_sid: Dict[int, int] = {}
-        self.free_sids: deque[int] = deque()
         self.next_sid = 0
         self.tracks_local: Dict[int, Dict[str, Any]] = {}
         self.output_tracks: Dict[int, Dict[str, Any]] = {}
+
+        self.output_retention_sec = float(output_retention_sec)
+        self.max_track_points = max(1, int(max_track_points))
+        self.max_vectors = max(1, int(max_vectors))
+        self.event_logger = event_logger
 
         # Per-camera YOLO instance so ByteTrack state does not bleed across cameras.
         self.yolo = YOLO(yolo_weights)
@@ -551,14 +681,15 @@ class CameraThread(threading.Thread):
     def _get_sid(self, bt_id):
         if bt_id in self.bt_to_sid:
             return self.bt_to_sid[bt_id]
-        sid = self.free_sids.popleft() if self.free_sids else self.next_sid
-        if sid == self.next_sid:
-            self.next_sid += 1
+        # Do not reuse SIDs: keeps history unambiguous for append-only logs.
+        sid = self.next_sid
+        self.next_sid += 1
         self.bt_to_sid[bt_id] = sid
         return sid
 
     def run(self):
         last_process = 0.0
+        last_prune = 0.0
         while not self.stop_event.is_set():
             if osnet is None:
                 print("[FATAL] OSNet is required but was not initialized; stopping camera thread")
@@ -623,11 +754,25 @@ class CameraThread(threading.Thread):
                 out = self.output_tracks.get(sid)
                 if out is None:
                     out = self.output_tracks[sid] = {
-                        "track": [],
-                        "vectors": [],
+                        "track": deque(maxlen=self.max_track_points),
+                        "vectors": deque(maxlen=self.max_vectors),
                         "mac": self.mac,
                     }
                 out["track"].append({"time": int(now * 1000), "x": gx, "y": gy})
+                out["last_ms"] = int(now * 1000)
+
+                if self.event_logger is not None:
+                    try:
+                        self.event_logger.log({
+                            "type": "track",
+                            "mac": self.mac,
+                            "sid": sid,
+                            "time": int(now * 1000),
+                            "x": gx,
+                            "y": gy,
+                        })
+                    except Exception:
+                        pass
 
                 # Compute OSNet embedding ~1Hz (for offline fusion script).
                 if now - float(t["last_embed"]) >= EMBED_INTERVAL_SEC:
@@ -644,12 +789,49 @@ class CameraThread(threading.Thread):
                     })
                     t["last_embed"] = now
 
+                    if self.event_logger is not None:
+                        try:
+                            self.event_logger.log({
+                                "type": "vector",
+                                "mac": self.mac,
+                                "sid": sid,
+                                "time": int(now * 1000),
+                                "vector": [float(x) for x in feat],
+                            })
+                        except Exception:
+                            pass
+
                 # Visualize local SID only (no cross-camera fusion here).
                 cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
                 cv2.putText(frame, f"SID {sid}", (x1, y1-5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
 
             self.frame = frame
+
+            # Periodically prune stale tracks to bound memory.
+            if now - last_prune >= 1.0:
+                last_prune = now
+                if self.output_retention_sec > 0:
+                    cutoff = now - self.output_retention_sec
+
+                    # Remove stale bytetrack ids and free their SIDs.
+                    stale_bt_ids: List[int] = []
+                    for bt_id2, t2 in self.tracks_local.items():
+                        try:
+                            if (now - float(t2.get("last", 0.0))) > self.output_retention_sec:
+                                stale_bt_ids.append(bt_id2)
+                        except Exception:
+                            stale_bt_ids.append(bt_id2)
+
+                    for bt_id2 in stale_bt_ids:
+                        t2 = self.tracks_local.pop(bt_id2, None)
+                        sid2 = None
+                        if isinstance(t2, dict):
+                            sid2 = t2.get("sid")
+                        if bt_id2 in self.bt_to_sid:
+                            sid2 = self.bt_to_sid.pop(bt_id2, sid2)
+                        if isinstance(sid2, int):
+                            self.output_tracks.pop(sid2, None)
 
         try:
             self.cap.release()
@@ -692,6 +874,30 @@ def main():
         return
 
     cams: List[CameraThread] = []
+
+    export_path = os.path.join(BASE_DIR, "tracks_by_camera.json")
+    export_interval = _safe_float(tracking_cfg.get("ExportIntervalSeconds"), DEFAULT_EXPORT_INTERVAL_SEC)
+    export_ttl = _safe_float(tracking_cfg.get("ExportTrackTtlSeconds"), DEFAULT_TRACK_TTL)
+
+    # Append-only full history log (JSONL). This is the durable source of truth.
+    tracks_dir = os.path.join(BASE_DIR, "tracks")
+    os.makedirs(tracks_dir, exist_ok=True)
+    session_stamp = time.strftime("%Y%m%d-%H%M%S")
+    events_path = os.path.join(tracks_dir, f"tracks_events-{session_stamp}.jsonl")
+    events_flush = _safe_float(tracking_cfg.get("EventsLogFlushSeconds"), DEFAULT_EVENTS_LOG_FLUSH_SEC)
+    event_logger = _EventLogger(events_path, flush_interval_sec=events_flush)
+    event_logger.start()
+    try:
+        event_logger.log({"type": "session_start", "time": int(time.time() * 1000)})
+    except Exception:
+        pass
+
+    # Bound in-memory growth.
+    max_track_points_default = int(max(1.0, export_ttl) * max(1, max_fps)) + 100
+    max_vectors_default = int(max(1.0, export_ttl) / max(EMBED_INTERVAL_SEC, 0.1)) + 10
+    max_track_points = _safe_int(tracking_cfg.get("MaxTrackPoints"), min(DEFAULT_MAX_TRACK_POINTS, max_track_points_default))
+    max_vectors = _safe_int(tracking_cfg.get("MaxVectors"), min(DEFAULT_MAX_VECTORS, max_vectors_default))
+    exporter_thread: Optional[threading.Thread] = None
 
     def _handle_stop(signum, frame):  # type: ignore
         STOP_EVENT.set()
@@ -788,6 +994,10 @@ def main():
                 max_fps=max_fps,
                 min_box=DEFAULT_MIN_BOX,
                 undistorter=undistorter,
+                output_retention_sec=export_ttl,
+                max_track_points=max_track_points,
+                max_vectors=max_vectors,
+                event_logger=event_logger,
                 stop_event=STOP_EVENT,
             )
             cams.append(c)
@@ -796,6 +1006,14 @@ def main():
         if not cams:
             print("[WARN] No camera threads started; exiting.")
             return
+
+        exporter_thread = _start_exporter_thread(
+            cams=cams,
+            output_path=export_path,
+            track_ttl_seconds=export_ttl,
+            export_interval_seconds=export_interval,
+            stop_event=STOP_EVENT,
+        )
 
         while not STOP_EVENT.is_set():
             if show_preview:
@@ -829,22 +1047,19 @@ def main():
             except Exception:
                 pass
 
-    export: Dict[str, Dict[str, Any]] = {}
-    for c in cams:
-        export[c.mac] = {}
-        # Best-effort TTL cleanup before export.
-        cutoff = time.time() - DEFAULT_TRACK_TTL
-        for sid, data in c.output_tracks.items():
-            track = data.get("track", [])
-            if track and (track[-1].get("time", 0) / 1000.0) < cutoff:
-                continue
-            export[c.mac][str(sid)] = {
-                "track": data.get("track", []),
-                "vectors": data.get("vectors", []),
-            }
+        # Stop event logger after camera threads stop producing events.
+        try:
+            event_logger.log({"type": "session_stop", "time": int(time.time() * 1000)})
+        except Exception:
+            pass
+        event_logger.stop(timeout=5.0)
 
-    with open(os.path.join(BASE_DIR, "tracks_by_camera.json"), "w", encoding="utf-8") as f:
-        json.dump(export, f, indent=2)
+    # Final export on shutdown (best-effort). Exporter thread may already have written.
+    try:
+        export = _export_tracks_by_camera(cams, export_ttl)
+        _write_json_atomic(export_path, export)
+    except Exception:
+        pass
 
     print("[INFO] Saved tracks_by_camera.json")
 

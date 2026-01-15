@@ -179,7 +179,7 @@ if [ -z "$(find services -name '*.path' 2>/dev/null)" ]; then
 else
   for path_unit in services/*.path; do
     path_name=$(basename "$path_unit")
-    sudo systemctl enable "$path_name"
+    sudo systemctl enable --now "$path_name"
     echo "  Enabled: $path_name"
   done
 fi
