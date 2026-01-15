@@ -2,6 +2,7 @@
 Description=Start/stop tracking based on flag
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

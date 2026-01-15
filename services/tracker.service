@@ -27,6 +27,7 @@ TimeoutStopSec=10
 
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 EnvironmentFile=/opt/p2bp/camera/config/agent.env
 
