@@ -18,7 +18,7 @@ cameras_runtime.json: { <camera_key>: { rtsp, ip, mac, resolution:[w,h] } }
 looks for when ./config/config.json Homography.BeginScanning == true
 load camera RTSP via ./config/cameras_runtime.json (now keyed by cam MAC)
 each RTSP with detected ChArUco board corners computes a homography
-saves at ./homographies/<camera_key>_homography_<WxH>.yml
+saves at ./homographies/<camera_key>_homography.yml
 returns status/results to config.json and switches state Homography.BeginScanning to false
 
 to run: (first will check configs once and act accordingly, second enables continuous watching)
@@ -499,7 +499,7 @@ def run_once(base_dir: Path) -> None:
             atomic_write_json(cfg_path, config)
             continue
 
-        out_name = f"{safe_filename(cam_key)}_homography_{res_w}x{res_h}.yml"
+        out_name = f"{safe_filename(cam_key)}_homography.yml"
         out_path = out_dir / out_name
 
         save_homography_yaml(

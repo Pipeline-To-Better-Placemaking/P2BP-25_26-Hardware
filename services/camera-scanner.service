@@ -9,7 +9,7 @@ ExecStart=/usr/bin/python3 -s -m scripts.camera_scanner
 RemainAfterExit=yes
 
 # Safety / hygiene
-TimeoutStartSec=600
+TimeoutStartSec=1200
 WorkingDirectory=/opt/p2bp/camera
 User=root
 

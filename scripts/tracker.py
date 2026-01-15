@@ -4,7 +4,7 @@ import threading
 import time
 from collections import deque
 from queue import Queue
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -129,21 +129,49 @@ def _try_load_intrinsics_json(path: str) -> Optional[Tuple[np.ndarray, np.ndarra
 
 
 class Undistorter:
-    def __init__(self, intrinsics_path: Optional[str]):
+    def __init__(
+        self,
+        K: Optional[np.ndarray] = None,
+        dist: Optional[np.ndarray] = None,
+        expected_size: Optional[Tuple[int, int]] = None,
+        intrinsics_path: Optional[str] = None,
+    ):
         self.intrinsics_path = intrinsics_path
-        self.K: Optional[np.ndarray] = None
-        self.dist: Optional[np.ndarray] = None
+        self.expected_size = expected_size
+        self.K: Optional[np.ndarray] = K
+        self.dist: Optional[np.ndarray] = dist
         self.map1: Optional[np.ndarray] = None
         self.map2: Optional[np.ndarray] = None
         self._size: Optional[Tuple[int, int]] = None
 
-        if intrinsics_path:
+        if (self.K is None or self.dist is None) and intrinsics_path:
             loaded = _try_load_intrinsics_json(intrinsics_path)
             if loaded:
                 self.K, self.dist = loaded
 
     def ready(self) -> bool:
         return self.K is not None and self.dist is not None
+
+    def _scaled_K_for_size(self, size: Tuple[int, int]) -> np.ndarray:
+        """Return intrinsics scaled from expected_size to the given frame size."""
+        if self.K is None:
+            raise ValueError("Intrinsics not loaded")
+        if not self.expected_size:
+            return self.K
+
+        exp_w, exp_h = self.expected_size
+        w, h = size
+        if exp_w <= 0 or exp_h <= 0 or (w == exp_w and h == exp_h):
+            return self.K
+
+        rx = float(w) / float(exp_w)
+        ry = float(h) / float(exp_h)
+        K2 = self.K.astype(np.float64).copy()
+        K2[0, 0] *= rx
+        K2[0, 2] *= rx
+        K2[1, 1] *= ry
+        K2[1, 2] *= ry
+        return K2
 
     def _ensure_maps(self, frame: np.ndarray) -> None:
         if not self.ready():
@@ -152,9 +180,17 @@ class Undistorter:
         size = (w, h)
         if self._size == size and self.map1 is not None and self.map2 is not None:
             return
-        newK, _ = cv2.getOptimalNewCameraMatrix(self.K, self.dist, size, 1.0, size)
+        K_use = self._scaled_K_for_size(size)
+        dist_use = self.dist
+        if dist_use is None:
+            return
+
+        # OpenCV accepts a variety of distortion shapes; normalize to (N,).
+        dist_use = np.array(dist_use, dtype=np.float64).reshape(-1)
+
+        newK, _ = cv2.getOptimalNewCameraMatrix(K_use, dist_use, size, 1.0, size)
         self.map1, self.map2 = cv2.initUndistortRectifyMap(
-            self.K, self.dist, None, newK, size, cv2.CV_16SC2
+            K_use, dist_use, None, newK, size, cv2.CV_16SC2
         )
         self._size = size
 
@@ -340,32 +376,82 @@ def main():
         print("[WARN] No cameras enabled in TrackingCameras; exiting.")
         return
 
-    cams: list[CameraThread] = []
+    cams: List[CameraThread] = []
     for i, mac in enumerate(enabled_macs):
         cam = camera_handler.get_camera(mac)
         if cam is None:
             print(f"[WARN] Camera not found in runtime file for MAC: {mac}")
             continue
 
-        # Intrinsics file per camera: /config/<cameraname>.json
-        # We try a few reasonable names since config.json only has MACs.
-        cam_name = getattr(cam, "name", None) or f"cam{i}"
-        candidates = [
-            os.path.join(CONFIG_DIR, f"{mac}.json"),
-            os.path.join(CONFIG_DIR, f"{cam_name}.json"),
-            os.path.join(CONFIG_DIR, f"{cam_name}.intrinsics.json"),
-            os.path.join(CONFIG_DIR, f"cam{i}.json"),
-            os.path.join(CONFIG_DIR, f"{mac.replace(':', '_')}.json"),
-            os.path.join(CONFIG_DIR, f"{getattr(cam, 'ip', '')}.json") if getattr(cam, "ip", "") else "",
-        ]
-        candidates = [p for p in candidates if p]
-        intrinsics_path = next((p for p in candidates if os.path.exists(p)), None)
-        if intrinsics_path is None:
-            print(f"[WARN] No intrinsics found for {mac} (tried: {', '.join(os.path.basename(p) for p in candidates)})")
-        else:
-            print(f"[INFO] Using intrinsics for {mac}: {os.path.relpath(intrinsics_path, BASE_DIR)}")
+        rtsp = getattr(cam, "rtsp", None)
+        if not isinstance(rtsp, str) or not rtsp.strip():
+            print(f"[WARN] Camera {mac} has no RTSP URL; skipping")
+            continue
 
-        undistorter = Undistorter(intrinsics_path)
+        # Preferred: use scaled intrinsics from camera_handler (already adjusted to config Camera.Resolution).
+        K = getattr(cam, "camera_matrix", None)
+        dist = getattr(cam, "distortion_coefficients", None)
+        declared_size: Optional[Tuple[int, int]] = None
+        try:
+            res = getattr(cam, "resolution", None)
+            if isinstance(res, (list, tuple)) and len(res) == 2:
+                declared_size = (int(res[0]), int(res[1]))
+        except Exception:
+            declared_size = None
+
+        K_np: Optional[np.ndarray] = None
+        dist_np: Optional[np.ndarray] = None
+        if K is not None and dist is not None:
+            try:
+                K_np = np.array(K, dtype=np.float64)
+                if K_np.shape != (3, 3):
+                    K_np = None
+            except Exception:
+                K_np = None
+            try:
+                dist_np = np.array(dist, dtype=np.float64).reshape(-1)
+            except Exception:
+                dist_np = None
+
+        intrinsics_path: Optional[str] = None
+        intrinsics_source = "camera_handler" if (K_np is not None and dist_np is not None) else "legacy"
+        if K_np is None or dist_np is None:
+            # Fallback (legacy): Intrinsics file per camera: /config/<cameraname>.json
+            # We try a few reasonable names since config.json only has MACs.
+            cam_name = getattr(cam, "name", None) or f"cam{i}"
+            candidates = [
+                os.path.join(CONFIG_DIR, f"{mac}.json"),
+                os.path.join(CONFIG_DIR, f"{cam_name}.json"),
+                os.path.join(CONFIG_DIR, f"{cam_name}.intrinsics.json"),
+                os.path.join(CONFIG_DIR, f"cam{i}.json"),
+                os.path.join(CONFIG_DIR, f"{mac.replace(':', '_')}.json"),
+                os.path.join(CONFIG_DIR, f"{getattr(cam, 'ip', '')}.json") if getattr(cam, "ip", "") else "",
+            ]
+            candidates = [p for p in candidates if p]
+            intrinsics_path = next((p for p in candidates if os.path.exists(p)), None)
+            if intrinsics_path is None:
+                print(
+                    f"[WARN] No intrinsics provided by camera_handler for {mac} and no legacy intrinsics JSON found "
+                    f"(tried: {', '.join(os.path.basename(p) for p in candidates)})"
+                )
+            else:
+                print(f"[INFO] Using legacy intrinsics for {mac}: {os.path.relpath(intrinsics_path, BASE_DIR)}")
+        else:
+            print(f"[INFO] Using camera_handler intrinsics for {mac}")
+
+        # Prevent accidental double-scaling:
+        # - camera_handler already scales intrinsics to the configured resolution.
+        # - only apply dynamic scaling when using legacy per-camera JSON intrinsics.
+        expected_size_for_scaling = declared_size if intrinsics_source == "legacy" else None
+
+        undistorter = Undistorter(
+            K=K_np,
+            dist=dist_np,
+            expected_size=expected_size_for_scaling,
+            intrinsics_path=intrinsics_path,
+        )
+        if (K_np is not None or dist_np is not None) and not undistorter.ready():
+            print(f"[WARN] camera_handler intrinsics present but invalid for {mac}")
         if intrinsics_path and not undistorter.ready():
             print(f"[WARN] Intrinsics file exists but could not be parsed: {intrinsics_path}")
 

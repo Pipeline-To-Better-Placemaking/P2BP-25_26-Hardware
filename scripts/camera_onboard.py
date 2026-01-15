@@ -23,9 +23,11 @@ def onboard_camera(cam_ip: str, cam_mac: str) -> bool:
         from scripts.camera_controllers import annke_controller
         try:
             if bool(annke_controller.ensure_activated(cam_ip)):
-                annke_controller.disable_osd_text(cam_ip)
+                ok = bool(annke_controller.disable_osd_text(cam_ip))
+                if not ok:
+                    print(f"[ONBOARD] ANNKE disable_osd_text failed for {cam_ip}")
                 #annke_controller.apply_defaults(cam_ip)
-                return True
+                return ok
         except Exception as e:
             print(f"[ONBOARD] ANNKE onboarding unavailable: {e}")
 
