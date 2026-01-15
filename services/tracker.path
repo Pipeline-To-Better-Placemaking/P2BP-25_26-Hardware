@@ -3,7 +3,8 @@ Description=Enable tracking script when flag exists
 
 [Path]
 PathExists=/run/p2bp/tracking.enabled
-Unit=tracker.service
+PathChanged=/run/p2bp/tracking.enabled
+Unit=tracker-toggle.service
 
 [Install]
 WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 --find-links https://download.pytorch.org/whl/nightly/cu121
 ultralytics==8.0.74
+tqdm
 numpy<2.0
 Pillow
 pandas

@@ -2,6 +2,7 @@
 Description=P2BP Tracking Agent
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=/run/p2bp/tracking.enabled
 
 [Service]
 Type=simple

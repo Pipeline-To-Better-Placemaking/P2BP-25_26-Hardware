@@ -135,9 +135,22 @@ sudo chown -R root:root /opt/p2bp
 sudo chmod -R 755 /opt/p2bp
 
 # Install systemd units
-echo "Installing systemd services..."
-sudo cp services/*.service /etc/systemd/system/
-sudo cp services/*.service /opt/p2bp/camera/services/
+echo "Installing systemd units..."
+
+# Keep a copy of all unit files in the app directory (for debugging/versioning)
+sudo rsync -a --delete services/ $APP_ROOT/services/
+
+# Copy unit files into systemd (supports both .service and .path units)
+unit_files=()
+while IFS= read -r -d '' f; do
+  unit_files+=("$f")
+done < <(find services -maxdepth 1 -type f \( -name '*.service' -o -name '*.path' \) -print0)
+
+if [ ${#unit_files[@]} -eq 0 ]; then
+  echo "Warning: No systemd unit files found in services/"
+else
+  sudo cp "${unit_files[@]}" /etc/systemd/system/
+fi
 
 sudo systemctl daemon-reload
 
@@ -148,10 +161,32 @@ if [ -z "$(find services -name '*.service' 2>/dev/null)" ]; then
 else
   for service in services/*.service; do
     service_name=$(basename "$service")
+
+    # tracker.service is managed by tracker.path (flag-controlled). tracker-toggle.service
+    # is a helper that should not be enabled.
+    if [ "$service_name" = "tracker.service" ] || [ "$service_name" = "tracker-toggle.service" ]; then
+      continue
+    fi
+
     sudo systemctl enable "$service_name"
     echo "  Enabled: $service_name"
   done
 fi
+
+echo "Enabling path units..."
+if [ -z "$(find services -name '*.path' 2>/dev/null)" ]; then
+  echo "Warning: No .path files found in services/"
+else
+  for path_unit in services/*.path; do
+    path_name=$(basename "$path_unit")
+    sudo systemctl enable "$path_name"
+    echo "  Enabled: $path_name"
+  done
+fi
+
+# Ensure tracker.service is not enabled (tracker.path controls it)
+sudo systemctl disable tracker.service >/dev/null 2>&1 || true
+sudo systemctl disable tracker-toggle.service >/dev/null 2>&1 || true
 
 # Configure deterministic link-local IP for the PCI Ethernet interface (camera network)
 echo "Configuring deterministic link-local IP for the PCI Ethernet interface..."
