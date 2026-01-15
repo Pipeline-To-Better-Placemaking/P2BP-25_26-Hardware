@@ -411,6 +411,8 @@ class _EventLogger:
         self.path = path
         self.flush_interval_sec = max(0.0, float(flush_interval_sec))
         self._q: "Queue[Optional[Dict[str, Any]]]" = Queue(maxsize=20000)
+        self._error: Optional[BaseException] = None
+        self._error_lock = threading.Lock()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -428,6 +430,11 @@ class _EventLogger:
             pass
 
     def log(self, event: Dict[str, Any]) -> None:
+        with self._error_lock:
+            err = self._error
+        if err is not None:
+            raise RuntimeError(f"Event logger failed earlier: {err}")
+
         # Requirement: save ALL data collected. If disk can't keep up, we block.
         self._q.put(event)
 
@@ -442,18 +449,28 @@ class _EventLogger:
 
                 try:
                     f.write(json.dumps(item, separators=(",", ":")) + "\n")
-                except Exception:
-                    # Best-effort: if a single write fails, continue.
-                    pass
+                except Exception as e:
+                    # Do not silently drop events. Record error and stop.
+                    with self._error_lock:
+                        self._error = e
+                    break
 
                 if self.flush_interval_sec > 0:
                     now = time.time()
                     if now - last_flush >= self.flush_interval_sec:
                         try:
                             f.flush()
+                            os.fsync(f.fileno())
                         except Exception:
                             pass
                         last_flush = now
+
+            # Final flush on shutdown/error.
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
 
 
 def _export_tracks_by_camera(cams: List["CameraThread"], track_ttl_seconds: float) -> Dict[str, Dict[str, Any]]:
@@ -771,8 +788,10 @@ class CameraThread(threading.Thread):
                             "x": gx,
                             "y": gy,
                         })
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[FATAL] Event logger failed; stopping tracker: {e}")
+                        self.stop_event.set()
+                        return
 
                 # Compute OSNet embedding ~1Hz (for offline fusion script).
                 if now - float(t["last_embed"]) >= EMBED_INTERVAL_SEC:
@@ -798,8 +817,10 @@ class CameraThread(threading.Thread):
                                 "time": int(now * 1000),
                                 "vector": [float(x) for x in feat],
                             })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[FATAL] Event logger failed; stopping tracker: {e}")
+                            self.stop_event.set()
+                            return
 
                 # Visualize local SID only (no cross-camera fusion here).
                 cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)

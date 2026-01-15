@@ -22,8 +22,12 @@ PrivateTmp=true
 ReadWritePaths=/opt/p2bp/camera
 
 Restart=no
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=20
 KillSignal=SIGTERM
-TimeoutStopSec=10
+TimeoutStopSec=30
 
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755
