@@ -109,33 +109,42 @@ def disable_osd_text(ip: str, headless: bool = True, timeout_ms: int = 15_000) -
                 else:
                     page.click('button:has-text("Login")')
 
+                print("[ANNKE] Logged in to camera.")
                 page.wait_for_load_state("domcontentloaded")
 
             # Navigate: Configuration -> Image -> OSD Settings.
-            config_nav = page.locator('#nav a:has-text("Configuration")')
+            # Some firmwares keep the URL as /doc/page/config.asp while using JS navigation.
+            # Prefer the on-page jumpTo('config') hook.
+            config_nav = page.locator(
+                'a[ng-click="jumpTo(\'config\')"], a[ng-click="jumpTo(\"config\")"]'
+            )
             if config_nav.count() > 0:
-                config_nav.click()
-                page.wait_for_load_state("domcontentloaded")
+                config_nav.first.click()
+            else:
+                try:
+                    page.evaluate("typeof jumpTo === 'function' && jumpTo('config')")
+                except Exception:
+                    pass
+
+            # Wait for the config menu to appear.
+            page.wait_for_selector("#menu", timeout=timeout_ms)
 
             image_menu = page.locator('#menu div[name="image"] .menu-title')
             if image_menu.count() > 0:
                 image_menu.click()
-                page.wait_for_load_state("domcontentloaded")
 
-            osd_tab = page.locator('#tabs a:has-text("OSD Settings")')
+            # Click the OSD tab; don't depend on URL changes.
+            osd_tab = page.locator('#tabs li[module="osd"] a, #tabs a[href*="config/image/osd.asp"], #tabs a:has-text("OSD Settings")')
             if osd_tab.count() > 0:
-                osd_tab.click()
-                page.wait_for_load_state("domcontentloaded")
-            else:
-                # Fallback to direct URL in case the tab isn't present yet.
-                page.goto(f"http://{ip}/doc/page/config/image/osd.asp", wait_until="domcontentloaded")
+                osd_tab.first.click()
 
             # Toggle checkboxes (selectors derived from saved HTML).
             display_name = page.locator('input[ng-model="oOsdParams.bDisplayName"]')
             display_date = page.locator('input[ng-model="oOsdParams.bDisplayDate"]')
 
-            display_name.wait_for()
-            display_date.wait_for()
+            # Wait until OSD controls are ready (tab content is often injected dynamically).
+            display_name.wait_for(state="visible")
+            display_date.wait_for(state="visible")
 
             if display_name.is_checked():
                 display_name.uncheck()
