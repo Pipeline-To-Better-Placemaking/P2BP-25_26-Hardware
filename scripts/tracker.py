@@ -12,12 +12,22 @@ import torch
 from ultralytics import YOLO
 
 try:
-    from osnet_ibn1_lite.encoder import OsNetEncoder
-except Exception as e:
-    OsNetEncoder = None  # type: ignore
-    _OSNET_IMPORT_ERROR = e
+    # Preferred layout: repo checked out under ./osnet/osnet_ibn1_lite/
+    from osnet.osnet_ibn1_lite.encoder import OsNetEncoder  # type: ignore
+except Exception as e1:
+    try:
+        # Legacy layout: ./osnet_ibn1_lite/
+        from osnet_ibn1_lite.encoder import OsNetEncoder  # type: ignore
+    except Exception as e2:
+        OsNetEncoder = None  # type: ignore
+        _OSNET_IMPORT_ERROR = e2
+        _OSNET_IMPORT_ERROR_PRIMARY = e1
+    else:
+        _OSNET_IMPORT_ERROR = None
+        _OSNET_IMPORT_ERROR_PRIMARY = None
 else:
     _OSNET_IMPORT_ERROR = None
+    _OSNET_IMPORT_ERROR_PRIMARY = None
 
 try:
     # When running as `python scripts/tracker.py`.
@@ -65,22 +75,31 @@ def _require_osnet() -> bool:
     if _OSNET_IMPORT_ERROR is not None or OsNetEncoder is None:
         print(
             "[FATAL] OSNet is required but could not be imported. "
-            "Ensure the osnet_ibn1_lite package is present under /opt/p2bp/camera/osnet_ibn1_lite "
+            "Ensure the osnet repo is present under /opt/p2bp/camera/osnet/osnet_ibn1_lite "
             "(or installed on PYTHONPATH). "
             f"Import error: {_OSNET_IMPORT_ERROR}"
         )
+        if "_OSNET_IMPORT_ERROR_PRIMARY" in globals() and _OSNET_IMPORT_ERROR_PRIMARY is not None:
+            print(f"[FATAL] Primary import attempt (osnet.osnet_ibn1_lite) failed: {_OSNET_IMPORT_ERROR_PRIMARY}")
         return False
 
-    weights_path = os.environ.get("OSNET_WEIGHTS_PATH") or os.path.join(
-        BASE_DIR, "osnet_ibn1_lite", "model_weights.pth.tar-40"
-    )
-    if not os.path.isabs(weights_path):
-        weights_path = os.path.join(BASE_DIR, weights_path)
-    if not os.path.exists(weights_path):
-        print(
-            "[FATAL] OSNet weights missing. Expected weights at: "
-            f"{weights_path}"
-        )
+    weights_path = os.environ.get("OSNET_WEIGHTS_PATH")
+    if weights_path:
+        if not os.path.isabs(weights_path):
+            weights_path = os.path.join(BASE_DIR, weights_path)
+        candidates = [weights_path]
+    else:
+        candidates = [
+            os.path.join(BASE_DIR, "osnet", "osnet_ibn1_lite", "model_weights.pth.tar-40"),
+            os.path.join(BASE_DIR, "osnet_ibn1_lite", "model_weights.pth.tar-40"),
+        ]
+
+    weights_path = next((p for p in candidates if os.path.exists(p)), None)
+    if weights_path is None:
+        print("[FATAL] OSNet weights missing. Tried:")
+        for p in candidates:
+            print(f"  - {p}")
+        print("[FATAL] Set OSNET_WEIGHTS_PATH to override.")
         return False
 
     try:
