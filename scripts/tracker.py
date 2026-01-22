@@ -707,11 +707,11 @@ class CameraThread(threading.Thread):
     def run(self):
         last_process = 0.0
         last_prune = 0.0
-        
-        #YOLO processing rate measurement
+
+        # YOLO processing rate measurement
         last_fps_report = time.time()
         yolo_frame_count = 0
-        
+
         while not self.stop_event.is_set():
             if osnet is None:
                 print("[FATAL] OSNet is required but was not initialized; stopping camera thread")
@@ -725,14 +725,14 @@ class CameraThread(threading.Thread):
             self.frame_id += 1
             now = time.time()
 
-            # Limit processing rate. Hardcoded 5 FPS max to avoid overloading CPU/GPU. Can change it later to conf files if needed.
+            # Limit processing rate. Hardcoded 5 FPS max
             min_dt = 1.0 / 5.0
             if now - last_process < min_dt:
                 continue
             last_process = now
 
-            # Undistort (if intrinsics available for this camera).
-            frame = self.undistorter.undistort(frame)
+            # --- REMOVED per-frame undistortion ---
+            # frame = self.undistorter.undistort(frame)
 
             results = self.yolo.track(
                 frame,
@@ -743,7 +743,7 @@ class CameraThread(threading.Thread):
                 tracker="bytetrack.yaml",
                 verbose=False,
             )
-            
+
             yolo_frame_count += 1
 
             if not results or results[0].boxes is None or results[0].boxes.id is None:
@@ -769,11 +769,8 @@ class CameraThread(threading.Thread):
                     }
                 t["last"] = now
 
-                feet = ((x1+x2)/2, y2)
-                if isinstance(self.homography, np.ndarray) and self.homography.shape == (3, 3):
-                    gx, gy = _homography_transform(self.homography, feet)
-                else:
-                    gx, gy = float(feet[0]), float(feet[1])
+                # --- RAW IMAGE-SPACE feet (no homography) ---
+                gx, gy = ((x1 + x2) / 2, y2)
 
                 out = self.output_tracks.get(sid)
                 if out is None:
@@ -829,10 +826,10 @@ class CameraThread(threading.Thread):
                             self.stop_event.set()
                             return
 
-                # Visualize local SID only (no cross-camera fusion here).
-                cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
-                cv2.putText(frame, f"SID {sid}", (x1, y1-5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+                # Visualize local SID only (no cross-camera fusion here)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"SID {sid}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             self.frame = frame
 
@@ -844,14 +841,13 @@ class CameraThread(threading.Thread):
                 yolo_frame_count = 0
                 last_fps_report = now_fps
 
-            # Periodically prune stale tracks to bound memory.
+            # Periodically prune stale tracks to bound memory
             if now - last_prune >= 1.0:
                 last_prune = now
                 if self.output_retention_sec > 0:
                     cutoff = now - self.output_retention_sec
 
-                    # Remove stale bytetrack ids and free their SIDs.
-                    stale_bt_ids: List[int] = []
+                    stale_bt_ids: list[int] = []
                     for bt_id2, t2 in self.tracks_local.items():
                         try:
                             if (now - float(t2.get("last", 0.0))) > self.output_retention_sec:
@@ -873,6 +869,7 @@ class CameraThread(threading.Thread):
             self.cap.release()
         except Exception:
             pass
+
 
 # ---------------- MAIN ----------------
 def main():
