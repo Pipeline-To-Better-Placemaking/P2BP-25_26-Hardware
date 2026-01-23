@@ -1,0 +1,12 @@
+[Unit]
+Description=Start/stop tracking based on flag
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -ec 'if [ -e /run/p2bp/tracking.enabled ]; then /usr/bin/systemctl start tracker.service; else /usr/bin/systemctl stop tracker.service; fi'
+
+[Install]
+WantedBy=multi-user.target

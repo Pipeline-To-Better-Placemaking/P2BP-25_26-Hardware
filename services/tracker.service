@@ -2,6 +2,7 @@
 Description=P2BP Tracking Agent
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=/run/p2bp/tracking.enabled
 
 [Service]
 Type=simple
@@ -21,11 +22,16 @@ PrivateTmp=true
 ReadWritePaths=/opt/p2bp/camera
 
 Restart=no
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=20
 KillSignal=SIGTERM
-TimeoutStopSec=10
+TimeoutStopSec=30
 
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 EnvironmentFile=/opt/p2bp/camera/config/agent.env
 

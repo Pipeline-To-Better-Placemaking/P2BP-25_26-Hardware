@@ -21,6 +21,7 @@ ReadWritePaths=/opt/p2bp/camera /run/p2bp
 
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 StandardOutput=journal
 StandardError=journal
