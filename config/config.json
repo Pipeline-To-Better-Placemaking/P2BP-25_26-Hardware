@@ -1,0 +1,48 @@
+{
+  "Tracking": {
+    "Enabled": false,
+    "Model": "new model lol",
+    "ConfidenceThreshold": 0.5,
+    "MaxFps": 30
+  },
+  "Camera": {
+    "Resolution": "1920x1080",
+    "Framerate": 30,
+    "Codec": "h.265"
+  },
+  "TrackingCameras": {
+    "d0:3b:f4:01:52:79": true,
+    "d0:3b:f4:01:52:91": false,
+    "d0:3b:f4:01:52:9a": false,
+    "d0:3b:f4:01:52:f1": true,
+    "d0:3b:f4:02:44:84": true,
+    "d0:3b:f4:02:44:85": false,
+    "d0:3b:f4:02:44:87": true,
+    "d0:3b:f4:02:44:e2": false
+  },
+  "CharucoBoard": {
+    "ReferencePoints": {
+      "P1": {
+        "X": 9119,
+        "Y": 7977
+      },
+      "P2": {
+        "X": 8337,
+        "Y": 8020
+      }
+    },
+    "Board": {
+      "SquaresX": 5,
+      "SquaresY": 7,
+      "SquareSize": 156.5,
+      "ArucoSize": 116.75,
+      "Dictionary": "DICT_4X4_50"
+    },
+    "BeginScanning": false,
+    "Status": "failed",
+    "Error": "Unsupported point format: {'X': 9119, 'Y': 7977}",
+    "LastRunUnix": 1768414875.858738
+  },
+  "HeartbeatInterval": 60,
+  "Version": "config version 1"
+}

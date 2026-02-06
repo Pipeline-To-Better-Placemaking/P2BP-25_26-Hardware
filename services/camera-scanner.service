@@ -5,11 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/p2bp/camera/scripts/camera_scanner.py
+ExecStart=/usr/bin/python3 -s -m scripts.camera_scanner
 RemainAfterExit=yes
 
 # Safety / hygiene
-TimeoutStartSec=600
+TimeoutStartSec=1200
 WorkingDirectory=/opt/p2bp/camera
 User=root
 

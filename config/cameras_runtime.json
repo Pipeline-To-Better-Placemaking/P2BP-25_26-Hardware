@@ -1,0 +1,38 @@
+{
+  "d0:3b:f4:02:44:84": {
+    "ip": "169.254.14.217",
+    "mac": "d0:3b:f4:02:44:84",
+    "resolution": [
+      3072,
+      1728
+    ],
+    "rtsp": "rtsp://admin:Placemaking25@169.254.14.217:554/Streaming/Channels/101"
+  },
+  "d0:3b:f4:02:44:85": {
+    "ip": "169.254.69.89",
+    "mac": "d0:3b:f4:02:44:85",
+    "resolution": [
+      3072,
+      1728
+    ],
+    "rtsp": "rtsp://admin:Placemaking25@169.254.69.89:554/Streaming/Channels/101"
+  },
+  "d0:3b:f4:02:44:87": {
+    "ip": "169.254.50.89",
+    "mac": "d0:3b:f4:02:44:87",
+    "resolution": [
+      3072,
+      1728
+    ],
+    "rtsp": "rtsp://admin:Placemaking25@169.254.50.89:554/Streaming/Channels/101"
+  },
+  "d0:3b:f4:02:44:e2": {
+    "ip": "169.254.17.217",
+    "mac": "d0:3b:f4:02:44:e2",
+    "resolution": [
+      3072,
+      1728
+    ],
+    "rtsp": "rtsp://admin:Placemaking25@169.254.17.217:554/Streaming/Channels/101"
+  }
+}

@@ -14,6 +14,8 @@ import scripts.systemd_services as systemd_services
 import scripts.system_stats as system_stats
 import scripts.config_io as config_io
 import scripts.signals as signals
+import scripts.camera_handler as camera_handler
+from typing import Any, Dict, Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,7 +24,33 @@ logging.basicConfig(
 
 CONFIG_PATH = "/opt/p2bp/camera/config/config.json"
 SIGNAL_DIR = "/run/p2bp"
-HEARTBEAT_INTERVAL = 10 # in seconds
+DEFAULT_HEARTBEAT_INTERVAL = 10  # seconds
+
+
+def get_heartbeat_interval_seconds(config: Optional[Dict[str, Any]]) -> float:
+    """Return heartbeat interval in seconds from config, with validation.
+
+    Uses config["HeartbeatInterval"] when present; falls back to DEFAULT_HEARTBEAT_INTERVAL.
+    """
+    if not isinstance(config, dict):
+        return float(DEFAULT_HEARTBEAT_INTERVAL)
+
+    raw = config.get("HeartbeatInterval", DEFAULT_HEARTBEAT_INTERVAL)
+    try:
+        interval = float(raw)
+    except (TypeError, ValueError):
+        return float(DEFAULT_HEARTBEAT_INTERVAL)
+
+    # Prevent busy loops / invalid values.
+    if interval <= 0:
+        return float(DEFAULT_HEARTBEAT_INTERVAL)
+    return interval
+
+
+def sanitize_camera_state_for_heartbeat(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Only include fields that the backend/heartbeat model expects for now."""
+    allowed = {"Mac", "Ip", "Resolution", "Enabled"}
+    return {k: v for k, v in state.items() if k in allowed}
 
 def load_env():
     #dotenv.load_dotenv("../config/agent.env") # for local testing
@@ -43,7 +71,7 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
         "Content-Type": "application/json",
     }
 
-    r = requests.post(f"{endpoint}/Heartbeat", headers=headers, json=payload, timeout=5)
+    r = requests.post(f"{endpoint}/Device/heartbeat", headers=headers, json=payload, timeout=5)
     r.raise_for_status()
 
     try:
@@ -54,12 +82,18 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
 def create_heartbeat_payload(): # create a payload for the heartbeat request
     services = systemd_services.get_all_service_states()
     system = system_stats.get_system_stats()
+    camera_dicts = camera_handler.get_camera_states()
+
+    # Convert dicts to CameraState dataclasses
+    cameras = {
+        mac: heartbeat_payload.CameraState(**sanitize_camera_state_for_heartbeat(state))
+        for mac, state in camera_dicts.items()
+    }
 
     payload = heartbeat_payload.HeartbeatPayload.build(
-        project_id="0",
-        device_id=os.uname().nodename,
         services=services,
         system=system,
+        cameras=cameras,
     ).to_dict()
 
     return payload
@@ -67,13 +101,16 @@ def create_heartbeat_payload(): # create a payload for the heartbeat request
 def main():
     api_key, endpoint = load_env()
 
+    last_interval = None  # type: Optional[float]
+
     while True:
         try:
+            old_config = config_io.load_local_config(CONFIG_PATH)
+
             payload = create_heartbeat_payload()
             logging.info(f"Sending heartbeat with payload:\n {payload}")
 
             new_config = send_heartbeat(api_key, endpoint, payload)
-            old_config = config_io.load_local_config(CONFIG_PATH)
 
             if new_config:
                 # as long as new_config is not None, send systemd signals
@@ -88,7 +125,13 @@ def main():
         except Exception as e:
             logging.error(f"Heartbeat error: {e}")
 
-        time.sleep(HEARTBEAT_INTERVAL)
+        # Drive cadence from latest config when available.
+        interval = get_heartbeat_interval_seconds(new_config if isinstance(new_config, dict) else old_config)
+        if last_interval is None or interval != last_interval:
+            logging.info(f"Heartbeat interval: {interval}s")
+            last_interval = interval
+
+        time.sleep(interval)
 
 if __name__ == "__main__":
     main()

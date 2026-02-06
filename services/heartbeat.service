@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/p2bp/camera/scripts/heartbeat.py
+ExecStart=/usr/bin/python3 -s -m scripts.heartbeat
 WorkingDirectory=/opt/p2bp/camera
 Restart=always
 RestartSec=5
@@ -13,6 +13,7 @@ RestartSec=5
 # Ensure runtime signal dir exists
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 
 # Environment
 EnvironmentFile=/opt/p2bp/camera/config/agent.env
