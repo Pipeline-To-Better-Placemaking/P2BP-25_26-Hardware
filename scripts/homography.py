@@ -311,15 +311,42 @@ def compute_homography_from_frame(
 
 
 class FrameUndistorter:
-    def __init__(self, K: Optional[np.ndarray], dist: Optional[np.ndarray]):
+    def __init__(
+        self,
+        K: Optional[np.ndarray],
+        dist: Optional[np.ndarray],
+        expected_size: Optional[Tuple[int, int]] = None,
+    ):
         self.K = K
         self.dist = dist
+        self.expected_size = expected_size
         self.map1: Optional[np.ndarray] = None
         self.map2: Optional[np.ndarray] = None
         self._size: Optional[Tuple[int, int]] = None
 
     def ready(self) -> bool:
         return self.K is not None and self.dist is not None
+
+    def _scaled_K_for_size(self, size: Tuple[int, int]) -> np.ndarray:
+        """Return intrinsics scaled from expected_size to the given frame size."""
+        if self.K is None:
+            raise ValueError("Intrinsics not loaded")
+        if not self.expected_size:
+            return np.array(self.K, dtype=np.float64)
+
+        exp_w, exp_h = self.expected_size
+        w, h = size
+        if exp_w <= 0 or exp_h <= 0 or (w == exp_w and h == exp_h):
+            return np.array(self.K, dtype=np.float64)
+
+        rx = float(w) / float(exp_w)
+        ry = float(h) / float(exp_h)
+        K2 = np.array(self.K, dtype=np.float64).copy()
+        K2[0, 0] *= rx
+        K2[0, 2] *= rx
+        K2[1, 1] *= ry
+        K2[1, 2] *= ry
+        return K2
 
     def _ensure_maps(self, frame: np.ndarray) -> None:
         if not self.ready():
@@ -329,7 +356,7 @@ class FrameUndistorter:
         if self._size == size and self.map1 is not None and self.map2 is not None:
             return
 
-        K_use = np.array(self.K, dtype=np.float64)
+        K_use = self._scaled_K_for_size(size)
         dist_use = np.array(self.dist, dtype=np.float64).reshape(-1)
         newK, _ = cv2.getOptimalNewCameraMatrix(K_use, dist_use, size, 1.0, size)
         self.map1, self.map2 = cv2.initUndistortRectifyMap(
@@ -496,7 +523,11 @@ def run_once(base_dir: Path) -> None:
         board_spec = board_from_new_config(cbcfg)
 
         # Tuning parameters. Provide defaults so older/minimal config.json still works.
-        ransac_thresh_px = _get_float(cbcfg, "RansacReprojThresholdPx", 3.0)
+        # If RansacReprojThresholdPx isn't present, choose a default relative to square size.
+        if "RansacReprojThresholdPx" in cbcfg:
+            ransac_thresh_px = _get_float(cbcfg, "RansacReprojThresholdPx", 3.0)
+        else:
+            ransac_thresh_px = max(3.0, 0.05 * float(board_spec.square_length))
         min_corners = _get_int(cbcfg, "MinCorners", 8)
         frames_to_try = _get_int(cbcfg, "FramesToAverage", 30)
         max_seconds_per_cam = _get_float(cbcfg, "MaxSecondsPerCam", 5.0)
@@ -536,6 +567,13 @@ def run_once(base_dir: Path) -> None:
 
             K_raw = getattr(cam, "camera_matrix", None)
             dist_raw = getattr(cam, "distortion_coefficients", None)
+            declared_size: Optional[Tuple[int, int]] = None
+            try:
+                res = getattr(cam, "resolution", None)
+                if isinstance(res, (list, tuple)) and len(res) == 2:
+                    declared_size = (int(res[0]), int(res[1]))
+            except Exception:
+                declared_size = None
             K_np: Optional[np.ndarray] = None
             dist_np: Optional[np.ndarray] = None
             if K_raw is not None and dist_raw is not None:
@@ -550,7 +588,7 @@ def run_once(base_dir: Path) -> None:
                 except Exception:
                     dist_np = None
 
-            undistorter = FrameUndistorter(K_np, dist_np)
+            undistorter = FrameUndistorter(K_np, dist_np, expected_size=declared_size)
             if undistorter.ready():
                 print(f"[{cam_key}] using intrinsics from camera_handler (undistort enabled)")
             else:
