@@ -66,9 +66,24 @@ def safe_filename(s: str) -> str:
 
 
 def open_capture(rtsp_url: str) -> cv2.VideoCapture:
+    os.environ.setdefault(
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        "rtsp_transport;tcp|stimeout;5000000|rw_timeout;5000000",
+    )
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+
+    try:
+        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+            cap.set(getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"), 5000)
+    except Exception:
+        pass
+    try:
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            cap.set(getattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"), 5000)
     except Exception:
         pass
     return cap

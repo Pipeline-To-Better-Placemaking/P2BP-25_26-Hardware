@@ -543,9 +543,28 @@ def _render_top_down(
     return warped
 
 def open_capture(rtsp_url: str) -> cv2.VideoCapture:
+    # Best-effort: configure FFmpeg RTSP timeouts to avoid hangs.
+    # OpenCV's FFmpeg backend honors OPENCV_FFMPEG_CAPTURE_OPTIONS in many builds.
+    # Only set it if user/system hasn't already.
+    os.environ.setdefault(
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        "rtsp_transport;tcp|stimeout;5000000|rw_timeout;5000000",
+    )
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+
+    # Some OpenCV builds expose explicit timeout properties.
+    try:
+        if hasattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"):
+            cap.set(getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC"), 5000)
+    except Exception:
+        pass
+    try:
+        if hasattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"):
+            cap.set(getattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC"), 5000)
     except Exception:
         pass
     return cap
@@ -748,9 +767,12 @@ def run_once(base_dir: Path) -> None:
                 continue
 
             try:
+                t0 = time.time()
                 frames = grab_frames(cap, max_frames=frames_to_try, max_seconds=max_seconds_per_cam)
             finally:
                 cap.release()
+
+            log(f"[{cam_key}] grabbed {len(frames)} frame(s) in {time.time() - t0:.2f}s")
 
             if not frames:
                 log(f"[{cam_key}] no frames received")
