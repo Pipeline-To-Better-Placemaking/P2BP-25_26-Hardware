@@ -508,26 +508,60 @@ def _render_top_down(
     """Warp an image into a board-local top-down view.
 
     H_img_to_local maps image pixels (undistorted) -> board-local coordinates.
-    For visualization, we map board-local coordinates into an output pixel canvas.
-    """
-    chess = _get_chessboard_corners(board)[:, :2]
-    if chess.size == 0:
-        raise ValueError("Board chessboard corners not available")
 
-    # Board-local extents (in board units, e.g., square_length units).
-    min_xy = np.min(chess, axis=0)
-    max_xy = np.max(chess, axis=0)
+    IMPORTANT: This function intentionally warps the *entire frame*, not just the board.
+    The output canvas is chosen from the warped locations of the image corners.
+    """
+    h_img, w_img = frame_bgr.shape[:2]
+    if h_img <= 0 or w_img <= 0:
+        raise ValueError("Invalid frame size")
+
+    H = np.asarray(H_img_to_local, dtype=np.float64)
+    if H.shape != (3, 3):
+        raise ValueError("Invalid homography shape")
+
+    # Warp the 4 image corners into board-local coordinates.
+    img_corners = np.array(
+        [[[0.0, 0.0]], [[float(w_img - 1), 0.0]], [[float(w_img - 1), float(h_img - 1)]], [[0.0, float(h_img - 1)]]],
+        dtype=np.float64,
+    )
+    warped_corners = cv2.perspectiveTransform(img_corners, H).reshape(-1, 2)
+    finite = np.isfinite(warped_corners).all(axis=1)
+    if not bool(np.any(finite)):
+        raise ValueError("Homography produced non-finite warped corners")
+    warped_corners = warped_corners[finite]
+
+    # Include board corners too (helps keep the board in view if the warped image corners
+    # do something odd due to numerical instability).
+    try:
+        chess = _get_chessboard_corners(board)[:, :2]
+        if chess.size > 0:
+            warped_corners = np.vstack([warped_corners, np.asarray(chess, dtype=np.float64)])
+    except Exception:
+        pass
+
+    min_xy = np.min(warped_corners, axis=0)
+    max_xy = np.max(warped_corners, axis=0)
     extent = (max_xy - min_xy).astype(np.float64)
 
     # Choose pixels-per-unit derived from pixels_per_square and square_length.
-    # This keeps the image size stable regardless of unit choice.
     sq_len = float(board_spec.square_length) if float(board_spec.square_length) > 1e-9 else 1.0
     px_per_unit = float(max(1, int(pixels_per_square))) / sq_len
 
-    out_w = int(math.ceil(extent[0] * px_per_unit)) + int(2 * max(0, int(margin_px)))
-    out_h = int(math.ceil(extent[1] * px_per_unit)) + int(2 * max(0, int(margin_px)))
-    out_w = max(32, out_w)
-    out_h = max(32, out_h)
+    def _compute_size(px_per_unit_use: float) -> Tuple[int, int]:
+        out_w2 = int(math.ceil(extent[0] * px_per_unit_use)) + int(2 * max(0, int(margin_px)))
+        out_h2 = int(math.ceil(extent[1] * px_per_unit_use)) + int(2 * max(0, int(margin_px)))
+        return max(32, out_w2), max(32, out_h2)
+
+    out_w, out_h = _compute_size(px_per_unit)
+
+    # Safety clamp: avoid gigantic images if the homography maps corners far away.
+    max_dim = 4096
+    big = float(max(out_w, out_h))
+    if big > float(max_dim):
+        scale = float(max_dim) / big
+        px_per_unit = max(1e-6, px_per_unit * scale)
+        out_w, out_h = _compute_size(px_per_unit)
 
     # Local -> output pixel mapping: translate so min_xy maps to margin, then scale.
     tx = float(margin_px) - float(min_xy[0]) * px_per_unit
@@ -538,7 +572,7 @@ def _render_top_down(
     )
 
     # Full mapping: image -> local -> output pixels.
-    M = T_local_to_px @ np.asarray(H_img_to_local, dtype=np.float64)
+    M = T_local_to_px @ H
     warped = cv2.warpPerspective(frame_bgr, M, (out_w, out_h), flags=cv2.INTER_LINEAR)
     return warped
 
@@ -1033,7 +1067,15 @@ def main():
     args = parser.parse_args()
 
     base_dir = _resolve_base_dir()
-    print(f"Base dir: {base_dir}")
+    try:
+        log(f"script: {Path(__file__).resolve()}")
+        log(f"cwd: {Path.cwd().resolve()}")
+        log(f"base_dir: {base_dir}")
+        ff = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+        if ff:
+            log(f"OPENCV_FFMPEG_CAPTURE_OPTIONS={ff}")
+    except Exception:
+        pass
     if args.once:
         run_once(base_dir=base_dir)
     else:
