@@ -696,6 +696,11 @@ def run_once(base_dir: Path) -> None:
         out_dir = base_dir / "homographies"
         ensure_dir(out_dir)
 
+        debug_enabled = os.environ.get("HOMOGRAPHY_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+        debug_dir = out_dir / "debug"
+        if debug_enabled:
+            ensure_dir(debug_dir)
+
         for cam_key in cam_keys:
             cam = camera_handler.get_camera(cam_key)
             if cam is None:
@@ -755,6 +760,8 @@ def run_once(base_dir: Path) -> None:
             best_frame: Optional[np.ndarray] = None
             max_markers = 0
             max_charuco = 0
+            debug_best_markers = -1
+            debug_frame_raw: Optional[np.ndarray] = None
             for f in frames:
                 res: Optional[HomographyResult] = None
                 try:
@@ -792,6 +799,9 @@ def run_once(base_dir: Path) -> None:
                         charuco_r = 0 if ids_r is None else int(len(ids_r.reshape(-1)))
                         max_markers = max(max_markers, int(markers_r))
                         max_charuco = max(max_charuco, int(charuco_r))
+                        if debug_enabled and int(markers_r) > debug_best_markers:
+                            debug_best_markers = int(markers_r)
+                            debug_frame_raw = f.copy()
                     except Exception:
                         pass
 
@@ -851,6 +861,51 @@ def run_once(base_dir: Path) -> None:
                     "If max_markers is 0 across all frames, the ArUco Dictionary likely doesn't match the printed board, "
                     "or the board isn't visible / is too small/blurred."
                 )
+
+                if debug_enabled:
+                    try:
+                        key = safe_filename(cam_key)
+                        raw = debug_frame_raw if debug_frame_raw is not None else frames[0]
+                        und = undistorter.undistort(raw)
+                        raw_path = debug_dir / f"{key}_raw.png"
+                        und_path = debug_dir / f"{key}_undist.png"
+                        cv2.imwrite(str(raw_path), raw)
+                        cv2.imwrite(str(und_path), und)
+
+                        # Overlay detections (raw frame) for quick inspection.
+                        try:
+                            K_use, dist_use = undistorter.scaled_intrinsics_for_size((raw.shape[1], raw.shape[0]))
+                            gray = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY)
+                            corners, ids, _rej = _detect_markers(_maybe_clahe(gray), aruco_dict, detector_params)
+                            overlay = raw.copy()
+                            if ids is not None and len(ids) > 0:
+                                aruco.drawDetectedMarkers(overlay, corners, ids)
+                                try:
+                                    n, cc, ci = aruco.interpolateCornersCharuco(
+                                        markerCorners=corners,
+                                        markerIds=ids,
+                                        image=gray,
+                                        board=board,
+                                        cameraMatrix=K_use,
+                                        distCoeffs=dist_use,
+                                    )
+                                except TypeError:
+                                    n, cc, ci = aruco.interpolateCornersCharuco(
+                                        markerCorners=corners,
+                                        markerIds=ids,
+                                        image=gray,
+                                        board=board,
+                                    )
+                                if ci is not None and cc is not None and int(n) > 0:
+                                    aruco.drawDetectedCornersCharuco(overlay, cc, ci)
+                            overlay_path = debug_dir / f"{key}_overlay.png"
+                            cv2.imwrite(str(overlay_path), overlay)
+                        except Exception:
+                            pass
+
+                        log(f"[{cam_key}] debug frames saved under: {debug_dir}")
+                    except Exception as e:
+                        log(f"[{cam_key}] debug frame dump failed: {e}")
                 continue
 
             out_name = f"{safe_filename(cam_key)}_homography.yml"
