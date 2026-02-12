@@ -29,6 +29,8 @@ sudo apt install python3-pip -y
 sudo apt install -y python3-opencv
 sudo apt install -y arp-scan
 sudo apt install -y ffmpeg
+sudo apt install -y libavif13
+sudo apt install -y logrotate
 
 # Create canonical directory and structure
 echo "Creating application directories..."
@@ -153,6 +155,9 @@ else
 fi
 
 sudo systemctl daemon-reload
+
+# Best-effort: ensure logrotate runs (Ubuntu may use a systemd timer).
+sudo systemctl enable --now logrotate.timer >/dev/null 2>&1 || true
 
 # Enable all services (Scripts each have their own conditions for starting)
 echo "Enabling services..."

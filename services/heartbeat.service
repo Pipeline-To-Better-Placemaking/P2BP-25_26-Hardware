@@ -10,6 +10,10 @@ WorkingDirectory=/opt/p2bp/camera
 Restart=always
 RestartSec=5
 
+# Safety net: prevent stdout/stderr floods from exploding journald/syslog.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
 # Ensure runtime signal dir exists
 RuntimeDirectory=p2bp
 RuntimeDirectoryMode=0755

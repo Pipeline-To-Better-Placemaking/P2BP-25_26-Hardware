@@ -26,7 +26,7 @@ def get_service_state(name):
 
         return state
     except Exception as e:
-        logging.error(f"Failed to get state for {name}: {e}")
+        logger.warning("Failed to get state for %s: %s", name, e)
         return {"Active": "unknown", "Sub": "unknown"}
     
 def normalize_service_name(service_file):

@@ -9,6 +9,10 @@ Type=simple
 WorkingDirectory=/opt/p2bp/camera
 ExecStart=/usr/bin/python3 -s -m scripts.tracker
 
+# Safety net: ffmpeg/OpenCV can emit very noisy stderr; rate limit per-unit.
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
 Environment=PYTHONUNBUFFERED=1
 Environment=HOME=/opt/p2bp/camera
 Environment=XDG_CACHE_HOME=/opt/p2bp/camera/.cache

@@ -180,21 +180,34 @@ class CameraController:
                 pass
 
         def _scale_homography(H, src_w: int, src_h: int, dst_w: int, dst_h: int):
-            """Scale a pixel->world homography from src resolution to dst resolution."""
+            """Scale a homography H from source (src) resolution to desired (dst) resolution."""
             import numpy as np
 
             if src_w == dst_w and src_h == dst_h:
                 return H
-            sx = float(src_w) / float(dst_w)
-            sy = float(src_h) / float(dst_h)
-            S = np.array([[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-            H2 = H @ S
-            try:
-                if abs(float(H2[2, 2])) > 1e-12:
-                    H2 = H2 / float(H2[2, 2])
-            except Exception:
-                pass
+
+            sx = dst_w / src_w
+            sy = dst_h / src_h
+
+            S = np.array([
+                [sx, 0.0, 0.0],
+                [0.0, sy, 0.0],
+                [0.0, 0.0, 1.0]
+            ])
+
+            S_inv = np.array([
+                [1.0/sx, 0.0, 0.0],
+                [0.0, 1.0/sy, 0.0],
+                [0.0, 0.0, 1.0]
+            ])
+
+            H2 = S @ H @ S_inv
+
+            if abs(H2[2, 2]) > 1e-12:
+                H2 = H2 / H2[2, 2]
+
             return H2
+
 
         def _scale_intrinsics(K, src_w: int, src_h: int, dst_w: int, dst_h: int):
             """Scale camera intrinsics K from src resolution to dst resolution."""
