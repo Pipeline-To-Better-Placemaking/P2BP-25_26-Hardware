@@ -92,8 +92,8 @@ def _remote_path(remote_dir: str, filename: str) -> str:
 
 
 def main() -> None:
-    upload_dir = os.getenv("P2BP_TRACKING_UPLOAD_DIR", "/opt/p2bp/camera/tracking")
-    remote_dir = os.getenv("P2BP_TRACKING_UPLOAD_REMOTE_DIR", "/vision/tracking-raw")
+    upload_dir = os.getenv("P2BP_TRACKING_UPLOAD_DIR", "/opt/p2bp/camera/tracks")
+    remote_dir = os.getenv("P2BP_TRACKING_UPLOAD_REMOTE_DIR", "/vision/tracks-raw")
     state_path = os.getenv("P2BP_TRACKING_UPLOAD_STATE_PATH", os.path.join(upload_dir, ".uploaded_state.json"))
 
     scan_interval_s = max(5.0, _env_float("P2BP_TRACKING_UPLOAD_SCAN_INTERVAL_S", 240.0))
