@@ -84,6 +84,14 @@ if [ -z "$API_KEY" ] || [ -z "$API_ENDPOINT" ]; then
   exit 1
 fi
 
+# Normalize endpoint so scripts can safely append routes.
+# Users sometimes paste URLs like https://host/api or https://host/api/.
+API_ENDPOINT="${API_ENDPOINT%/}"
+if [[ "${API_ENDPOINT,,}" == */api ]]; then
+  API_ENDPOINT="${API_ENDPOINT%/api}"
+  API_ENDPOINT="${API_ENDPOINT%/}"
+fi
+
 # Write environment file
 
 # Write env atomically to avoid partial/corrupted files if the script fails later.

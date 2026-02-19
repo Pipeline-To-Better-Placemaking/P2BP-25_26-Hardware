@@ -56,6 +56,17 @@ MIN_HEARTBEAT_INTERVAL = 5  # seconds (prevents accidental busy loops)
 DEFAULT_LOG_EVERY_SECONDS = 300
 
 
+def _normalize_endpoint(endpoint: str) -> str:
+    e = (endpoint or "").strip()
+    while e.endswith("/"):
+        e = e[:-1]
+    if e.lower().endswith("/api"):
+        e = e[:-4]
+        while e.endswith("/"):
+            e = e[:-1]
+    return e
+
+
 def get_heartbeat_interval_seconds(config: Optional[Dict[str, Any]]) -> float:
     """Return heartbeat interval in seconds from config, with validation.
 
@@ -126,7 +137,10 @@ def load_env():
     elif not endpoint:
         raise RuntimeError("Missing ENDPOINT")
 
-    return api_key, endpoint
+    endpoint_norm = _normalize_endpoint(endpoint)
+    if not endpoint_norm:
+        raise RuntimeError("ENDPOINT is invalid")
+    return api_key, endpoint_norm
 
 def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat the server. Expect a new config file in return
     headers = {
@@ -134,7 +148,7 @@ def send_heartbeat(api_key, endpoint, payload): # send a health report heartbeat
         "Content-Type": "application/json",
     }
 
-    r = requests.post(f"{endpoint}/Device/heartbeat", headers=headers, json=payload, timeout=5)
+    r = requests.post(f"{endpoint}/api/Device/heartbeat", headers=headers, json=payload, timeout=5)
     r.raise_for_status()
 
     try:

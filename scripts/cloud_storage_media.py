@@ -21,6 +21,18 @@ from scripts.json_models.cloud_storage import (
 DEFAULT_ENV_PATH = "/opt/p2bp/camera/config/agent.env"
 
 
+def _normalize_endpoint(endpoint: str) -> str:
+    e = (endpoint or "").strip()
+    while e.endswith("/"):
+        e = e[:-1]
+    # Support legacy/pasted endpoints like https://host/api
+    if e.lower().endswith("/api"):
+        e = e[:-4]
+        while e.endswith("/"):
+            e = e[:-1]
+    return e
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -65,7 +77,10 @@ def load_env(env_path: str = DEFAULT_ENV_PATH) -> Tuple[str, str]:
         raise RuntimeError("Missing API_KEY")
     if not endpoint:
         raise RuntimeError("Missing ENDPOINT")
-    return api_key, endpoint
+    endpoint_norm = _normalize_endpoint(endpoint)
+    if not endpoint_norm:
+        raise RuntimeError("ENDPOINT is invalid")
+    return api_key, endpoint_norm
 
 
 def _parse_remote_path(remote_path: str) -> Tuple[str, str, str]:
