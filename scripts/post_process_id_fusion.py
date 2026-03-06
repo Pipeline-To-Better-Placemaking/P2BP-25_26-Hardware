@@ -6,14 +6,14 @@ from collections import defaultdict
 
 # FUSION PROBLEMS AND BREAKDOWN 
 #
-# The similarity matrix for this footage shows scores spanning 0.47–0.74 with
-# NO natural gap between same-person and different-person pairs. The mean
+# Based off a previously calculated similarity matrix for this footage, saw scores spanning 0.47–0.74 with
+# no gap between same-person and different-person pairs. The mean
 # cross-person similarity is approx. 0.62, which means a threshold-based approach
-# using appearance alone will always either over-merge or under-merge.
+# using appearance alone tends to either over-merge or under-merge.
 #
-# Solution: use STRUCTURAL constraints (time gap + position) as the PRIMARY
-# gate. Appearance is used only as a relative tie-breaker — we ask "is this
-# the BEST candidate" rather than "does this pass a fixed threshold."
+# Current solution: use structural constraints like time gap + position as the primary
+# gate. Appearance is used only as a relative tie-breaker, we ask "is this
+# the best candidate" rather than "does this pass a fixed threshold"
 #
 # CONFIG
 # max_gap_s          : Max time gap (seconds) to consider two tracks the same
