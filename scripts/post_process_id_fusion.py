@@ -612,7 +612,7 @@ if __name__ == "__main__":
     print("Post-Processing ID Fusion")
     print("=" * 70)
 
-    input_file = 'tracking_outputs/4p-c0-trim_improved_features222_20260305_205548.json'
+    input_file = 'tracking_outputs/4p-c0-trim_improved_features222_20260305_222442.json'
 
     fused = process_video(
         input_file,

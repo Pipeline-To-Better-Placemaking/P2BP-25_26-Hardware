@@ -1,0 +1,55 @@
+======================================================================
+ID FUSION REPORT
+======================================================================
+Original tracks : 17
+Fused tracks    : 7
+Tracks merged   : 10
+
+----------------------------------------------------------------------
+
+Global ID 1:
+  Fused from : [1, 6, 7, 8, 10]
+  Detections : 1376
+  Duration   : 55.88s
+  Features   : 58
+  Time range : 1.00s – 56.88s
+
+Global ID 2:
+  Fused from : [2, 3, 5, 14]
+  Detections : 1170
+  Duration   : 47.24s
+  Features   : 50
+  Time range : 9.72s – 56.96s
+
+Global ID 4:
+  Fused from : [4, 13, 16, 17]
+  Detections : 842
+  Duration   : 33.52s
+  Features   : 36
+  Time range : 23.40s – 56.92s
+
+Global ID 9:
+  Original ID: 9
+  Detections : 2
+  Duration   : 0.00s
+  Features   : 0
+
+Global ID 11:
+  Original ID: 11
+  Detections : 54
+  Duration   : 2.12s
+  Features   : 3
+  Time range : 41.56s – 43.68s
+
+Global ID 12:
+  Original ID: 12
+  Detections : 1
+  Duration   : 0.00s
+  Features   : 0
+
+Global ID 15:
+  Original ID: 15
+  Detections : 234
+  Duration   : 9.16s
+  Features   : 10
+  Time range : 47.20s – 56.36s
