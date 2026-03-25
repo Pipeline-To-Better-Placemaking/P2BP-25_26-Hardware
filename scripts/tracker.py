@@ -596,6 +596,19 @@ class Undistorter:
             return frame
         return cv2.remap(frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
 
+    def undistort_point(self, x: float, y: float, size: Tuple[int, int]) -> tuple[float, float]:
+        if not self.ready():
+            return x, y
+
+        K_use = self._scaled_K_for_size(size)
+        dist_use = np.array(self.dist, dtype=np.float64).reshape(-1)
+
+        pts = np.array([[[x, y]]], dtype=np.float32)
+        und = cv2.undistortPoints(pts, K_use, dist_use, P=K_use)
+
+        return float(und[0, 0, 0]), float(und[0, 0, 1])
+
+
 # ---------------- CAMERA THREAD ----------------
 class CameraThread(threading.Thread):
     def __init__(
