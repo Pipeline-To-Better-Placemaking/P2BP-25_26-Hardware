@@ -1,3 +1,4 @@
+
 import os
 import json
 import cv2
@@ -26,7 +27,8 @@ MAX_OVERLAP_S = 2.0
 MAX_SPEED = 3000
 MAX_DIST = 10000
 
-MIN_TRACK_POINTS = 10
+MIN_TRACK_POINTS = 5
+MIN_DURATION = 0.4
 MAX_JUMP_CLEAN = 3000
 DUP_EPS = 1e-3
 SMOOTH_WIN = 2
@@ -46,6 +48,23 @@ def bbox_center(b):
 
 def euclid(a, b):
     return float(euclidean(a, b))
+
+def _endpoint_sim(self, td1, td2):
+        """
+        Similarity between the tail of track1 and the head of track2.
+        Averages the last 3 features of td1 vs the first 3 of td2 for
+        robustness against single bad crops.
+        """
+        tail = td1['features'][-min(3, len(td1['features'])):]
+        head = td2['features'][:min(3, len(td2['features']))]
+        sims = [
+            self._cosine_sim(
+                np.array(a['feature_vector']),
+                np.array(b['feature_vector'])
+            )
+            for a in tail for b in head
+        ]
+        return float(np.median(sims)) if sims else 0.0
 
 # =========================
 # LOAD JSONL
@@ -203,7 +222,7 @@ def apply_world(tracks, homographies, undistorter):
         for e in t["events"]:
 
             # =========================
-            # 🔴 FIX: UNDISTORT FIRST
+            #  UNDISTORT 
             # =========================
             ux, uy = undistort_point(undistorter, e["x"], e["y"])
 
@@ -249,7 +268,26 @@ def overlap(a, b):
     return max(0, min(e1, e2) - max(s1, s2))
 
 def endpoint_sim(a, b):
-    return cos_sim(a["rep"], b["rep"])
+    """
+    Robust endpoint similarity:
+    compare last 3 features of A with first 3 of B
+    """
+    tail = a.get("features", [])[-min(3, len(a.get("features", []))):]
+    head = b.get("features", [])[:min(3, len(b.get("features", [])))]
+
+    if not tail or not head:
+        return cos_sim(a["rep"], b["rep"])  # fallback
+
+    sims = []
+    for ta in tail:
+        for hb in head:
+            if "feature_vector" in ta and "feature_vector" in hb:
+                sims.append(cos_sim(
+                    np.array(ta["feature_vector"]),
+                    np.array(hb["feature_vector"])
+                ))
+
+    return float(np.median(sims)) if sims else 0.0
 
 # =========================
 # EXCLUSION SYSTEM (UNCHANGED)
@@ -270,15 +308,14 @@ def build_exclusions(tracks):
             if ov <= MAX_OVERLAP_S:
                 continue
 
-            app = endpoint_sim(t1, t2)
-            spatial = spatial_gap(t1, t2)
-            spatial_score = np.exp(-spatial / 1000.0)
-
-            sim = 0.75 * app + 0.25 * spatial_score
+            sim = full_track_sim(t1, t2)
 
             pair = (min(k1, k2), max(k1, k2))
 
-            if sim >= DUPLICATE_SIM:
+            is_short_overlap = ov <= MAX_DUPLICATE_OVERLAP_S
+            is_high_sim = sim >= DUPLICATE_SIM
+
+            if is_short_overlap and is_high_sim:
                 duplicates.add(pair)
             else:
                 excluded.add(pair)
@@ -289,26 +326,68 @@ def build_exclusions(tracks):
 # MATCHING (UNCHANGED)
 # =========================
 
+def full_track_sim(a, b, n=6):
+    def sample(feats, n):
+        if len(feats) <= n:
+            return feats
+        idx = np.linspace(0, len(feats)-1, n, dtype=int)
+        return [feats[i] for i in idx]
+
+    f1 = sample(a.get("features", []), n)
+    f2 = sample(b.get("features", []), n)
+
+    sims = []
+    for x in f1:
+        for y in f2:
+            if "feature_vector" in x and "feature_vector" in y:
+                sims.append(cos_sim(
+                    np.array(x["feature_vector"]),
+                    np.array(y["feature_vector"])
+                ))
+
+    return float(np.median(sims)) if sims else 0.0
+
 def find_candidates(tracks):
     excluded, duplicates = build_exclusions(tracks)
 
     keys = sorted(tracks.keys(), key=lambda k: time_range(tracks[k])[0])
     candidates = []
+    seen_pairs = set()
 
+    # =========================
+    # 1. ADD DUPLICATE MERGES FIRST
+    # =========================
+    for (k1, k2) in duplicates:
+        sim = full_track_sim(tracks[k1], tracks[k2])
+        pair = (min(k1, k2), max(k1, k2))
+
+        candidates.append({
+            "k1": k1,
+            "k2": k2,
+            "sim": sim,
+            "type": "duplicate"
+        })
+        seen_pairs.add(pair)
+
+    # =========================
+    # 2. BEST CONTINUATION MATCHING
+    # =========================
     for i, k1 in enumerate(keys):
         t1 = tracks[k1]
         _, end1 = time_range(t1)
 
-        best = None
-        best_sim = 0
+        continuation_pool = []
 
         for k2 in keys[i+1:]:
             t2 = tracks[k2]
             start2, _ = time_range(t2)
 
             gap = start2 - end1
-            if gap < 0 or gap > MAX_GAP_S:
+
+            if gap < -0.5:
                 continue
+            if gap > MAX_GAP_S:
+                break
 
             pair = (min(k1, k2), max(k1, k2))
             if pair in excluded:
@@ -316,30 +395,116 @@ def find_candidates(tracks):
 
             spatial = spatial_gap(t1, t2)
 
+            # Speed constraint
             if gap > 0:
                 speed = spatial / gap
                 if speed > MAX_SPEED:
                     continue
 
-            if spatial > 3000:
+            # Spatial constraint
+            if spatial > MAX_POSITION_PX:
                 continue
 
-            app = endpoint_sim(t1, t2)
-            spatial_score = np.exp(-spatial / 1000.0)
-            sim = 0.75 * app + 0.25 * spatial_score
+            sim = endpoint_sim(t1, t2)
 
-            if sim > best_sim:
-                best_sim = sim
-                best = (k1, k2, sim)
+            continuation_pool.append((k2, sim, gap, spatial))
 
-        if best and best_sim >= MIN_APPEAR_SIM:
+        if not continuation_pool:
+            continue
+
+        # 🔥 PICK BEST MATCH ONLY
+        best_k2, best_sim, gap, spatial = max(
+            continuation_pool, key=lambda x: x[1]
+        )
+
+        pair = (min(k1, best_k2), max(k1, best_k2))
+
+        if best_sim >= MIN_APPEAR_SIM and pair not in seen_pairs:
             candidates.append({
-                "k1": best[0],
-                "k2": best[1],
-                "sim": best[2]
+                "k1": k1,
+                "k2": best_k2,
+                "sim": best_sim,
+                "type": "continuation"
             })
+            seen_pairs.add(pair)
 
     return candidates, excluded, duplicates
+
+def absorb_orphans(groups, tracks, excluded):
+    """
+    Absorb small leftover tracks into best matching groups.
+    Works AFTER fusion.
+    """
+
+    # Build reverse map: track -> group
+    track_to_group = {}
+    for gid, keys in groups.items():
+        for k in keys:
+            track_to_group[k] = gid
+
+    def group_tracks(gid):
+        return groups[gid]
+
+    def group_size(gid):
+        return sum(len(tracks[k]["events"]) for k in groups[gid])
+
+    def is_orphan(k):
+        gid = track_to_group[k]
+        return len(groups[gid]) == 1 and len(tracks[k]["events"]) < 50
+
+    changed = True
+
+    while changed:
+        changed = False
+
+        for k in list(track_to_group.keys()):
+            if not is_orphan(k):
+                continue
+
+            best_gid = None
+            best_sim = MIN_APPEAR_SIM
+
+            for gid, members in groups.items():
+                if k in members:
+                    continue
+
+                # Check exclusion against entire group
+                conflict = any(
+                    (min(k, m), max(k, m)) in excluded
+                    for m in members
+                )
+                if conflict:
+                    continue
+
+                # Compute similarity vs group (use max over members)
+                sims = [
+                    full_track_sim(tracks[k], tracks[m])
+                    for m in members
+                ]
+
+                if not sims:
+                    continue
+
+                sim = max(sims)
+
+                if sim > best_sim:
+                    best_sim = sim
+                    best_gid = gid
+
+            if best_gid is not None:
+                old_gid = track_to_group[k]
+
+                # Move track
+                groups[best_gid].append(k)
+                groups[old_gid].remove(k)
+
+                if not groups[old_gid]:
+                    del groups[old_gid]
+
+                track_to_group[k] = best_gid
+                changed = True
+
+    return groups
 
 # =========================
 # FUSION (UNCHANGED)
@@ -440,14 +605,16 @@ def smooth_track(track):
     return smoothed
 
 def clean_track(track):
-    if len(track) < MIN_TRACK_POINTS:
+    if not track:
         return None
 
     track = remove_duplicates(track)
     track = remove_large_jumps(track)
     track = smooth_track(track)
 
-    if len(track) < MIN_TRACK_POINTS:
+    duration = track[-1]["t"] - track[0]["t"]
+
+    if len(track) < MIN_TRACK_POINTS and duration < MIN_DURATION:
         return None
 
     return track
@@ -511,6 +678,8 @@ def main():
 
     groups = fuse(track_dict, candidates, excluded, duplicates)
 
+    groups = absorb_orphans(groups, track_dict, excluded)
+    
     export(groups, track_dict)
 
     print("[DONE] Strict identity fusion complete (with undistortion)")
