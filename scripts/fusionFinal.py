@@ -27,11 +27,14 @@ MAX_OVERLAP_S = 2.0
 MAX_SPEED = 3000
 MAX_DIST = 10000
 
-MIN_TRACK_POINTS = 5
-MIN_DURATION = 0.4
-MAX_JUMP_CLEAN = 3000
+MIN_TRACK_POINTS = 8
+MIN_DURATION = 1.0
+MAX_JUMP_CLEAN = 6000
 DUP_EPS = 1e-3
 SMOOTH_WIN = 2
+
+MIN_APPEAR_SIM_SAME = 0.60
+MIN_APPEAR_SIM_CROSS = 0.30
 
 # =========================
 # UTIL
@@ -348,8 +351,8 @@ def full_track_sim(a, b, n=6):
     return float(np.median(sims)) if sims else 0.0
 
 def find_candidates(tracks):
+    
     excluded, duplicates = build_exclusions(tracks)
-
     keys = sorted(tracks.keys(), key=lambda k: time_range(tracks[k])[0])
     candidates = []
     seen_pairs = set()
@@ -378,14 +381,23 @@ def find_candidates(tracks):
 
         continuation_pool = []
 
-        for k2 in keys[i+1:]:
+        for k2 in keys:
+            if k1 == k2:
+                continue
             t2 = tracks[k2]
             start2, _ = time_range(t2)
 
             gap = start2 - end1
+            cam1 = t1["key"][0]
+            cam2 = t2["key"][0]
+            is_cross_cam = cam1 != cam2
 
-            if gap < -0.5:
-                continue
+            if is_cross_cam:
+                if gap < -2.0:   # allow overlap across cameras
+                    continue
+            else:
+                if gap < -0.5:
+                    continue
             if gap > MAX_GAP_S:
                 break
 
@@ -398,28 +410,74 @@ def find_candidates(tracks):
             # Speed constraint
             if gap > 0:
                 speed = spatial / gap
-                if speed > MAX_SPEED:
-                    continue
+                if is_cross_cam:
+                    if speed > MAX_SPEED * 2:
+                        continue
+                else:
+                    if speed > MAX_SPEED:
+                        continue
 
             # Spatial constraint
-            if spatial > MAX_POSITION_PX:
-                continue
+            #if is_cross_cam:
+            #    if spatial > 3 * MAX_POSITION_PX:
+            #        continue
+            #else:
+            #   if spatial > MAX_POSITION_PX:
+            #        continue
+            if not is_cross_cam:
+                if spatial > MAX_POSITION_PX:
+                    continue
+        # allow ALL cross-camera spatial distances for now
 
             sim = endpoint_sim(t1, t2)
 
-            continuation_pool.append((k2, sim, gap, spatial))
-
+            continuation_pool.append({
+                "k2": k2,
+                "sim": sim,
+                "gap": gap,
+                "spatial": spatial
+            })
         if not continuation_pool:
             continue
 
         # 🔥 PICK BEST MATCH ONLY
-        best_k2, best_sim, gap, spatial = max(
-            continuation_pool, key=lambda x: x[1]
+        # 🔥 PICK BEST MATCH ONLY (FIXED)
+
+        def score(k2, sim, spatial, gap):
+            cam1 = t1["key"][0]
+            cam2 = tracks[k2]["key"][0]
+            is_cross = cam1 != cam2
+
+            if is_cross:
+                return sim * 2.0 - 0.0000001 * spatial
+            else:
+                return sim - 0.001 * spatial
+
+        best = max(
+            continuation_pool,
+            key=lambda x: score(x["k2"], x["sim"], x["spatial"], x["gap"])
         )
+        print("BEST:", k1, "->", best_k2, "sim=", best_sim, "cross=", is_cross_cam)
+
+        best_k2 = best["k2"]
+        best_sim = best["sim"]
+        gap = best["gap"]
+        spatial = best["spatial"]
+        
+        cam1 = t1["key"][0]
+        cam2 = tracks[best_k2]["key"][0]
+        is_cross_cam = cam1 != cam2
 
         pair = (min(k1, best_k2), max(k1, best_k2))
 
-        if best_sim >= MIN_APPEAR_SIM and pair not in seen_pairs:
+        if is_cross_cam:
+            
+            print("CROSS CANDIDATE:", k1, k2, "sim=", sim, "spatial=", spatial)
+            cond = best_sim >= MIN_APPEAR_SIM_CROSS
+        else:
+            cond = best_sim >= MIN_APPEAR_SIM_SAME
+
+        if cond and pair not in seen_pairs:
             candidates.append({
                 "k1": k1,
                 "k2": best_k2,
@@ -450,7 +508,10 @@ def absorb_orphans(groups, tracks, excluded):
 
     def is_orphan(k):
         gid = track_to_group[k]
-        return len(groups[gid]) == 1 and len(tracks[k]["events"]) < 50
+        return (
+            len(groups[gid]) == 1
+            and len(tracks[k]["events"]) < 20   # was 50
+        )
 
     changed = True
 
@@ -462,7 +523,7 @@ def absorb_orphans(groups, tracks, excluded):
                 continue
 
             best_gid = None
-            best_sim = MIN_APPEAR_SIM
+            best_sim = 0.75
 
             for gid, members in groups.items():
                 if k in members:
@@ -577,9 +638,18 @@ def remove_large_jumps(track):
         return track
 
     cleaned = [track[0]]
+
     for p in track[1:]:
-        if dist(cleaned[-1], p) < MAX_JUMP_CLEAN:
+        prev = cleaned[-1]
+
+        # 🔥 allow big jumps if camera changes
+        if p["cam"] != prev["cam"]:
             cleaned.append(p)
+            continue
+
+        if dist(prev, p) < MAX_JUMP_CLEAN:
+            cleaned.append(p)
+
     return cleaned
 
 def smooth_track(track):
@@ -614,7 +684,7 @@ def clean_track(track):
 
     duration = track[-1]["t"] - track[0]["t"]
 
-    if len(track) < MIN_TRACK_POINTS and duration < MIN_DURATION:
+    if len(track) < MIN_TRACK_POINTS or duration < MIN_DURATION:
         return None
 
     return track
