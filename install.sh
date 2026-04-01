@@ -167,6 +167,15 @@ sudo systemctl daemon-reload
 # Best-effort: ensure logrotate runs (Ubuntu may use a systemd timer).
 sudo systemctl enable --now logrotate.timer >/dev/null 2>&1 || true
 
+# Deploy tightened rsyslog logrotate config (daily + 100 MB cap, 3 rotations).
+# Replaces the Ubuntu default which rotates weekly and can accumulate 10+ GB.
+if [ -f "config/logrotate-rsyslog" ]; then
+  sudo cp config/logrotate-rsyslog /etc/logrotate.d/rsyslog
+  echo "Installed logrotate config for rsyslog."
+else
+  echo "Warning: config/logrotate-rsyslog not found; skipping rsyslog logrotate config."
+fi
+
 # Enable all services (Scripts each have their own conditions for starting)
 echo "Enabling services..."
 if [ -z "$(find services -name '*.service' 2>/dev/null)" ]; then
