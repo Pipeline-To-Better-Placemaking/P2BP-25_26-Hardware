@@ -7,6 +7,10 @@ Env:
   P2BP_SCAN_CMD — shell command to run before upload (default: python3 -u scripts/LidarScanV1.py)
   P2BP_SCAN_OUTPUT_XYZ — passed to the child: exact .xyz path to write (orchestrator sets per job)
   P2BP_LIDAR_SCAN_NONINTERACTIVE — set to 1 for LidarScanV1 (default 1 when child env is built)
+
+Pi + Jetson bridge (scan on Pi, upload from Jetson): set P2BP_SCAN_CMD to scripts/run_lidar_on_pi.sh
+  (installed path /opt/p2bp/camera/scripts/run_lidar_on_pi.sh). run_lidar_on_pi.sh defaults to
+  pi@192.168.28.2; set P2BP_PI_SSH to override. Optional: P2BP_PI_REMOTE_SCRIPT, P2BP_PI_REMOTE_XYZ.
 """
 
 from __future__ import annotations
