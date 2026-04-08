@@ -1,0 +1,24 @@
+[Unit]
+Description=P2BP Lidar Scan Orchestrator (poll Web, upload .xyz)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -s -m scripts.scan_orchestrator
+WorkingDirectory=/opt/p2bp/camera
+Restart=always
+RestartSec=10
+
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
+EnvironmentFile=/opt/p2bp/camera/config/agent.env
+# LidarScanV1 uses timed pauses instead of input() when non-interactive
+Environment=P2BP_LIDAR_SCAN_NONINTERACTIVE=1
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

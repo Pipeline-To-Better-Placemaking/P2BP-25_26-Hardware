@@ -34,12 +34,32 @@ class SystemStats:
 
 
 @dataclass
+class LidarHealth:
+    SensorId: str = ""
+    Connected: bool = False
+    DevicePath: str = ""
+    UsbHint: str = ""
+    LastError: str = ""
+
+
+@dataclass
+class PiCompanionHealth:
+    Configured: bool = False
+    Host: str = ""
+    Reachable: bool = False
+    LatencyMs: int = -1
+    LastError: str = ""
+
+
+@dataclass
 class HeartbeatPayload:
     Timestamp: int
     Services: Dict[str, ServiceState]
     Cameras: Dict[str, CameraState]
     System: SystemStats
     IntrinsicsCalibration: Dict[str, Any] = field(default_factory=dict)
+    Lidars: Dict[str, LidarHealth] = field(default_factory=dict)
+    PiCompanion: PiCompanionHealth = field(default_factory=PiCompanionHealth)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -50,6 +70,8 @@ class HeartbeatPayload:
         cameras: Dict[str, CameraState],
         system: SystemStats,
         intrinsics_calibration: Dict[str, Any] | None = None,
+        lidars: Dict[str, LidarHealth] | None = None,
+        pi_companion: PiCompanionHealth | None = None,
     ) -> "HeartbeatPayload":
         return HeartbeatPayload(
             Timestamp=int(time.time()),
@@ -57,4 +79,6 @@ class HeartbeatPayload:
             Cameras=cameras,
             System=system,
             IntrinsicsCalibration=intrinsics_calibration or {},
+            Lidars=lidars or {},
+            PiCompanion=pi_companion or PiCompanionHealth(),
         )

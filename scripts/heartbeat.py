@@ -16,6 +16,7 @@ import scripts.system_stats as system_stats
 import scripts.config_io as config_io
 import scripts.signals as signals
 import scripts.camera_handler as camera_handler
+import scripts.lidar_pi_health as lidar_pi_health
 from typing import Any, Dict, Optional
 
 
@@ -129,6 +130,8 @@ def _payload_summary(payload: Dict[str, Any]) -> str:
 
         svc_n = len(services) if isinstance(services, dict) else 0
         cam_n = len(cameras) if isinstance(cameras, dict) else 0
+        lidars = payload.get("Lidars") if isinstance(payload, dict) else None
+        lid_n = len(lidars) if isinstance(lidars, dict) else 0
 
         mem = system.get("Memory") if isinstance(system, dict) else None
         used_mb = mem.get("UsedMb") if isinstance(mem, dict) else None
@@ -139,7 +142,7 @@ def _payload_summary(payload: Dict[str, Any]) -> str:
         if isinstance(used_mb, int) and isinstance(total_mb, int) and total_mb > 0:
             mem_part = f" mem={used_mb}/{total_mb}MB"
 
-        return f"services={svc_n} cameras={cam_n} payload={size_b}B{mem_part}"
+        return f"services={svc_n} cameras={cam_n} lidars={lid_n} payload={size_b}B{mem_part}"
     except Exception:
         return "(summary unavailable)"
 
@@ -199,13 +202,32 @@ def _load_intrinsics_state() -> dict:
     return {}
 
 
+def _system_stats_to_model(raw: Dict[str, Any]) -> heartbeat_payload.SystemStats:
+    """Build SystemStats from get_system_stats() dict plus disk list."""
+    g = raw.get("Gpu") or {}
+    m = raw.get("Memory") or {}
+    disk = raw.get("Disk")
+    if not isinstance(disk, list):
+        disk = []
+    return heartbeat_payload.SystemStats(
+        Gpu=heartbeat_payload.GpuStats(
+            UtilizationPct=int(g.get("UtilizationPct", -1)),
+            FrequencyMhz=int(g.get("FrequencyMhz", -1)),
+        ),
+        Memory=heartbeat_payload.MemoryStats(
+            UsedMb=int(m.get("UsedMb", -1)),
+            TotalMb=int(m.get("TotalMb", -1)),
+        ),
+        Disk=disk,
+    )
+
+
 def create_heartbeat_payload(): # create a payload for the heartbeat request
     services = systemd_services.get_all_service_states()
-    system = system_stats.get_system_stats()
+    raw_system = system_stats.get_system_stats()
+    raw_system["Disk"] = _load_disk_state()
+    system = _system_stats_to_model(raw_system)
     camera_dicts = camera_handler.get_camera_states()
-
-    # Attach disk state written by disk_monitor.py (empty list if service not running yet).
-    system.Disk = _load_disk_state()
 
     # Convert dicts to CameraState dataclasses
     cameras = {
@@ -213,11 +235,16 @@ def create_heartbeat_payload(): # create a payload for the heartbeat request
         for mac, state in camera_dicts.items()
     }
 
+    lidars = lidar_pi_health.collect_lidar_health()
+    pi_companion = lidar_pi_health.collect_pi_companion_health()
+
     payload = heartbeat_payload.HeartbeatPayload.build(
         services=services,
         system=system,
         cameras=cameras,
         intrinsics_calibration=_load_intrinsics_state(),
+        lidars=lidars,
+        pi_companion=pi_companion,
     ).to_dict()
 
     return payload

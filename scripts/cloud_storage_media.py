@@ -14,7 +14,9 @@ import requests
 
 from scripts.json_models.cloud_storage import (
     ConfirmUploadedMediaDto,
+    DownloadUrlResponseDto,
     MediaRecordResponseDto,
+    RequestDownloadUrlDto,
     RequestUploadUrlDto,
     UploadUrlResponseDto,
 )
@@ -280,6 +282,43 @@ def request_upload_url(
     if not resp.SignedUrl:
         logger.warning("Backend returned empty SignedUrl for %s: %s", remote_path, _truncate(str(data)))
         raise RuntimeError("Backend returned empty SignedUrl")
+    return resp
+
+
+def request_download_url(
+    api_key: str,
+    endpoint: str,
+    object_path: str,
+    timeout_s: float = 10.0,
+) -> DownloadUrlResponseDto:
+    """POST /api/files/request-download — full GCS object path (no leading slash), same as after upload."""
+    normalized = object_path.replace("\\", "/").strip().strip("/")
+    if not normalized:
+        raise ValueError("object_path is required for request-download")
+
+    dto = RequestDownloadUrlDto(PathFromRoot=normalized)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    url = _join_url(endpoint, "/api/files/request-download")
+    max_attempts = max(1, _env_int("P2BP_CLOUDSTORAGE_REQUEST_DOWNLOAD_RETRIES", 5))
+    data = _request_json_with_retries(
+        method="POST",
+        url=url,
+        headers=headers,
+        json_body=dto.to_dict(),
+        timeout_s=timeout_s,
+        max_attempts=max_attempts,
+    )
+    resp = DownloadUrlResponseDto.from_dict(data if isinstance(data, dict) else {})
+    if not resp.SignedUrl:
+        logger.warning(
+            "Backend returned empty download SignedUrl for %s: %s",
+            normalized,
+            _truncate(str(data)),
+        )
+        raise RuntimeError("Backend returned empty download SignedUrl")
     return resp
 
 

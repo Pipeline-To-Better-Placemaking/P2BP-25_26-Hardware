@@ -12,3 +12,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 config/
+
+# Contract checks, verification, and test-only scripts (do not commit)
+scripts/verify_web_api_connectivity.py
+scripts/test_*.py
+scripts/*_test.py
+tests/
