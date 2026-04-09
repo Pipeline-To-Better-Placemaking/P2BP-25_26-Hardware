@@ -1,3 +1,4 @@
+import select
 import subprocess
 import logging
 import re
@@ -7,28 +8,40 @@ logger = logging.getLogger(__name__)
 TEGRastats_RE_GPU_UTIL = re.compile(r"GR3D_FREQ\s+(\d+)%")
 TEGRastats_RE_GPU_FREQ = re.compile(r"GR3D_FREQ\s+\d+%@(\d+)")
 TEGRastats_RE_RAM = re.compile(r"RAM\s+(\d+)/(\d+)MB")
+TEGRastats_RE_GPU_TEMP = re.compile(r"gpu@([\d.]+)C")
+TEGRastats_RE_CPU_TEMP = re.compile(r"cpu@([\d.]+)C")
 
 def get_gpu_and_memory_stats():
     stats = {
         "Gpu": {
             "UtilizationPct": -1,
             "FrequencyMhz": -1,
+            "TemperatureC": -1.0,
         },
         "Memory": {
             "UsedMb": -1,
             "TotalMb": -1,
         },
+        "CpuTemperatureC": -1.0,
     }
 
     try:
-        proc = subprocess.run(
-            ["tegrastats", "--interval", "1000", "--count", "1"],
-            capture_output=True,
+        proc = subprocess.Popen(
+            ["tegrastats", "--interval", "500"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=3,
         )
+        try:
+            ready, _, _ = select.select([proc.stdout], [], [], 3.0)
+            output = proc.stdout.readline().strip() if ready else ""
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
-        output = proc.stdout.strip()
         if not output:
             return stats
 
@@ -48,6 +61,15 @@ def get_gpu_and_memory_stats():
             stats["Memory"]["UsedMb"] = int(ram.group(1))
             stats["Memory"]["TotalMb"] = int(ram.group(2))
 
+        # Temperatures
+        gpu_temp = TEGRastats_RE_GPU_TEMP.search(output)
+        if gpu_temp:
+            stats["Gpu"]["TemperatureC"] = float(gpu_temp.group(1))
+
+        cpu_temp = TEGRastats_RE_CPU_TEMP.search(output)
+        if cpu_temp:
+            stats["CpuTemperatureC"] = float(cpu_temp.group(1))
+
         return stats
 
     except FileNotFoundError:
@@ -63,17 +85,22 @@ def get_system_stats():
         "Gpu": {
             "UtilizationPct": -1,
             "FrequencyMhz": -1,
+            "TemperatureC": -1.0,
         },
         "Memory": {
             "UsedMb": -1,
             "TotalMb": -1,
         },
+        "CpuTemperatureC": -1.0,
     }
 
     gpu_mem = get_gpu_and_memory_stats()
 
     # merge results into one dict
-    for key in gpu_mem:
-        stats[key].update(gpu_mem[key])
+    for key, val in gpu_mem.items():
+        if isinstance(val, dict):
+            stats[key].update(val)
+        else:
+            stats[key] = val
 
     return stats

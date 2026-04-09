@@ -213,12 +213,14 @@ def _system_stats_to_model(raw: Dict[str, Any]) -> heartbeat_payload.SystemStats
         Gpu=heartbeat_payload.GpuStats(
             UtilizationPct=int(g.get("UtilizationPct", -1)),
             FrequencyMhz=int(g.get("FrequencyMhz", -1)),
+            TemperatureC=float(g.get("TemperatureC", -1.0)),
         ),
         Memory=heartbeat_payload.MemoryStats(
             UsedMb=int(m.get("UsedMb", -1)),
             TotalMb=int(m.get("TotalMb", -1)),
         ),
         Disk=disk,
+        CpuTemperatureC=float(raw.get("CpuTemperatureC", -1.0)),
     )
 
 

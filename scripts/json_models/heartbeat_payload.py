@@ -18,7 +18,7 @@ class CameraState:
 class GpuStats:
     UtilizationPct: int = -1
     FrequencyMhz: int = -1
-#    temperature: int
+    TemperatureC: float = -1.0
 
 @dataclass
 class MemoryStats:
@@ -27,10 +27,10 @@ class MemoryStats:
 
 @dataclass
 class SystemStats:
-#    CpuPct: float
     Gpu: GpuStats = field(default_factory=GpuStats)
     Memory: MemoryStats = field(default_factory=MemoryStats)
     Disk: List[Dict[str, Any]] = field(default_factory=list)
+    CpuTemperatureC: float = -1.0
 
 
 @dataclass
