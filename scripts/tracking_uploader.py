@@ -119,8 +119,8 @@ def main() -> None:
     upload_dir = os.getenv("P2BP_TRACKING_UPLOAD_DIR", "/opt/p2bp/camera/tracks")
     project_id = _load_project_id()
     if project_id is None:
-        logger.warning("ProjectId missing from config — tracking uploads will use legacy path /vision/tracks-raw")
-    _default_remote = f"/vision/{project_id}/tracks-raw" if project_id else "/vision/tracks-raw"
+        logger.warning("ProjectId missing from config — tracking uploads will use fallback path /vision/tracks-raw")
+    _default_remote = f"/vision/tracks-raw/{project_id}" if project_id else "/vision/tracks-raw"
     remote_dir = os.getenv("P2BP_TRACKING_UPLOAD_REMOTE_DIR", _default_remote)
     state_path = os.getenv("P2BP_TRACKING_UPLOAD_STATE_PATH", os.path.join(upload_dir, ".uploaded_state.json"))
 

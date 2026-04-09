@@ -996,7 +996,7 @@ def run_once(base_dir: Path) -> None:
             snapshot_path: Optional[str] = None
             if best_frame is not None and _api_key is not None and _project_id is not None:
                 try:
-                    remote_snapshot = f"/vision/{_project_id}/homography-snapshots/{safe_filename(cam_key)}.jpg"
+                    remote_snapshot = f"/vision/homography-snapshots/{_project_id}/{safe_filename(cam_key)}.jpg"
                     tmp_fd, tmp_snap = tempfile.mkstemp(suffix=".jpg")
                     try:
                         os.close(tmp_fd)
