@@ -55,6 +55,7 @@ except Exception as e:
     )
 
 from scripts import cloud_storage_media
+from scripts.camera_onboard import _detect_camera_type
 from scripts.homography import FrameUndistorter, grab_frames, open_capture
 from scripts.json_models.intrinsics_calibration import (
     IntrinsicsSightingDto,
@@ -390,7 +391,9 @@ def run_collection(base_dir: Path, cfg_path: Path, config: dict) -> None:
     intrinsics_cfg = config.get("Intrinsics") or {}
     n_cells: int = int(intrinsics_cfg.get("GridCells", 9))
     min_sightings: int = int(intrinsics_cfg.get("MinSightings", 40))
-    model_id: Optional[str] = intrinsics_cfg.get("ModelId")
+    # model_id from config is the override; if absent, each camera's model is
+    # auto-detected from its MAC prefix (see camera_onboard.MAC_PREFIX_TO_MODEL).
+    config_model_id: Optional[str] = intrinsics_cfg.get("ModelId") or None
     per_unit_macs: List[str] = [m.lower() for m in (intrinsics_cfg.get("PerUnitOverrideMacs") or [])]
 
     charuco_cfg = config.get("CharucoBoard") or {}
@@ -495,22 +498,31 @@ def run_collection(base_dir: Path, cfg_path: Path, config: dict) -> None:
                         f"rmse={rmse:.3f} coverage={sum(state.coverage)}/{n_cells}"
                     )
 
+            # Resolve model ID: config override > MAC prefix auto-detection > None (per-unit).
+            is_per_unit = mac in per_unit_macs
+            if is_per_unit:
+                effective_model_id = None
+            else:
+                effective_model_id = config_model_id or _detect_camera_type(mac)
+                if effective_model_id is None:
+                    # Unknown model — fall back to per-unit so calibration still works.
+                    log(f"[{mac}] unknown camera model (MAC prefix unrecognised); storing as per-unit intrinsics")
+                    is_per_unit = True
+
             # Flush sightings to server periodically.
             if state.new_since_upload >= UPLOAD_EVERY_N_SIGHTINGS:
-                is_per_unit = mac in per_unit_macs
                 try:
-                    _upload_sightings(state, api_key, endpoint, is_per_unit, model_id)
+                    _upload_sightings(state, api_key, endpoint, is_per_unit, effective_model_id)
                 except Exception as e:
                     log(f"[{mac}] sightings upload failed: {e}")
 
             # Run calibration if enough sightings collected.
             if len(state.sightings) >= min_sightings and sum(state.coverage) >= n_cells:
-                is_per_unit = mac in per_unit_macs
                 log(f"[{mac}] coverage complete — computing intrinsics")
                 try:
                     ok = _compute_and_upload(
                         state, board, frame_w, frame_h,
-                        api_key, endpoint, is_per_unit, model_id,
+                        api_key, endpoint, is_per_unit, effective_model_id,
                     )
                     if ok:
                         state.done = True

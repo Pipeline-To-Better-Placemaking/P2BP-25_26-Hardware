@@ -149,8 +149,8 @@ def _payload_summary(payload: Dict[str, Any]) -> str:
 def load_env():
     #dotenv.load_dotenv("../config/agent.env") # for local testing
     dotenv.load_dotenv("/opt/p2bp/camera/config/agent.env")
-    api_key = os.getenv("API_KEY")
-    endpoint = os.getenv("ENDPOINT")
+    api_key = (os.getenv("API_KEY") or "").strip()
+    endpoint = (os.getenv("ENDPOINT") or "").strip()
 
     if not api_key:
         raise RuntimeError("Missing API_KEY")

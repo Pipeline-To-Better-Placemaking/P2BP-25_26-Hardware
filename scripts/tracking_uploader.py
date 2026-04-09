@@ -10,6 +10,17 @@ from scripts.cloud_storage_media import upload
 import logging
 
 
+_CONFIG_PATH = os.getenv("P2BP_CONFIG_PATH", "/opt/p2bp/camera/config/config.json")
+
+
+def _load_project_id() -> Optional[str]:
+    try:
+        with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f).get("ProjectId") or None
+    except Exception:
+        return None
+
+
 def _build_logger() -> logging.Logger:
     logger = logging.getLogger("p2bp.tracking_uploader")
     if logger.handlers:
@@ -106,7 +117,11 @@ def _in_cooldown(entry: Optional[Dict[str, Any]], max_attempts: int, cooldown_s:
 
 def main() -> None:
     upload_dir = os.getenv("P2BP_TRACKING_UPLOAD_DIR", "/opt/p2bp/camera/tracks")
-    remote_dir = os.getenv("P2BP_TRACKING_UPLOAD_REMOTE_DIR", "/vision/tracks-raw")
+    project_id = _load_project_id()
+    if project_id is None:
+        logger.warning("ProjectId missing from config — tracking uploads will use legacy path /vision/tracks-raw")
+    _default_remote = f"/vision/{project_id}/tracks-raw" if project_id else "/vision/tracks-raw"
+    remote_dir = os.getenv("P2BP_TRACKING_UPLOAD_REMOTE_DIR", _default_remote)
     state_path = os.getenv("P2BP_TRACKING_UPLOAD_STATE_PATH", os.path.join(upload_dir, ".uploaded_state.json"))
 
     scan_interval_s = max(5.0, _env_float("P2BP_TRACKING_UPLOAD_SCAN_INTERVAL_S", 240.0))

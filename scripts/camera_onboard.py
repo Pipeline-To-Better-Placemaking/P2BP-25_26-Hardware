@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Optional
 
 
-ANNKE_MAC_PREFIX = "d0:3b:f4"
+# Single source of truth for MAC prefix → camera model ID.
+# Add a new entry here when a new camera model is introduced.
+MAC_PREFIX_TO_MODEL: dict[str, str] = {
+    "d0:3b:f4": "ANNKE",
+}
 
 
 def _normalize_mac(mac: str) -> str:
@@ -12,8 +16,9 @@ def _normalize_mac(mac: str) -> str:
 
 def _detect_camera_type(mac: str) -> Optional[str]:
     mac_l = _normalize_mac(mac)
-    if mac_l.startswith(ANNKE_MAC_PREFIX):
-        return "ANNKE"
+    for prefix, model in MAC_PREFIX_TO_MODEL.items():
+        if mac_l.startswith(prefix):
+            return model
     return None
 
 

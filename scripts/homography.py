@@ -752,6 +752,9 @@ def run_once(base_dir: Path) -> None:
         # Load upload credentials once for all cameras (best-effort; scan continues if unavailable).
         _api_key: Optional[str] = None
         _endpoint: Optional[str] = None
+        _project_id: Optional[str] = config.get("ProjectId") or None
+        if _project_id is None:
+            log("ProjectId missing from config — snapshot upload disabled until next heartbeat")
         try:
             _api_key, _endpoint = cloud_storage_media.load_env()
         except Exception as _cred_err:
@@ -991,9 +994,9 @@ def run_once(base_dir: Path) -> None:
 
             # Upload raw undistorted snapshot to cloud storage for the puzzle-piece UI.
             snapshot_path: Optional[str] = None
-            if best_frame is not None and _api_key is not None:
+            if best_frame is not None and _api_key is not None and _project_id is not None:
                 try:
-                    remote_snapshot = f"/homography-snapshots/{safe_filename(cam_key)}.jpg"
+                    remote_snapshot = f"/vision/{_project_id}/homography-snapshots/{safe_filename(cam_key)}.jpg"
                     tmp_fd, tmp_snap = tempfile.mkstemp(suffix=".jpg")
                     try:
                         os.close(tmp_fd)
