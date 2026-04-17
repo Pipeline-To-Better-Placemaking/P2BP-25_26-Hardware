@@ -1,6 +1,6 @@
 [Unit]
 Description=P2BP Lidar Scan Orchestrator (poll Web, upload .xyz)
-After=network-online.target
+After=network-online.target heartbeat.service
 Wants=network-online.target
 
 [Service]
@@ -17,11 +17,8 @@ EnvironmentFile=/opt/p2bp/camera/config/agent.env
 # LidarScanV1 uses timed pauses instead of input() when non-interactive
 Environment=P2BP_LIDAR_SCAN_NONINTERACTIVE=1
 
-# When the lidar runs on a Raspberry Pi and this host (Jetson) only polls Web and uploads:
-#   Environment=P2BP_SCAN_CMD=/opt/p2bp/camera/scripts/run_lidar_on_pi.sh
-# (run_lidar_on_pi.sh defaults to pi@192.168.28.2; set P2BP_PI_SSH in agent.env to override.)
-# Optional: Environment=P2BP_PI_REMOTE_SCRIPT=/opt/p2bp/lidar/scripts/LidarScanV1.py
-# Optional: Environment=P2BP_PI_REMOTE_XYZ=/tmp/p2bp_lidar_scan.xyz
+# Pi + Jetson: set LidarScan.ScanCmd in server-driven config.json to
+#   /opt/p2bp/camera/scripts/run_lidar_on_pi.sh (see run_lidar_on_pi.sh for Pi SSH defaults).
 
 StandardOutput=journal
 StandardError=journal

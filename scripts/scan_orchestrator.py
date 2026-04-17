@@ -2,15 +2,18 @@
 
 Uses API_KEY and ENDPOINT from /opt/p2bp/camera/config/agent.env (same as heartbeat).
 
-Env:
-  P2BP_SCAN_POLL_INTERVAL_S — seconds between polls when idle (default 10)
-  P2BP_SCAN_CMD — shell command to run before upload (default: python3 -u scripts/LidarScanV1.py)
-  P2BP_SCAN_OUTPUT_XYZ — passed to the child: exact .xyz path to write (orchestrator sets per job)
-  P2BP_LIDAR_SCAN_NONINTERACTIVE — set to 1 for LidarScanV1 (default 1 when child env is built)
+Reads optional lidar settings from config.json (default /opt/p2bp/camera/config/config.json;
+override with P2BP_CONFIG_PATH). Section LidarScan:
+  Enabled, BeginScanning, PollIntervalSeconds, ScanCmd, OutputXyzTemplate, RemotePathTemplate
+Placeholders for templates: {scan_id}, {project_id}, {device_id}.
+Tunables come from config only (no P2BP_SCAN_* env overrides).
 
-Pi + Jetson bridge (scan on Pi, upload from Jetson): set P2BP_SCAN_CMD to scripts/run_lidar_on_pi.sh
-  (installed path /opt/p2bp/camera/scripts/run_lidar_on_pi.sh). run_lidar_on_pi.sh defaults to
-  pi@192.168.28.2; set P2BP_PI_SSH to override. Optional: P2BP_PI_REMOTE_SCRIPT, P2BP_PI_REMOTE_XYZ.
+Optional: systemd may set P2BP_LIDAR_SCAN_NONINTERACTIVE=1 for LidarScanV1 (passed through child env).
+
+Default ScanCmd is /opt/p2bp/camera/scripts/run_lidar_on_pi.sh (Pi bridge).
+Default BeginScanning is false; orchestrator sits idle until server sets it true.
+
+Service runs continuously under systemd and triggers scans from config.json LidarScan flags.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ import dotenv
 import requests
 
 import scripts.cloud_storage_media as cloud_storage_media
+import scripts.config_io as config_io
 
 DEFAULT_ENV_PATH = "/opt/p2bp/camera/config/agent.env"
+DEFAULT_CONFIG_PATH = "/opt/p2bp/camera/config/config.json"
 DEFAULT_POLL_S = 10.0
 
 
@@ -48,11 +53,72 @@ def _build_logger() -> logging.Logger:
 logger = _build_logger()
 
 
-def _poll_interval() -> float:
+def _config_path() -> str:
+    return (os.getenv("P2BP_CONFIG_PATH") or DEFAULT_CONFIG_PATH).strip() or DEFAULT_CONFIG_PATH
+
+
+def _load_json_config() -> Optional[Dict[str, Any]]:
+    return config_io.load_local_config(_config_path())
+
+
+def _lidar_section(cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(cfg, dict):
+        return {}
+    ls = cfg.get("LidarScan")
+    if ls is None:
+        ls = cfg.get("lidarScan")
+    return ls if isinstance(ls, dict) else {}
+
+
+def _merge_poll_interval_s(cfg: Optional[Dict[str, Any]]) -> float:
+    ls = _lidar_section(cfg)
+    raw = ls.get("PollIntervalSeconds", ls.get("pollIntervalSeconds"))
+    if raw is not None:
+        try:
+            return max(3.0, float(raw))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_POLL_S
+
+
+def _as_bool(raw: Any, default: bool) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if s in {"0", "false", "no", "off", "disabled"}:
+            return False
+    return default
+
+
+def _lidar_enabled(ls: Dict[str, Any]) -> bool:
+    return _as_bool(ls.get("Enabled", ls.get("enabled")), True)
+
+
+def _lidar_begin_scanning(ls: Dict[str, Any]) -> bool:
+    return _as_bool(ls.get("BeginScanning", ls.get("beginScanning")), False)
+
+
+def _lidar_str(ls: Dict[str, Any], config_keys: Tuple[str, ...], default: str) -> str:
+    """Config-only string (no env); used for path templates."""
+    for ck in config_keys:
+        raw = ls.get(ck)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return default
+
+
+def _format_path_template(template: str, *, scan_id: str, project_id: str, device_id: str) -> str:
     try:
-        return max(3.0, float(os.getenv("P2BP_SCAN_POLL_INTERVAL_S", str(DEFAULT_POLL_S))))
-    except (TypeError, ValueError):
-        return DEFAULT_POLL_S
+        return template.format(scan_id=scan_id, project_id=project_id, device_id=device_id)
+    except Exception:
+        return template
 
 
 def _load_api() -> Tuple[str, str]:
@@ -139,10 +205,21 @@ def process_one_scan(api_key: str, endpoint: str, job: Dict[str, Any]) -> None:
     logger.info("Claiming scan %s (project=%s device=%s)", scan_id, project_id, device_id)
     _patch_status(api_key, endpoint, scan_id, status="running")
 
-    cmd = os.getenv("P2BP_SCAN_CMD", "python3 -u scripts/LidarScanV1.py")
-    xyz_path = os.getenv(
-        "P2BP_SCAN_OUTPUT_XYZ",
-        f"/opt/p2bp/camera/run/scan_{scan_id}.xyz",
+    cfg = _load_json_config()
+    ls = _lidar_section(cfg)
+
+    cmd = _lidar_str(
+        ls,
+        ("ScanCmd", "scanCmd"),
+        "/opt/p2bp/camera/scripts/run_lidar_on_pi.sh",
+    )
+    out_tmpl = _lidar_str(
+        ls,
+        ("OutputXyzTemplate", "outputXyzTemplate"),
+        "/opt/p2bp/camera/run/scan_{scan_id}.xyz",
+    )
+    xyz_path = _format_path_template(
+        out_tmpl, scan_id=scan_id, project_id=project_id, device_id=device_id
     )
 
     child_env = os.environ.copy()
@@ -154,9 +231,13 @@ def process_one_scan(api_key: str, endpoint: str, job: Dict[str, Any]) -> None:
     try:
         _run_scan_cmd(cmd, child_env=child_env)
         local_xyz = _ensure_xyz_file(xyz_path)
-        remote = os.getenv(
-            "P2BP_SCAN_REMOTE_PATH",
-            f"/vision/lidar-scans/{project_id}/{device_id}/{scan_id}.xyz",
+        remote_tmpl = _lidar_str(
+            ls,
+            ("RemotePathTemplate", "remotePathTemplate"),
+            "/vision/lidar-scans/{project_id}/{device_id}/{scan_id}.xyz",
+        )
+        remote = _format_path_template(
+            remote_tmpl, scan_id=scan_id, project_id=project_id, device_id=device_id
         )
         logger.info("Uploading %s -> %s", local_xyz, remote)
         cloud_storage_media.upload(local_xyz, remote, api_key=api_key, endpoint=endpoint)
@@ -176,16 +257,50 @@ def process_one_scan(api_key: str, endpoint: str, job: Dict[str, Any]) -> None:
 def main() -> None:
     dotenv.load_dotenv(DEFAULT_ENV_PATH)
     api_key, endpoint = _load_api()
-    interval = _poll_interval()
-    logger.info("Scan orchestrator started (poll=%ss)", interval)
+    interval = _merge_poll_interval_s(_load_json_config())
+    cfg_path = Path(_config_path())
+    logger.info("Scan orchestrator started (poll=%ss config=%s)", interval, cfg_path)
 
+    last_begin_scanning: Optional[bool] = None
+    last_cfg_mtime: Optional[float] = None
     while True:
         try:
-            job = _get_next_pending(api_key, endpoint)
-            if job:
-                process_one_scan(api_key, endpoint, job)
-            else:
+            cfg = _load_json_config()
+            ls = _lidar_section(cfg)
+            interval = _merge_poll_interval_s(cfg)
+
+            if not _lidar_enabled(ls):
+                last_begin_scanning = False
                 time.sleep(interval)
+                continue
+
+            begin = _lidar_begin_scanning(ls)
+            mtime: Optional[float] = None
+            if cfg_path.exists():
+                try:
+                    mtime = cfg_path.stat().st_mtime
+                except OSError:
+                    mtime = None
+
+            should_trigger = False
+            if begin:
+                if last_begin_scanning is False or last_begin_scanning is None:
+                    should_trigger = True
+                elif mtime is not None and last_cfg_mtime is not None and mtime != last_cfg_mtime:
+                    should_trigger = True
+
+            last_begin_scanning = begin
+            if mtime is not None:
+                last_cfg_mtime = mtime
+
+            if should_trigger:
+                job = _get_next_pending(api_key, endpoint)
+                if job:
+                    process_one_scan(api_key, endpoint, job)
+                else:
+                    logger.info("BeginScanning true but no pending scan for this device")
+
+            time.sleep(interval)
         except requests.HTTPError as e:
             logger.warning("HTTP error: %s", e)
             time.sleep(interval)
