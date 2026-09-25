@@ -15,8 +15,8 @@ connected across the step modules.** A reader who finds `report.py` can
 reasonably conclude the diagnostic work is done. It is not.
 [Section 5](#5-what-remains) is the honest list.
 
-Current release: **v0.4.7**. Current version string:
-`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.7"`.
+Current release: **v0.4.8**. Current version string:
+`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.8"`.
 
 ---
 
@@ -337,7 +337,7 @@ For the current state to be what this document claims:
       `phase(len(phases))` — pinned by
       `tests/test_steps_protocol.py::test_every_step_declares_phases_that_match_the_indices_it_uses`.
 - [ ] `__version__` equals the most recent `v*` tag.
-- [x] `gh pr list --state open` is empty at the v0.4.7 release cut.
+- [x] `gh pr list --state open` is empty at the v0.4.8 release cut.
 
 ---
 
@@ -362,7 +362,7 @@ Settled exclusions, carried from [`08` §11](08-PROGRESS-AND-OBSERVABILITY.md#11
 ## References
 
 Facts in this document are drawn from the repository through release
-`v0.4.7` and from the workstation install runs of `mv3dt-installer`
+`v0.4.8` and from the workstation install runs of `mv3dt-installer`
 0.1.2 through 0.1.9, which are the source of the observed-failure inventory
 in [`08` §2](08-PROGRESS-AND-OBSERVABILITY.md#2-observed-failures-this-doc-exists-to-fix).
 Test counts and the arm64 failure list were produced by running the suite,
