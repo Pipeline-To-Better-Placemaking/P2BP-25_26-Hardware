@@ -175,7 +175,7 @@ clone, login, Compose parse, image pull, or container start.
 ### 6.1 Service readiness
 
 **REQUIRED:** after `up -d`, poll
-`http://localhost:<MS_PORT>/v1/ready` for up to 120 seconds. A
+`http://localhost:<MS_PORT>/v1/ready` for up to 1800 seconds. A
 transport-success response is insufficient; parsed JSON must contain
 `"code": 0`. Then require HTTP `200` from `http://localhost:<UI_PORT>`.
 Expected connection failures during the container's first-run model downloads
@@ -183,6 +183,27 @@ and parser build are retained in the transcript but hidden from the live
 terminal. The spinner is ticked during silent retries so elapsed time remains
 live. Ctrl-C returns a clean cancellation failure and tears down a stack started
 by the interrupted attempt.
+
+**RESOLVED — first-launch wait.** The upstream AMC setup skill's 120-second
+readiness budget assumes models are already present. On a first launch the
+`auto-magic-calib-ms` container downloads several GB of models (geocalib, vggt,
+moge, and others) before `/v1/ready` answers, which routinely exceeds 120
+seconds; a field run failed mid-download and the teardown discarded the
+in-progress downloads. The wait is therefore bounded at 1800 seconds and, every
+10 seconds, the poll also:
+
+1. **Checks liveness**: if `auto-magic-calib-ms` is no longer listed by
+   `docker compose ps --status running --services`, the wait ends immediately
+   as a readiness failure — there is nothing left to wait for.
+2. **Echoes progress**: the service's latest non-blank log line
+   (`docker compose logs --no-log-prefix --tail 5 auto-magic-calib-ms`) is fed
+   to the live window when it differs from the last one shown, so model
+   downloads read as progress rather than a hang.
+
+> **VGGT weights are not required for readiness.** The gated
+> `facebook/VGGT-1B-Commercial` download fails with HTTP `401` without a
+> Hugging Face login; AMC logs a warning and continues. Step 3 does not treat
+> it as a failure (see [§10](#10-out-of-scope)).
 
 Readiness failure is fatal. Capture bounded output from both:
 
@@ -294,6 +315,9 @@ created only after an actual launch.
 - [ ] A live AMC stack recovers its Docker-published ports, repairs stale
       configuration, and skips pull/start.
 - [ ] Backend returns `code: 0`; UI returns HTTP `200`.
+- [ ] A first launch that spends minutes downloading models reaches readiness
+      without a timeout; an `auto-magic-calib-ms` container that stops ends the
+      wait early.
 - [ ] Browser process runs as the invoking user.
 - [ ] `LOCATION_ID`, `PROJECT_NAME`, and `AMC_PROJECT_ID` survive reruns.
 - [ ] Focused and full installer suites pass apart from documented host-only
@@ -330,7 +354,7 @@ authority for the repository pin, Compose layout, image authentication,
 readiness response, and project/result API endpoints.
 
 - [AutoMagicCalib 3.2.1 repository](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/tree/0cfd2b790fd77598b0543340a65c2a0e1d192327) — pinned source and Compose files.
-- [AMC setup skill](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/skills/amc-setup-calibration-stack/SKILL.md) — Compose, NGC, 120-second readiness, and HTTP checks.
+- [AMC setup skill](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/skills/amc-setup-calibration-stack/SKILL.md) — Compose, NGC, and HTTP checks; its 120-second readiness budget is extended for first launch in §6.1.
 - [AMC video-calibration skill](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/skills/amc-run-video-calibration/SKILL.md) — project creation, project lookup, and MV3DT result endpoint.
 - [NVIDIA Container Toolkit install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) — repository and Docker runtime configuration.
 

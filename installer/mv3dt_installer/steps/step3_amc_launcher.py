@@ -150,8 +150,13 @@ ENV_KEYS: tuple[str, ...] = (
 AMC_WRAPPER_NAME = "amc"
 INSTALLER_BIN_NAME = "mv3dt-installer"
 
-_SERVICE_WAIT_TIMEOUT_S = 120.0
+# A first launch downloads several GB of models (geocalib, vggt, moge, ...)
+# before the microservice answers /v1/ready, so the backend wait is bounded
+# by a generous cap and cut short only when the ms container stops running.
+_SERVICE_WAIT_TIMEOUT_S = 1800.0
 _UI_WAIT_POLL_S = 1.0
+_BACKEND_LOG_INTERVAL_S = 10.0
+_MS_SERVICE = "auto-magic-calib-ms"
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,49}$")
 
@@ -691,17 +696,50 @@ def compose_published_port(
 # ---------------------------------------------------------------------------
 
 
+def _ms_service_running(ctx: "Context", compose_dir: pathlib.Path) -> bool:
+    """Return whether the AMC microservice container is still running."""
+    result = ctx.run_as_user(
+        "docker", "compose", "ps", "--status", "running", "--services",
+        cwd=str(compose_dir), check=False, capture_output=True, text=True,
+        stream=False,
+    )
+    return result.returncode == 0 and _MS_SERVICE in (result.stdout or "").splitlines()
+
+
+def _ms_last_log_line(ctx: "Context", compose_dir: pathlib.Path) -> Optional[str]:
+    """Return the microservice's most recent non-blank log line, if any."""
+    result = ctx.run_as_user(
+        "docker", "compose", "logs", "--no-log-prefix", "--tail", "5", _MS_SERVICE,
+        cwd=str(compose_dir), check=False, capture_output=True, text=True,
+        stream=False,
+    )
+    if result.returncode != 0:
+        return None
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
 def wait_for_backend(
     ctx: "Context",
     url: str,
     *,
+    compose_dir: Optional[pathlib.Path] = None,
     timeout_s: float = _SERVICE_WAIT_TIMEOUT_S,
     poll_s: float = _UI_WAIT_POLL_S,
+    log_interval_s: float = _BACKEND_LOG_INTERVAL_S,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Wait until the AMC microservice returns JSON with ``code: 0``."""
+    """Wait until the AMC microservice returns JSON with ``code: 0``.
+
+    With `compose_dir`, every `log_interval_s` the wait also echoes the
+    microservice's latest log line to the live window, so first-launch model
+    downloads read as progress rather than a hang, and gives up early if the
+    ms container is no longer running (nothing left to wait for).
+    """
     started = clock()
+    last_check = started
+    last_line: Optional[str] = None
     while True:
         result = ctx.run_root(
             "curl",
@@ -720,8 +758,18 @@ def wait_for_backend(
                     return True
             except (json.JSONDecodeError, AttributeError):
                 pass
-        if clock() - started >= timeout_s:
+        now = clock()
+        if now - started >= timeout_s:
             return False
+        if compose_dir is not None and now - last_check >= log_interval_s:
+            last_check = now
+            if not _ms_service_running(ctx, compose_dir):
+                ctx.log.warn(f"{_MS_SERVICE} stopped running before it became ready")
+                return False
+            line = _ms_last_log_line(ctx, compose_dir)
+            if line is not None and line != last_line:
+                last_line = line
+                ctx.progress.line(line)
         ctx.progress.tick()
         sleep(poll_s)
 
@@ -1424,12 +1472,14 @@ def launch_amc(
         ui_url = f"http://localhost:{cfg.ui_port}"
         ctx.log.info(
             "Waiting for AMC startup; the first launch downloads models and "
-            "builds its parser before the API becomes ready."
+            "builds its parser before the API becomes ready; this can take "
+            f"up to {int(_SERVICE_WAIT_TIMEOUT_S // 60)} minutes."
         )
-        if not wait_for_backend(ctx, api_url):
+        ctx.progress.task("waiting for the AMC microservice")
+        if not wait_for_backend(ctx, api_url, compose_dir=compose_dir):
             raise AmcLaunchError(
-                f"AMC microservice did not return code 0 within "
-                f"{int(_SERVICE_WAIT_TIMEOUT_S)}s at {api_url}\n"
+                f"AMC microservice did not return code 0 at {api_url} "
+                f"(waited up to {int(_SERVICE_WAIT_TIMEOUT_S)}s)\n"
                 f"{compose_diagnostics(ctx, compose_dir)}"
             )
         if not wait_for_ui(ctx, ui_url):

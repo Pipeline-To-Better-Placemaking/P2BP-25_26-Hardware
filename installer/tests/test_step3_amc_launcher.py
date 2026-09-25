@@ -929,7 +929,7 @@ def test_run_launches_when_operator_confirms(tmp_path, monkeypatch):
 
     monkeypatch.setattr(step3, "_INPUT", lambda _prompt: "y")
     monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
-    monkeypatch.setattr(step3, "wait_for_backend", lambda ctx, url: True)
+    monkeypatch.setattr(step3, "wait_for_backend", lambda ctx, url, **_kw: True)
     monkeypatch.setattr(step3, "wait_for_ui", lambda ctx, url: True)
     monkeypatch.setattr(step3, "ensure_amc_project", lambda ctx, cfg: "project-123")
     monkeypatch.setattr(
@@ -1215,6 +1215,91 @@ def test_backend_requires_code_zero(tmp_path):
     )
 
 
+def test_backend_default_wait_covers_first_launch_downloads():
+    assert step3._SERVICE_WAIT_TIMEOUT_S >= 1800
+
+
+def _ms_user_runner(*, running=True, log_lines=("downloading models",)):
+    runner = ScriptedRunner()
+    runner.when(
+        lambda a: a[:3] == ("docker", "compose", "ps"),
+        stdout="auto-magic-calib-ms\nauto-magic-calib-ui\n" if running else "auto-magic-calib-ui\n",
+    )
+    runner.when(
+        lambda a: a[:3] == ("docker", "compose", "logs"),
+        stdout="\n".join(log_lines) + "\n\n",
+    )
+    return runner
+
+
+def test_backend_keeps_waiting_while_ms_runs_and_echoes_new_log_lines(tmp_path):
+    ready = iter(('{"code": 1}', '{"code": 1}', '{"code": 1}', '{"code": 0}'))
+    curl_results = []
+
+    def fake_root(*args, **kwargs):
+        curl_results.append(args)
+        return subprocess.CompletedProcess(list(args), 0, next(ready), "")
+
+    ctx = FakeContext(tmp_path, runner_root=fake_root, runner_user=_ms_user_runner())
+    echoed = []
+    ctx.progress.line = echoed.append
+    times = iter((0.0, 10.0, 20.0, 30.0, 40.0))
+    assert step3.wait_for_backend(
+        ctx, "http://localhost:8000/v1/ready", compose_dir=tmp_path,
+        timeout_s=1800, poll_s=0, log_interval_s=10,
+        clock=lambda: next(times), sleep=lambda _n: None,
+    )
+    assert len(curl_results) == 4
+    # The same latest line is echoed once, not on every check.
+    assert echoed == ["downloading models"]
+
+
+def test_backend_gives_up_early_when_ms_container_stops(tmp_path):
+    root = ScriptedRunner(default_stdout='{"code": 1}')
+    user = _ms_user_runner(running=False)
+    ctx = FakeContext(tmp_path, runner_root=root, runner_user=user)
+    times = iter((0.0, 10.0))
+    assert not step3.wait_for_backend(
+        ctx, "http://localhost:8000/v1/ready", compose_dir=tmp_path,
+        timeout_s=1800, poll_s=0, log_interval_s=10,
+        clock=lambda: next(times), sleep=lambda _n: None,
+    )
+    assert len(root.calls) == 1
+    assert not user.called_with_prefix("docker", "compose", "logs")
+
+
+def test_backend_without_compose_dir_never_inspects_containers(tmp_path):
+    user = ScriptedRunner()
+    root = ScriptedRunner(default_stdout='{"code": 1}')
+    times = iter((0.0, 15.0, 30.0))
+    assert not step3.wait_for_backend(
+        FakeContext(tmp_path, runner_root=root, runner_user=user),
+        "http://localhost:8000/v1/ready",
+        timeout_s=30, poll_s=0, log_interval_s=10,
+        clock=lambda: next(times), sleep=lambda _n: None,
+    )
+    assert user.calls == []
+
+
+def test_launch_passes_compose_dir_to_backend_wait(tmp_path, monkeypatch):
+    ctx = FakeContext(tmp_path, runner_user=_passing_runner())
+    _stub_amc_root_with_compose(ctx)
+    seen = {}
+
+    def fake_wait(ctx, url, **kwargs):
+        seen.update(kwargs)
+        return False
+
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(step3, "resolve_ports", lambda ctx, cfg: cfg)
+    monkeypatch.setattr(step3, "wait_for_backend", fake_wait)
+    monkeypatch.setattr(step3, "compose_diagnostics", lambda ctx, path: "")
+    monkeypatch.setattr(step3, "compose_down", lambda ctx, path: None)
+    monkeypatch.setattr(step3.atexit, "register", lambda fn: None)
+    step3.launch_amc(ctx, non_interactive=True)
+    assert seen["compose_dir"].name == "compose"
+
+
 def test_compose_stack_running_requires_both_services(tmp_path):
     runner = ScriptedRunner()
     runner.when(
@@ -1297,7 +1382,7 @@ def test_readiness_failure_is_fatal_and_tears_down_once(tmp_path, monkeypatch):
     downs = []
     monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
     monkeypatch.setattr(step3, "resolve_ports", lambda ctx, cfg: cfg)
-    monkeypatch.setattr(step3, "wait_for_backend", lambda ctx, url: False)
+    monkeypatch.setattr(step3, "wait_for_backend", lambda ctx, url, **_kw: False)
     monkeypatch.setattr(step3, "compose_diagnostics", lambda ctx, path: "status evidence")
     monkeypatch.setattr(step3, "compose_down", lambda ctx, path: downs.append(path))
     monkeypatch.setattr(step3.atexit, "register", lambda fn: None)
@@ -1348,7 +1433,7 @@ def test_keyboard_interrupt_returns_failure_and_cleans_up(tmp_path, monkeypatch)
     monkeypatch.setattr(
         step3,
         "wait_for_backend",
-        lambda ctx, url: (_ for _ in ()).throw(KeyboardInterrupt()),
+        lambda ctx, url, **_kw: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
     monkeypatch.setattr(step3, "compose_down", lambda ctx, path: downs.append(path))
     monkeypatch.setattr(step3, "_install_teardown_guards", lambda teardown: teardown)
