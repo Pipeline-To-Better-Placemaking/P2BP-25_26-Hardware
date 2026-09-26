@@ -238,6 +238,7 @@ def _project_state(ctx: "Context", inputs: ProjectInputs) -> str:
         check=False,
         capture_output=True,
         text=True,
+        stream=False,
     )
     payload = _json_object(result, f"AMC project {inputs.project_id} status")
     info = payload.get("project_info")
@@ -257,6 +258,7 @@ def _project_state(ctx: "Context", inputs: ProjectInputs) -> str:
             check=False,
             capture_output=True,
             text=True,
+            stream=False,
         )
         evidence = (
             (log_result.stdout or "").strip()
@@ -827,6 +829,9 @@ class Step4CalibOutputWiring:
                     status=StepStatus.FAILED,
                     message=f"missing bundled template: {path}",
                 )
+        ctx.progress.task(
+            f"waiting for AMC project {inputs.project_name} to complete"
+        )
         try:
             outcome = _wait_for_completed(ctx, inputs)
         except AmcApiError as exc:

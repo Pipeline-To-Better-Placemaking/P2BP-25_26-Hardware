@@ -359,6 +359,44 @@ def test_preflight_error_fetches_calibration_log(tmp_path, templates, monkeypatc
     assert any("/amc/calibrate/project-123/log" in c[0][-1] for c in runner.calls)
 
 
+def test_status_and_log_polls_do_not_stream(tmp_path, templates, monkeypatch):
+    runner = Runner(states=["ERROR"], log="bundle adjustment exploded")
+    ctx = _ctx(tmp_path, templates, runner=runner)
+    _complete_wait(monkeypatch)
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.FAILED
+    polls = [
+        call
+        for call in runner.calls
+        if call[0]
+        and call[0][0] == "curl"
+        and ("/get_project_info/" in call[0][-1] or "/amc/calibrate/" in call[0][-1])
+    ]
+    assert len(polls) == 2
+    assert all(kwargs.get("stream") is False for _, kwargs in polls)
+
+
+def test_preflight_sets_waiting_task_before_wait(tmp_path, templates, monkeypatch):
+    ctx = _ctx(tmp_path, templates)
+    events = []
+    ctx.progress = SimpleNamespace(
+        phase=lambda n: None, task=lambda text: events.append(("task", text))
+    )
+
+    def wait(predicate, **kwargs):
+        events.append(("wait", None))
+        return waitui.WaitOutcome.SATISFIED if predicate() else waitui.WaitOutcome.TIMEOUT
+
+    monkeypatch.setattr(waitui, "wait_until", wait)
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.COMPLETE
+    wait_index = events.index(("wait", None))
+    assert events[wait_index - 1] == (
+        "task",
+        "waiting for AMC project site-42 to complete",
+    )
+
+
 def test_preflight_status_http_error_is_fatal(tmp_path, templates, monkeypatch):
     ctx = _ctx(tmp_path, templates, runner=Runner(status_rc=22))
     _complete_wait(monkeypatch)

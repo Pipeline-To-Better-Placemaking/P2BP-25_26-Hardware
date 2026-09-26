@@ -105,6 +105,16 @@ case-insensitive after normalization to uppercase.
 | `ERROR` | fetch the calibration log and fail with bounded evidence |
 | any other state | continue polling until the wait ends |
 
+**REQUIRED — quiet polling.** The status request above and the calibration-log
+request in [§3.2](#32-error-evidence) pass `stream=False` to `ctx.run_root`.
+Their JSON replies are parsed, never echoed into the live window — a streamed
+`{"code":0,"message":"Project info retrieved successfully",...}` reply every
+few seconds would bury the wait description and the AMC UI hint for as long as
+calibration takes. Before the completion wait starts, Step 4 sets
+`ctx.progress.task("waiting for AMC project <PROJECT_NAME> to complete")` so
+the live task line no longer reads "resolving AMC project and camera inputs"
+while it waits. State changes are still logged once each.
+
 ### 3.2 Error evidence
 
 When state is `ERROR`, Step 4 fetches:
