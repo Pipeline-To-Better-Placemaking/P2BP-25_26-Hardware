@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import shutil
 import stat
@@ -18,6 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from mv3dt_installer import (
     app,
     config as config_mod,
+    footage as footage_mod,
     logs,
     report,
     systemd,
@@ -331,7 +333,8 @@ def test_preflight_zero_camera_scan_requests_connection_and_rerun(
 
 
 def test_preflight_polls_running_then_completed(tmp_path, templates, monkeypatch):
-    runner = Runner(states=["RUNNING", "COMPLETED"])
+    # The first status request is the footage INIT check (footage spec 3).
+    runner = Runner(states=["RUNNING", "RUNNING", "COMPLETED"])
     ctx = _ctx(tmp_path, templates, runner=runner)
 
     def wait(predicate, **kwargs):
@@ -343,10 +346,7 @@ def test_preflight_polls_running_then_completed(tmp_path, templates, monkeypatch
     result = step4.Step4CalibOutputWiring().preflight(ctx)
     assert result.status is StepStatus.COMPLETE
     urls = [call[0][-1] for call in runner.calls if call[0] and call[0][0] == "curl"]
-    assert urls == [
-        "http://localhost:8000/v1/get_project_info/project-123",
-        "http://localhost:8000/v1/get_project_info/project-123",
-    ]
+    assert urls == ["http://localhost:8000/v1/get_project_info/project-123"] * 3
 
 
 def test_preflight_error_fetches_calibration_log(tmp_path, templates, monkeypatch):
@@ -790,3 +790,467 @@ def test_render_tracker_and_app_config(templates):
     )
     assert "uri=rtsp://operator:pw@10.0.0.8:554/stream" in app_text
     assert "topic=mv3dt/site-42/sv3d" in app_text
+
+
+# ---------------------------------------------------------------------------
+# STEP-4-CALIBRATION-FOOTAGE sections 3 to 6: calibration footage wiring
+# ---------------------------------------------------------------------------
+
+FOOTAGE_PASSWORD = "hunter2-footage-secret"
+FOOTAGE_CAMERAS = [
+    step4.cameras_mod.Camera(
+        id="c1",
+        mac="d0:3b:f4:00:00:01",
+        ip="169.254.1.10",
+        position="top-left",
+        stream_ok=True,
+    ),
+    step4.cameras_mod.Camera(
+        id="c2",
+        mac="d0:3b:f4:00:00:02",
+        ip="169.254.1.11",
+        position="top-right",
+        stream_ok=False,
+    ),
+    step4.cameras_mod.Camera(
+        id="c3",
+        mac="d0:3b:f4:00:00:03",
+        ip="169.254.1.12",
+        position="",
+        enabled=False,
+    ),
+]
+
+
+def _footage_ctx(tmp_path, templates, *, states=("INIT", "COMPLETED"), **kwargs):
+    conf = _conf(tmp_path)
+    pathlib.Path(conf[config_mod.CAMERAS_FILE_KEY]).write_text(
+        step4.cameras_mod.render_inventory(FOOTAGE_CAMERAS, header=""),
+        encoding="utf-8",
+    )
+    conf[step4.CONF_CAM_PASSWORD_KEY] = FOOTAGE_PASSWORD
+    runner = kwargs.pop("runner", None) or Runner(states=list(states))
+    ctx = _ctx(tmp_path, templates, conf=conf, runner=runner, **kwargs)
+    ctx.events = []
+    ctx.progress = SimpleNamespace(
+        phase=lambda n: None,
+        task=lambda text: ctx.events.append(("task", text)),
+        percent=lambda value, note=None: ctx.events.append(("percent", value)),
+    )
+    return ctx
+
+
+def _footage_project(ctx):
+    return ctx.user.home / "Downloads" / footage_mod.FOOTAGE_DIRNAME / "site-42"
+
+
+def _write_complete_set(ctx, *, seconds=300, persist=True):
+    """A complete marked set; `persist` mirrors what recording leaves in
+    installer.conf (the resolved footage root)."""
+    project = _footage_project(ctx)
+    project.mkdir(parents=True, exist_ok=True)
+    if persist:
+        ctx.conf[step4.CONF_CALIB_FOOTAGE_DIR_KEY] = str(project.parent)
+    enabled = [c for c in FOOTAGE_CAMERAS if c.enabled]
+    for camera in enabled:
+        (project / footage_mod.clip_name(camera)).write_bytes(b"mp4")
+    (project / footage_mod.MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "project_name": "site-42",
+                "seconds": seconds,
+                "recorded_utc": "2026-09-25T20:15:00Z",
+                "cameras": [
+                    {"id": c.id, "mac": c.mac, "file": footage_mod.clip_name(c)}
+                    for c in enabled
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return project
+
+
+class FakeFootage:
+    """Stands in for footage.record/has_room and the prompt seam."""
+
+    def __init__(
+        self, monkeypatch, *, answer="", room=True, failed=(), cancelled=False
+    ):
+        self.prompts = []
+        self.record_calls = []
+        self.room_calls = []
+
+        def fake_input(prompt):
+            self.prompts.append(prompt)
+            return answer
+
+        def fake_has_room(root, count):
+            self.room_calls.append((root, count))
+            needed = count * footage_mod.MIN_FREE_BYTES_PER_CAMERA
+            return (True, needed * 10, needed) if room else (False, 1 << 29, needed)
+
+        def fake_record(cameras, **kwargs):
+            self.record_calls.append((list(cameras), kwargs))
+            kwargs["on_progress"](0.5)
+            project = kwargs["project_dir"]
+            bad = list(cameras) if cancelled else list(failed)
+            return footage_mod.RecordResult(
+                project_dir=project,
+                recorded=[
+                    project / footage_mod.clip_name(c) for c in cameras if c not in bad
+                ],
+                failed=bad,
+                cancelled=cancelled,
+            )
+
+        monkeypatch.setattr(step4, "_INPUT", fake_input)
+        monkeypatch.setattr(footage_mod, "has_room", fake_has_room)
+        monkeypatch.setattr(footage_mod, "record", fake_record)
+
+
+def test_footage_init_interactive_prompts_and_records(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+
+    assert result.status is StepStatus.COMPLETE
+    project = _footage_project(ctx)
+    assert fake.prompts == [
+        "Record 5 minutes of calibration footage from 2 cameras into\n"
+        f"{project}?\n"
+        "Have someone walk through the whole scene while it records.\n"
+        "Press Enter to start, or type s to skip: "
+    ]
+    assert fake.room_calls == [(project.parent, 2)]
+    [(cameras, kwargs)] = fake.record_calls
+    assert [c.id for c in cameras] == ["c1", "c2"]  # stream_ok False included
+    assert kwargs["user"] == "admin"
+    assert kwargs["password"] == FOOTAGE_PASSWORD
+    assert kwargs["project_dir"] == project
+    assert kwargs["project_name"] == "site-42"
+    assert kwargs["seconds"] == 300
+    assert kwargs["user_prefix"] == ("sudo", "-u", "operator", "-H")
+    assert ("task", "recording calibration footage from 2 cameras") in ctx.events
+    assert ("percent", 50) in ctx.events
+    assert ctx.events[-1] == ("task", "waiting for AMC project site-42 to complete")
+
+
+def test_footage_settings_come_from_installer_conf(tmp_path, templates, monkeypatch):
+    ctx = _footage_ctx(tmp_path, templates)
+    custom = tmp_path / "custom footage"
+    ctx.conf[step4.CONF_CALIB_FOOTAGE_SECONDS_KEY] = "90"
+    ctx.conf[step4.CONF_CALIB_FOOTAGE_DIR_KEY] = str(custom)
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+
+    assert fake.prompts[0].startswith("Record 1.5 minutes of calibration footage")
+    [(_, kwargs)] = fake.record_calls
+    assert kwargs["seconds"] == 90
+    assert kwargs["project_dir"] == custom / "site-42"
+
+
+@pytest.mark.parametrize("state_name", ["RUNNING", "COMPLETED", "READY"])
+def test_footage_skipped_when_project_is_past_init(
+    tmp_path, templates, monkeypatch, state_name
+):
+    ctx = _footage_ctx(tmp_path, templates, states=(state_name, "COMPLETED"))
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert fake.prompts == [] and fake.record_calls == []
+
+
+def test_footage_skipped_non_interactive(tmp_path, templates, monkeypatch, capsys):
+    ctx = _footage_ctx(tmp_path, templates, non_interactive=True)
+    fake = FakeFootage(monkeypatch)
+    monkeypatch.setattr(
+        waitui, "wait_until", lambda predicate, **kwargs: waitui.WaitOutcome.SKIPPED
+    )
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.USER_ACTION_REQUIRED
+    assert fake.prompts == [] and fake.record_calls == [] and fake.room_calls == []
+    assert capsys.readouterr().err.count("--non-interactive") == 1
+
+
+def test_footage_complete_set_skips_without_prompt(tmp_path, templates, monkeypatch):
+    ctx = _footage_ctx(tmp_path, templates)
+    _write_complete_set(ctx)
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert fake.prompts == [] and fake.record_calls == []
+
+
+def test_footage_set_for_other_clip_length_is_rerecorded(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    _write_complete_set(ctx, seconds=120)
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert len(fake.record_calls) == 1
+
+
+@pytest.mark.parametrize("answer", ["s", " S "])
+def test_footage_s_answer_skips(tmp_path, templates, monkeypatch, answer):
+    ctx = _footage_ctx(tmp_path, templates)
+    fake = FakeFootage(monkeypatch, answer=answer)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert len(fake.prompts) == 1 and fake.record_calls == []
+
+
+def test_footage_insufficient_space_needs_action_before_recording(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    fake = FakeFootage(monkeypatch, room=False)
+    _complete_wait(monkeypatch)
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.USER_ACTION_REQUIRED
+    assert str(_footage_project(ctx).parent) in result.message
+    assert "0.5 GiB" in result.message and "2.0 GiB" in result.message
+    assert fake.prompts == [] and fake.record_calls == []
+
+
+def test_footage_failed_camera_needs_action_naming_it(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    FakeFootage(monkeypatch, failed=[FOOTAGE_CAMERAS[1]])
+    waits = []
+    monkeypatch.setattr(waitui, "wait_until", lambda *a, **k: waits.append(1))
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.USER_ACTION_REQUIRED
+    assert "c2 (169.254.1.11)" in result.message
+    assert "c1" not in result.message
+    assert "activated" in result.user_actions[0].text
+    assert "CAM_PASSWORD" in result.user_actions[0].text
+    assert waits == []
+
+
+def test_footage_cancel_needs_action_with_wait_hints(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    FakeFootage(monkeypatch, cancelled=True)
+    waits = []
+    monkeypatch.setattr(waitui, "wait_until", lambda *a, **k: waits.append(1))
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.USER_ACTION_REQUIRED
+    assert "cancelled" in result.message
+    assert result.user_actions == step4._wait_hints(
+        ctx, step4.resolve_project_inputs(ctx)[0]
+    )
+    assert waits == []
+
+
+def test_footage_success_logs_upload_hint(tmp_path, templates, monkeypatch, capsys):
+    ctx = _footage_ctx(tmp_path, templates)
+    FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    err = capsys.readouterr().err
+    assert str(_footage_project(ctx)) in err
+    assert "Upload these 2 files at the AMC Video Upload step." in err
+
+
+def test_wait_hints_lead_with_upload_action_when_set_complete(tmp_path, templates):
+    ctx = _footage_ctx(tmp_path, templates)
+    inputs = step4.resolve_project_inputs(ctx)[0]
+    without = step4._wait_hints(ctx, inputs)
+    assert not any("Upload" in action.text for action in without)
+    project = _write_complete_set(ctx)
+    hints = step4._wait_hints(ctx, inputs)
+    assert hints[0].text == (
+        f"Upload the 2 clips in {project} at the AMC Video Upload step."
+    )
+    assert hints[1:] == without
+
+
+def test_successful_ingest_deletes_owned_footage(tmp_path, templates):
+    ctx = _footage_ctx(
+        tmp_path, templates, states=("COMPLETED",), non_interactive=True
+    )
+    project = _write_complete_set(ctx)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert not project.exists()
+    assert not project.parent.exists()  # the emptied footage root goes too
+
+
+def test_successful_ingest_keeps_unmarked_directory(tmp_path, templates):
+    ctx = _footage_ctx(
+        tmp_path, templates, states=("COMPLETED",), non_interactive=True
+    )
+    project = _footage_project(ctx)
+    project.mkdir(parents=True)
+    ctx.conf[step4.CONF_CALIB_FOOTAGE_DIR_KEY] = str(project.parent)
+    (project / "operator-notes.txt").write_text("keep", encoding="utf-8")
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert (project / "operator-notes.txt").is_file()
+
+
+def test_failed_ingest_keeps_footage(tmp_path, templates):
+    ctx = _footage_ctx(
+        tmp_path, templates, runner=Runner(download_rc=22), non_interactive=True
+    )
+    project = _write_complete_set(ctx)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.FAILED
+    assert (project / footage_mod.MARKER_NAME).is_file()
+
+
+@pytest.mark.parametrize(
+    "outcome", [waitui.WaitOutcome.TIMEOUT, waitui.WaitOutcome.CANCELLED]
+)
+def test_unfinished_wait_keeps_footage_and_hints_upload(
+    tmp_path, templates, monkeypatch, outcome
+):
+    ctx = _footage_ctx(tmp_path, templates, states=("RUNNING",))
+    project = _write_complete_set(ctx)
+    monkeypatch.setattr(waitui, "wait_until", lambda *a, **k: outcome)
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.USER_ACTION_REQUIRED
+    assert result.user_actions[0].text.startswith("Upload the 2 clips")
+    assert (project / footage_mod.MARKER_NAME).is_file()
+
+
+def test_error_state_keeps_footage(tmp_path, templates):
+    ctx = _footage_ctx(tmp_path, templates, states=("ERROR",))
+    project = _write_complete_set(ctx)
+    assert step4.handle_ingest_subcommand([], ctx) == 1
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.FAILED
+    assert (project / footage_mod.MARKER_NAME).is_file()
+
+
+def test_ingest_subcommand_deletes_owned_footage(tmp_path, templates):
+    ctx = _footage_ctx(
+        tmp_path, templates, states=("COMPLETED",), non_interactive=True
+    )
+    project = _write_complete_set(ctx)
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert not project.exists()
+
+
+def test_footage_deletion_failure_never_fails_ingest(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(
+        tmp_path, templates, states=("COMPLETED",), non_interactive=True
+    )
+
+    _write_complete_set(ctx)
+
+    def boom(project_dir):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(footage_mod, "delete_if_owned", boom)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+
+
+@pytest.mark.parametrize(
+    "fake_kwargs",
+    [{}, {"room": False}, {"failed": [FOOTAGE_CAMERAS[0]]}, {"cancelled": True}],
+)
+def test_footage_password_never_in_messages(
+    tmp_path, templates, monkeypatch, capsys, fake_kwargs
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    fake = FakeFootage(monkeypatch, **fake_kwargs)
+    _complete_wait(monkeypatch)
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    captured = capsys.readouterr()
+    texts = [result.message or "", captured.err, captured.out, *fake.prompts]
+    texts += [a.text + (a.command or "") for a in result.user_actions or []]
+    texts += [str(event) for event in ctx.events]
+    assert not any(FOOTAGE_PASSWORD in text for text in texts)
+
+
+def test_recording_persists_resolved_footage_root_when_unset(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    persisted = []
+    monkeypatch.setattr(
+        step4.config_mod, "persist_value", lambda *args: persisted.append(args)
+    )
+    FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    root = str(_footage_project(ctx).parent)
+    assert persisted == [(ctx.install_dir, "CALIB_FOOTAGE_DIR", root)]
+    assert ctx.conf["CALIB_FOOTAGE_DIR"] == root
+
+
+def test_recording_persists_to_installer_conf(tmp_path, templates, monkeypatch):
+    ctx = _footage_ctx(tmp_path, templates)
+    FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    conf_text = (ctx.install_dir / config_mod.CONF_FILENAME).read_text(encoding="utf-8")
+    assert f"CALIB_FOOTAGE_DIR={_footage_project(ctx).parent}" in conf_text
+
+
+def test_recording_leaves_existing_footage_dir_alone(tmp_path, templates, monkeypatch):
+    ctx = _footage_ctx(tmp_path, templates)
+    custom = str(tmp_path / "custom footage")
+    ctx.conf[step4.CONF_CALIB_FOOTAGE_DIR_KEY] = custom
+    persisted = []
+    monkeypatch.setattr(
+        step4.config_mod, "persist_value", lambda *args: persisted.append(args)
+    )
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert persisted == []
+    assert ctx.conf[step4.CONF_CALIB_FOOTAGE_DIR_KEY] == custom
+    assert fake.record_calls[0][1]["project_dir"] == pathlib.Path(custom) / "site-42"
+
+
+def test_skipped_recording_does_not_persist_footage_root(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(tmp_path, templates)
+    persisted = []
+    monkeypatch.setattr(
+        step4.config_mod, "persist_value", lambda *args: persisted.append(args)
+    )
+    FakeFootage(monkeypatch, answer="s")
+    _complete_wait(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert persisted == []
+    assert step4.CONF_CALIB_FOOTAGE_DIR_KEY not in ctx.conf
+
+
+def test_root_ingest_deletes_footage_under_persisted_root(tmp_path, templates):
+    ctx = _footage_ctx(
+        tmp_path, templates, states=("COMPLETED",), non_interactive=True
+    )
+    project = _write_complete_set(ctx)
+    # The systemd timer runs `ingest` as root: no SUDO_USER, home is /root.
+    ctx.user.name = "root"
+    ctx.user.home = pathlib.Path("/root")
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert not project.exists()
+
+
+def test_ingest_without_persisted_root_never_attempts_deletion(
+    tmp_path, templates, monkeypatch
+):
+    ctx = _footage_ctx(
+        tmp_path, templates, states=("COMPLETED",), non_interactive=True
+    )
+    project = _write_complete_set(ctx, persist=False)
+    calls = []
+    monkeypatch.setattr(footage_mod, "delete_if_owned", lambda p: calls.append(p))
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert calls == []
+    assert (project / footage_mod.MARKER_NAME).is_file()

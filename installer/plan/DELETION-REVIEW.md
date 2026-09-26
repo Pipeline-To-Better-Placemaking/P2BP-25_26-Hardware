@@ -223,7 +223,7 @@ whose `cameras.yml` *is* a static list. Flagged, not solved.
 | `laptop/scripts/10_setup_mosquitto.sh` | **Bundled** into the binary as `assets/scripts/10_setup_mosquitto.sh` and owned by [`STEP-1` §3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker). The `laptop/` copy is the developer-harness original. |
 | `laptop/scripts/20_verify_cameras.sh` | **Not bundled.** Its `ffprobe`-over-RTSP check becomes the RTSP probe in `cameras.py` ([§6](#6-coverage-gaps-this-triage-exposed) gap 2); the ping sweep is [`STEP-5` §3.3](STEP-5-PER-PROJECT-EXES.md#33-what-the-exe-does-at-runtime-pipeline-subcommand)'s. Retained in git as a developer tool. |
 | `laptop/scripts/60_record_tracking.sh` | **Bundled** as `assets/scripts/60_record_tracking.sh` — it is the **producer of the artifacts** [`STEP-7` §E.1](STEP-7-WEBAPP-INTEGRATION.md#e1-what-gets-uploaded) uploads (`tracks.jsonl`, `tracks.csv`, `summary.json`). The `laptop/` copy is the developer-harness original. |
-| `laptop/scripts/70_plot_floorplan.py`, `record_cameras_mp4.sh`, `view_cameras.sh` | **Not bundled** — `70_plot_floorplan.py` would drag matplotlib into a self-contained binary for work the web app already does, and the two capture helpers have no plan coverage. Retained in git as developer tools. |
+| `laptop/scripts/70_plot_floorplan.py`, `record_cameras_mp4.sh`, `view_cameras.sh` | **Not bundled** — `70_plot_floorplan.py` would drag matplotlib into a self-contained binary for work the web app already does; `record_cameras_mp4.sh`'s recording is ported to Python as `installer/mv3dt_installer/footage.py` ([`STEP-4-CALIBRATION-FOOTAGE`](STEP-4-CALIBRATION-FOOTAGE.md)); `view_cameras.sh` has no plan coverage. Retained in git as developer tools. |
 
 > **RESOLVED — the bundling claim above was wrong.** This table previously
 > asserted that `laptop/deepstream/*`, `laptop/config/*`, and
@@ -353,7 +353,7 @@ still how this repo is exercised from a clone.
 | `60_record_tracking.sh` | **Bundled** | `assets/scripts/60_record_tracking.sh` | [`STEP-5`](STEP-5-PER-PROJECT-EXES.md); its artifacts feed [`STEP-7` §E.1](STEP-7-WEBAPP-INTEGRATION.md#e1-what-gets-uploaded) | Yes, developer-only original |
 | `70_plot_floorplan.py` | **Dropped** — matplotlib bloat; the web app visualizes | — | None (web app) | Yes, developer tool |
 | `99_stop_all.sh` | Superseded — ported into the per-project exe | — | [`STEP-5` §3.4](STEP-5-PER-PROJECT-EXES.md#34-stopping-the-pipeline) | Yes, developer-only |
-| `record_cameras_mp4.sh` | **Dropped** — no plan coverage | — | None | Yes, developer tool |
+| `record_cameras_mp4.sh` | **Not bundled** — ported to Python as `installer/mv3dt_installer/footage.py` | — | [`STEP-4-CALIBRATION-FOOTAGE`](STEP-4-CALIBRATION-FOOTAGE.md) | Yes, developer tool |
 | `view_cameras.sh` | **Dropped** — no plan coverage | — | None | Yes, developer tool |
 | `lib/common.sh` | Not bundled; a purpose-written sibling is | `assets/scripts/lib/common.sh` (sibling, **not** a copy) | [`00` §4.2](00-FRAMEWORK-AND-BOOTSTRAP.md#42-locating-bundled-assets-at-runtime) | Yes, developer-only |
 

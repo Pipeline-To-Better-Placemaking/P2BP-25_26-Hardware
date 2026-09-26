@@ -37,6 +37,10 @@ In scope:
    sources into the DeepStream application config.
 5. **Re-ingest later results**: install a timer and one-shot service that use
    the same API-based `ingest` subcommand.
+6. **Record calibration footage**: while the project is still `INIT`, record
+   one clip per enabled camera for the AMC Video Upload step, and delete it
+   after a successful ingest — specified in
+   [`STEP-4-CALIBRATION-FOOTAGE`](STEP-4-CALIBRATION-FOOTAGE.md).
 
 Out of scope:
 
@@ -358,6 +362,7 @@ Repo files referenced:
 
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — shared step, wait, privilege, and camera-discovery contracts.
 - [`installer/plan/STEP-3-AMC-LAUNCHER.md`](STEP-3-AMC-LAUNCHER.md) — pinned AMC version and persisted project identity.
+- [`installer/plan/STEP-4-CALIBRATION-FOOTAGE.md`](STEP-4-CALIBRATION-FOOTAGE.md) — calibration footage capture before the wait and deletion after ingest.
 - [`laptop/scripts/40_export_watcher.sh`](../../laptop/scripts/40_export_watcher.sh) — superseded filesystem-export watcher.
 - [`laptop/deepstream/config_tracker_NvMOT.yml`](../../laptop/deepstream/config_tracker_NvMOT.yml) — tracker template and pinned fields.
 - [`laptop/deepstream/deepstream_app_config.txt`](../../laptop/deepstream/deepstream_app_config.txt) — application template.

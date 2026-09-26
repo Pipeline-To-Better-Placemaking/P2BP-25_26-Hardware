@@ -901,6 +901,8 @@ every launch and must be silent after the first. Two rules make that true:
   | `CAMERAS_FILE` | Absolute path to the runtime camera inventory, normally `<install_dir>/cameras.yml` (§15) |
   | `CAMERA_SCAN_CIDR` | Sweep range for discovery; default `169.254.0.0/16` (§15.2) |
   | `CAMERA_SCAN_IFACE` | Restrict discovery to one interface; empty means every candidate interface (§15.2) |
+  | `CALIB_FOOTAGE_SECONDS` | Optional calibration clip length in seconds; default `300` ([`STEP-4-CALIBRATION-FOOTAGE` §2](STEP-4-CALIBRATION-FOOTAGE.md#2-pinned-values)) |
+  | `CALIB_FOOTAGE_DIR` | Optional calibration footage root; default `<invoking user home>/Downloads/mv3dt-calibration-footage`, persisted by Step 4 on first recording when unset ([`STEP-4-CALIBRATION-FOOTAGE` §2](STEP-4-CALIBRATION-FOOTAGE.md#2-pinned-values), [§6](STEP-4-CALIBRATION-FOOTAGE.md#6-deletion-after-a-successful-export)) |
 
   Camera RTSP credentials are intentionally absent from `installer.conf`;
   they live in `secrets/camera.env` and are loaded only in memory (§15.3).

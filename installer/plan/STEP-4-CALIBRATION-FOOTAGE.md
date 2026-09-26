@@ -52,7 +52,7 @@ has no knowledge of AMC or of step state; Step 4 decides **when** to call it.
 | Setting | Value | Source |
 |---|---|---|
 | Clip length | `300` seconds | `CALIB_FOOTAGE_SECONDS` in `installer.conf`, optional |
-| Footage root | `<invoking user home>/Downloads/mv3dt-calibration-footage` | `CALIB_FOOTAGE_DIR` in `installer.conf`, optional |
+| Footage root | `<invoking user home>/Downloads/mv3dt-calibration-footage` | `CALIB_FOOTAGE_DIR` in `installer.conf`, optional; when unset, Step 4 persists the resolved absolute default on first recording (§6) |
 | Project directory | `<footage root>/<PROJECT_NAME>/` | `PROJECT_NAME` from [`STEP-4` §2](STEP-4-CALIB-OUTPUT-WIRING.md#2-required-inputs) |
 | Clip file name | `<id>-<position>.mp4`, `unlabeled` for an empty position; characters outside `[A-Za-z0-9._-]` become `-` | camera inventory, [`00` §15.4](00-FRAMEWORK-AND-BOOTSTRAP.md#154-guided-position-binding-one-time) |
 | In-progress file name | `<clip file name>.part` | — |
@@ -202,6 +202,16 @@ create, and it removes the footage root too if that leaves it empty. It
 returns whether anything was deleted and logs the path it removed. A deletion
 failure is a `warn` line, never a step failure — the calibration is already
 installed.
+
+> **RESOLVED — deletion reads the persisted root.** The timer-driven
+> `ingest` runs as root with no `$SUDO_USER`, so the
+> [`00` §9.2](00-FRAMEWORK-AND-BOOTSTRAP.md#92-resolving-the-invoking-user--home)
+> invoking user resolves to root and the §2 default would point under
+> `/root`. Step 4 therefore persists the resolved footage root to
+> `CALIB_FOOTAGE_DIR` just before its first recording (an existing value is
+> left alone), and deletion reads only that key. When the key is absent the
+> installer never recorded footage, so deletion is skipped rather than
+> falling back to the running user's home.
 
 Footage is **not** deleted on a failed ingest, an AMC `ERROR` state, a wait
 timeout, or a cancelled wait: in every one of those cases the operator may need

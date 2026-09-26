@@ -27,6 +27,7 @@ import yaml
 from mv3dt_installer import app as app_mod
 from mv3dt_installer import cameras as cameras_mod
 from mv3dt_installer import config as config_mod
+from mv3dt_installer import footage as footage_mod
 from mv3dt_installer import systemd, waitui
 from mv3dt_installer.steps import StepResult, StepStatus, UserAction, register
 from mv3dt_installer.steps import step3_amc_launcher as step3_mod
@@ -54,6 +55,8 @@ CONF_CAM_USER_KEY = "CAM_USER"
 CONF_CAM_PASSWORD_KEY = "CAM_PASSWORD"
 CONF_AMC_EXPORT_WAIT_S_KEY = "AMC_EXPORT_WAIT_S"
 CONF_CALIBRATION_DIR_KEY = "CALIBRATION_DIR"
+CONF_CALIB_FOOTAGE_SECONDS_KEY = "CALIB_FOOTAGE_SECONDS"
+CONF_CALIB_FOOTAGE_DIR_KEY = "CALIB_FOOTAGE_DIR"
 
 DEFAULT_EXPORT_WAIT_S = 3600.0
 RESULT_ARCHIVE_NAME = "mv3dt_result.zip"
@@ -272,9 +275,58 @@ def _project_state(ctx: "Context", inputs: ProjectInputs) -> str:
     return state_name
 
 
+def _footage_seconds(ctx: "Context") -> int:
+    """STEP-4-CALIBRATION-FOOTAGE §2 clip length: `CALIB_FOOTAGE_SECONDS`,
+    or the pinned default when the key is absent or not a positive integer."""
+    try:
+        seconds = int(str(ctx.conf.get(CONF_CALIB_FOOTAGE_SECONDS_KEY) or "").strip())
+    except ValueError:
+        return footage_mod.DEFAULT_FOOTAGE_SECONDS
+    return seconds if seconds > 0 else footage_mod.DEFAULT_FOOTAGE_SECONDS
+
+
+def _footage_project_dir(ctx: "Context", inputs: ProjectInputs) -> pathlib.Path:
+    """STEP-4-CALIBRATION-FOOTAGE §2 project directory under the invoking
+    user's footage root (or the `CALIB_FOOTAGE_DIR` override)."""
+    override = (ctx.conf.get(CONF_CALIB_FOOTAGE_DIR_KEY) or "").strip() or None
+    root = footage_mod.footage_root(ctx.user.home, override)
+    return footage_mod.project_dir(root, inputs.project_name)
+
+
+def _complete_footage_count(ctx: "Context", inputs: ProjectInputs) -> Optional[int]:
+    """The clip count of a complete footage set for this project, or `None`
+    when no complete set exists or the inventory cannot be read."""
+    try:
+        cameras = _load_enabled_cameras(ctx)
+    except (KeyError, OSError, ValueError):
+        return None
+    if not cameras:
+        return None
+    if not footage_mod.is_complete(
+        _footage_project_dir(ctx, inputs),
+        cameras,
+        project_name=inputs.project_name,
+        seconds=_footage_seconds(ctx),
+    ):
+        return None
+    return len(cameras)
+
+
 def _wait_hints(ctx: "Context", inputs: ProjectInputs) -> list[UserAction]:
     ui_port = ctx.conf.get(step3_mod.CONF_UI_PORT_KEY) or step3_mod.DEFAULT_UI_PORT
-    return [
+    footage_actions: list[UserAction] = []
+    clip_count = _complete_footage_count(ctx, inputs)
+    if clip_count is not None:
+        # STEP-4-CALIBRATION-FOOTAGE §5: the upload hint comes first.
+        footage_actions.append(
+            UserAction(
+                text=(
+                    f"Upload the {clip_count} clips in "
+                    f"{_footage_project_dir(ctx, inputs)} at the AMC Video Upload step."
+                )
+            )
+        )
+    return footage_actions + [
         UserAction(
             text=f"Continue calibration in the AMC UI at http://localhost:{ui_port}."
         ),
@@ -759,6 +811,174 @@ def _discover_camera_inventory(ctx: "Context", inputs: ProjectInputs) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# STEP-4-CALIBRATION-FOOTAGE §3, §4, §6: calibration footage
+# ---------------------------------------------------------------------------
+
+# Injectable so tests never block on real input().
+_INPUT: Callable[[str], str] = input
+
+
+def _format_gib(count: int) -> str:
+    return f"{count / (1 << 30):.1f} GiB"
+
+
+def _format_minutes(seconds: int) -> str:
+    minutes = round(seconds / 60, 1)
+    return f"{minutes:g} minute" + ("" if minutes == 1 else "s")
+
+
+def _footage_prompt(seconds: int, camera_count: int, project: pathlib.Path) -> str:
+    cameras_word = "camera" if camera_count == 1 else "cameras"
+    return (
+        f"Record {_format_minutes(seconds)} of calibration footage from "
+        f"{camera_count} {cameras_word} into\n"
+        f"{project}?\n"
+        "Have someone walk through the whole scene while it records.\n"
+        "Press Enter to start, or type s to skip: "
+    )
+
+
+def _maybe_record_footage(
+    ctx: "Context", inputs: ProjectInputs
+) -> Optional[StepResult]:
+    """STEP-4-CALIBRATION-FOOTAGE §3/§4: record one clip per enabled camera
+    when the AMC project is still at `INIT`, no complete set exists, the run
+    is interactive, and there is room. Returns `None` to continue to the
+    completion wait, or the `StepResult` preflight must return instead.
+
+    Raises `AmcApiError` if the one status request fails, exactly as the
+    completion wait would on its first poll.
+    """
+    state_name = _project_state(ctx, inputs)
+    if state_name != "INIT":
+        return None
+    cameras = _load_enabled_cameras(ctx)
+    if not cameras:
+        return None
+    seconds = _footage_seconds(ctx)
+    project = _footage_project_dir(ctx, inputs)
+    if footage_mod.is_complete(
+        project, cameras, project_name=inputs.project_name, seconds=seconds
+    ):
+        return None
+    if ctx.non_interactive:
+        ctx.log.info(
+            "Skipping calibration footage recording under --non-interactive; "
+            "recording needs someone walking through the scene."
+        )
+        return None
+    ok, free, needed = footage_mod.has_room(project.parent, len(cameras))
+    if not ok:
+        return StepResult(
+            status=StepStatus.USER_ACTION_REQUIRED,
+            message=(
+                f"not enough free space to record calibration footage in "
+                f"{project.parent}: found {_format_gib(free)}, "
+                f"need {_format_gib(needed)}"
+            ),
+            user_actions=[
+                UserAction(
+                    text=(
+                        f"Free at least {_format_gib(needed)} on the filesystem "
+                        f"holding {project.parent}, or set "
+                        f"{CONF_CALIB_FOOTAGE_DIR_KEY} in installer.conf to a "
+                        "directory with room, then re-run the installer."
+                    ),
+                    command=(
+                        f"sudo {ctx.install_dir / 'bin' / step3_mod.INSTALLER_BIN_NAME} "
+                        "--resume"
+                    ),
+                )
+            ],
+        )
+    answer = _INPUT(_footage_prompt(seconds, len(cameras), project))
+    if answer.strip().lower() == "s":
+        ctx.log.info("Skipping calibration footage recording for this run.")
+        return None
+
+    camera_word = "camera" if len(cameras) == 1 else "cameras"
+    ctx.progress.task(
+        f"recording calibration footage from {len(cameras)} {camera_word}"
+    )
+    try:
+        if not (ctx.conf.get(CONF_CALIB_FOOTAGE_DIR_KEY) or "").strip():
+            # STEP-4-CALIBRATION-FOOTAGE §6: the timer-driven ingest runs as
+            # root, so it can only find this footage through the persisted
+            # root, never by re-resolving the invoking user's home.
+            root = str(project.parent.absolute())
+            config_mod.persist_value(ctx.install_dir, CONF_CALIB_FOOTAGE_DIR_KEY, root)
+            ctx.conf[CONF_CALIB_FOOTAGE_DIR_KEY] = root
+        result = footage_mod.record(
+            cameras,
+            user=inputs.cam_user,
+            password=inputs.cam_password,
+            project_dir=project,
+            project_name=inputs.project_name,
+            seconds=seconds,
+            user_prefix=("sudo", "-u", ctx.user.name, "-H"),
+            on_progress=lambda fraction: ctx.progress.percent(
+                int(fraction * 100), f"{len(cameras)} {camera_word}"
+            ),
+        )
+    except OSError as exc:
+        return StepResult(
+            status=StepStatus.FAILED,
+            message=f"could not record calibration footage: {exc}",
+        )
+    if result.cancelled:
+        return StepResult(
+            status=StepStatus.USER_ACTION_REQUIRED,
+            message="calibration footage recording was cancelled",
+            user_actions=_wait_hints(ctx, inputs),
+        )
+    if result.failed:
+        failed = ", ".join(f"{camera.id} ({camera.ip})" for camera in result.failed)
+        return StepResult(
+            status=StepStatus.USER_ACTION_REQUIRED,
+            message=f"calibration footage failed for camera(s): {failed}",
+            user_actions=[
+                UserAction(
+                    text=(
+                        f"Check that camera(s) {failed} are activated and that "
+                        f"{CONF_CAM_USER_KEY}/{CONF_CAM_PASSWORD_KEY} match the "
+                        "camera credentials, then re-run the installer to "
+                        "record the whole set again."
+                    ),
+                    command=(
+                        f"sudo {ctx.install_dir / 'bin' / step3_mod.INSTALLER_BIN_NAME} "
+                        "--resume"
+                    ),
+                )
+            ],
+        )
+    ctx.log.info(
+        f"Calibration footage recorded in {project}. "
+        f"Upload these {len(result.recorded)} files at the AMC Video Upload step."
+    )
+    return None
+
+
+def _delete_footage_after_ingest(ctx: "Context", inputs: ProjectInputs) -> None:
+    """STEP-4-CALIBRATION-FOOTAGE §6: the footage has served its purpose once
+    an export is installed. `delete_if_owned` only removes a directory
+    carrying the installer's marker, and a failure is never a step failure.
+
+    Only the persisted `CALIB_FOOTAGE_DIR` is consulted: the timer-driven
+    `ingest` runs as root, where the invoking-user default would resolve
+    under root's home. Absent the key, the installer never recorded footage,
+    so there is nothing to delete."""
+    persisted = (ctx.conf.get(CONF_CALIB_FOOTAGE_DIR_KEY) or "").strip()
+    if not persisted:
+        return
+    try:
+        footage_mod.delete_if_owned(
+            footage_mod.project_dir(pathlib.Path(persisted), inputs.project_name)
+        )
+    except Exception as exc:  # noqa: BLE001 -- §6: never fail the step
+        ctx.log.warn(f"Could not delete calibration footage: {exc}")
+
+
 def _wire_download(
     ctx: "Context", inputs: ProjectInputs, *, allow_prompt: bool
 ) -> StepResult:
@@ -779,6 +999,7 @@ def _wire_download(
     config_mod.persist_value(ctx.install_dir, CONF_CALIBRATION_DIR_KEY, str(dest))
     ctx.conf[CONF_CALIBRATION_DIR_KEY] = str(dest)
     _render_configs(ctx, inputs=inputs, calibration_dir=dest)
+    _delete_footage_after_ingest(ctx, inputs)
     return StepResult(status=StepStatus.COMPLETE)
 
 
@@ -829,6 +1050,17 @@ class Step4CalibOutputWiring:
                     status=StepStatus.FAILED,
                     message=f"missing bundled template: {path}",
                 )
+        try:
+            footage_result = _maybe_record_footage(ctx, inputs)
+        except AmcApiError as exc:
+            return StepResult(status=StepStatus.FAILED, message=str(exc))
+        except OSError as exc:
+            return StepResult(
+                status=StepStatus.FAILED,
+                message=f"could not read camera inventory: {exc}",
+            )
+        if footage_result is not None:
+            return footage_result
         ctx.progress.task(
             f"waiting for AMC project {inputs.project_name} to complete"
         )
