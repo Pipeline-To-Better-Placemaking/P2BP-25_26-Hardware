@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ipaddress
 import pathlib
 import subprocess
 import sys
@@ -113,6 +114,17 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # doc 00 §3.3 -- CLI flags (framework-level)
 # ---------------------------------------------------------------------------
+
+
+def _scan_cidr_arg(value: str) -> str:
+    """argparse `type` for `--camera-scan-cidr`: reject an unparseable
+    range here, before `_run_scan_cameras` persists it to `installer.conf`
+    where every later scan would trip over it."""
+    try:
+        ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a valid IPv4 CIDR: {value!r} ({exc})")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--camera-scan-cidr",
         metavar="CIDR",
         default=None,
+        type=_scan_cidr_arg,
         help="Override the discovery sweep range "
         f"(default {cameras_mod.DEFAULT_SCAN_CIDR}); persisted as "
         "CAMERA_SCAN_CIDR (doc 00 §11.2).",

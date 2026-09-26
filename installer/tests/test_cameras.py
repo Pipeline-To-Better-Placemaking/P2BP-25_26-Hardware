@@ -120,20 +120,36 @@ def test_parse_inventory_ignores_comments_and_blank_lines():
 # ---------------------------------------------------------------------------
 
 
-def test_candidate_interfaces_drops_excluded_names_and_addressless_ifaces(tmp_path):
-    for name in ("eth0", "lo", "docker0", "veth1234", "br-abc", "virbr0", "wlan0"):
-        (tmp_path / name).mkdir()
+def _sysfs_iface(net_dir, name, *, carrier="1", flags="0x1003"):
+    iface = net_dir / name
+    iface.mkdir()
+    if carrier is not None:
+        (iface / "carrier").write_text(carrier + "\n")
+    (iface / "flags").write_text(flags + "\n")
+
+
+def test_candidate_interfaces_drops_excluded_names_dead_links_and_noarp(tmp_path):
+    for name in ("eth0", "lo", "docker0", "veth1234", "br-abc", "virbr0"):
+        _sysfs_iface(tmp_path, name)
+    _sysfs_iface(tmp_path, "eth1", carrier="0")           # no link
+    _sysfs_iface(tmp_path, "eth2", carrier=None)          # admin down: carrier unreadable
+    _sysfs_iface(tmp_path, "tailscale0", flags="0x10d1")  # POINTOPOINT | NOARP
+    _sysfs_iface(tmp_path, "wlan0")
+
+    result = cameras.candidate_interfaces(net_dir=tmp_path)
+
+    assert result == ["eth0", "wlan0"]
+
+
+def test_candidate_interfaces_keeps_link_up_interface_without_ipv4(tmp_path):
+    # The PoE port on a link-local camera LAN often has no address at all;
+    # it must reach discover() so it can be reported, not vanish.
+    _sysfs_iface(tmp_path, "enp8s0")
 
     def runner(argv, **kwargs):
-        if argv[:5] == ["ip", "-4", "-o", "addr", "show"]:
-            if argv[-1] == "eth0":
-                return _cp(argv, 0, stdout="1: eth0    inet 169.254.1.5/16 brd 169.254.255.255")
-            return _cp(argv, 0, stdout="")
-        return _cp(argv, 1)
+        return _cp(argv, 0, stdout="")
 
-    result = cameras.candidate_interfaces(runner=runner, net_dir=tmp_path)
-
-    assert result == ["eth0"]
+    assert cameras.candidate_interfaces(runner=runner, net_dir=tmp_path) == ["enp8s0"]
 
 
 def test_candidate_interfaces_missing_net_dir_returns_empty(tmp_path):
@@ -169,29 +185,112 @@ def test_discover_via_arp_scan_filters_by_oui_and_records_unmatched():
     assert result.unmatched == ["aa:bb:cc:dd:ee:ff"]
 
 
-def test_discover_arp_scan_also_sweeps_cidr_when_interface_is_not_link_local():
-    calls = []
+def _addr_runner(addresses, calls, *, arp_stdout=""):
+    """Fake runner: `addresses` maps iface -> `ip -4 -o addr` stdout."""
 
     def runner(argv, **kwargs):
         calls.append(argv)
-        if argv[:2] == ["arp-scan", "--interface"]:
-            return _cp(argv, 0, stdout="")
+        if argv[0] == "arp-scan":
+            return _cp(argv, 0, stdout=arp_stdout)
         if argv[:5] == ["ip", "-4", "-o", "addr", "show"]:
-            # A routable, non-link-local address.
-            return _cp(argv, 0, stdout="inet 10.0.0.5/24")
+            return _cp(argv, 0, stdout=addresses.get(argv[-1], ""))
         return _cp(argv, 1)
 
-    cameras.discover(interfaces=["eth0"], cidr="10.0.0.0/24", runner=runner)
+    return runner
+
+
+def test_discover_sweeps_only_the_cidr_with_the_in_range_source_address():
+    calls = []
+    runner = _addr_runner(
+        {
+            "enp8s0": "2: enp8s0    inet 169.254.3.134/16 brd 169.254.255.255",
+            # A campus network: --localnet here would be 16 million hosts.
+            "wlp9s0": "3: wlp9s0    inet 10.10.217.57/8 brd 10.255.255.255",
+        },
+        calls,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cameras, "candidate_interfaces", lambda runner: ["enp8s0", "wlp9s0"])
+        result = cameras.discover(runner=runner)
 
     arp_calls = [c for c in calls if c[0] == "arp-scan"]
-    assert ["arp-scan", "--interface", "eth0", "--localnet"] in arp_calls
-    assert ["arp-scan", "--interface", "eth0", "10.0.0.0/24"] in arp_calls
+    assert arp_calls == [
+        ["arp-scan", "--interface", "enp8s0", "--arpspa", "169.254.3.134", "169.254.0.0/16"]
+    ]
+    assert not any("--localnet" in c for c in calls)
+    assert result.interfaces == ["enp8s0"]
+    assert result.skipped == ["wlp9s0"]
+
+
+def test_discover_picks_the_in_range_address_when_an_interface_has_several():
+    calls = []
+    runner = _addr_runner(
+        {"eth0": "inet 192.168.1.20/24 brd 192.168.1.255\ninet 169.254.9.9/16 brd 169.254.255.255"},
+        calls,
+    )
+
+    cameras.discover(interfaces=["eth0"], runner=runner)
+
+    arp = [c for c in calls if c[0] == "arp-scan"]
+    assert arp == [["arp-scan", "--interface", "eth0", "--arpspa", "169.254.9.9", "169.254.0.0/16"]]
+
+
+def test_discover_sweeps_an_explicit_interface_even_outside_the_cidr():
+    calls = []
+    runner = _addr_runner({"eth0": "inet 10.0.0.5/24"}, calls)
+
+    result = cameras.discover(interfaces=["eth0"], runner=runner)
+
+    arp = [c for c in calls if c[0] == "arp-scan"]
+    assert arp == [["arp-scan", "--interface", "eth0", "169.254.0.0/16"]]
+    assert result.skipped == []
+
+
+def test_discover_reports_an_unaddressed_interface_and_runs_no_scan(capsys):
+    calls = []
+    runner = _addr_runner({}, calls)
+
+    result = cameras.discover(interfaces=["enp8s0"], runner=runner)
+
+    assert not any(c[0] == "arp-scan" for c in calls)
+    assert result.tool == "none"
+    assert result.unaddressed == ["enp8s0"]
+    assert result.cameras == [] and result.interfaces == []
+    err = capsys.readouterr().err
+    assert "enp8s0 has a link but no IPv4 address" in err
+    assert "ipv4.method link-local" in err
+
+
+def test_discover_with_an_invalid_cidr_warns_and_runs_no_scan(capsys):
+    calls = []
+    runner = _addr_runner({"eth0": "inet 169.254.1.5/16"}, calls)
+
+    result = cameras.discover(interfaces=["eth0"], cidr="169.254.0.0/33", runner=runner)
+
+    assert result.tool == "none"
+    assert result.cameras == [] and calls == []
+    assert "not a valid CIDR" in capsys.readouterr().err
+
+
+def test_discover_deduplicates_unmatched_hosts_by_mac():
+    calls = []
+    proxy_arp = "".join(
+        f"169.254.0.{n}\taa:bb:cc:dd:ee:ff\tUnknown\n" for n in range(1, 50)
+    )
+    runner = _addr_runner({"eth0": "inet 169.254.1.5/16"}, calls, arp_stdout=proxy_arp)
+
+    result = cameras.discover(interfaces=["eth0"], runner=runner)
+
+    assert result.unmatched == ["aa:bb:cc:dd:ee:ff"]
 
 
 def test_discover_falls_back_to_ip_neigh_when_arp_scan_is_absent():
     def runner(argv, **kwargs):
         if argv[0] == "arp-scan":
             raise FileNotFoundError("arp-scan not found")
+        if argv[:5] == ["ip", "-4", "-o", "addr", "show"]:
+            return _cp(argv, 0, stdout="inet 169.254.1.5/16")
         if argv[0] == "ping":
             return _cp(argv, 0)
         if argv[:3] == ["ip", "-4", "neigh"]:
@@ -218,6 +317,8 @@ def test_discover_ip_neigh_pings_every_prime_ip_first():
         if argv[0] == "ping":
             pinged.append(argv[-1])
             return _cp(argv, 0)
+        if argv[:5] == ["ip", "-4", "-o", "addr", "show"]:
+            return _cp(argv, 0, stdout="inet 169.254.1.5/16")
         return _cp(argv, 0, stdout="")
 
     cameras.discover(prime_ips=["1.2.3.4", "1.2.3.5"], interfaces=["eth0"], runner=runner)
@@ -273,6 +374,84 @@ def test_grab_still_returns_none_when_ffmpeg_fails(tmp_path):
     )
 
     assert result is None
+
+
+def _times_out(argv, **kwargs):
+    raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+
+
+def test_probe_rtsp_is_bounded_and_false_on_timeout():
+    cam = cameras.Camera(id="c1", mac="d0:3b:f4:01:52:79", ip="1.2.3.4", position="")
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen.update(kwargs)
+        return _times_out(argv, **kwargs)
+
+    assert cameras.probe_rtsp(cam, user="a", password="b", runner=runner) is False
+    assert seen["timeout"] > 5
+
+
+def test_grab_still_is_bounded_and_none_on_timeout(tmp_path):
+    cam = cameras.Camera(id="c1", mac="d0:3b:f4:01:52:79", ip="1.2.3.4", position="")
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen["argv"] = argv
+        seen.update(kwargs)
+        return _times_out(argv, **kwargs)
+
+    result = cameras.grab_still(
+        cam, user="a", password="b", dest=tmp_path / "still.jpg", runner=runner
+    )
+
+    assert result is None
+    assert seen["timeout"] > 5
+    # The RTSP socket timeout is an input option, so it must precede -i.
+    argv = seen["argv"]
+    assert argv.index("-timeout") < argv.index("-i")
+
+
+def test_refresh_skips_the_still_for_a_camera_whose_probe_failed(tmp_path):
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "arp-scan":
+            return _cp(argv, 0, stdout=_ARP_SCAN_OUTPUT)
+        if argv[:5] == ["ip", "-4", "-o", "addr", "show"]:
+            return _cp(argv, 0, stdout="inet 169.254.1.5/16")
+        if argv[0] == "ffprobe":
+            return _cp(argv, 1)
+        return _cp(argv, 0)
+
+    result = cameras.refresh(
+        tmp_path / "install",
+        cam_user="admin",
+        cam_password="pw",
+        interfaces=["eth0"],
+        non_interactive=True,
+        runner=runner,
+    )
+
+    assert result.cameras[0].stream_ok is False
+    assert not any(c[0] == "ffmpeg" for c in calls)
+
+
+def test_refresh_records_unaddressed_and_skipped_interfaces_in_scan_json(tmp_path):
+    import json
+
+    def runner(argv, **kwargs):
+        return _cp(argv, 0, stdout="")
+
+    cameras.refresh(
+        tmp_path / "install", interfaces=["enp8s0"], non_interactive=True, runner=runner
+    )
+
+    record = json.loads((tmp_path / "install" / "cameras.scan.json").read_text())
+    assert record["tool"] == "none"
+    assert record["unaddressed"] == ["enp8s0"]
+    assert record["skipped"] == []
 
 
 # ---------------------------------------------------------------------------

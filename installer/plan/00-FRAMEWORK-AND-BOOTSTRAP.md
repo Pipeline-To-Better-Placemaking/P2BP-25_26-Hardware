@@ -1238,27 +1238,53 @@ keeps per-camera web-UI setup manual but puts IP discovery in scope.
 ### 15.2 Discovery mechanism
 
 1. **Candidate interfaces.** `candidate_interfaces()` enumerates
-   `/sys/class/net` and drops `lo`, `docker*`, `veth*`, `br-*`, `virbr*`, and
-   anything without an IPv4 address. `CAMERA_SCAN_IFACE` (§11.2) narrows this
-   to one.
-2. **Primary: `arp-scan`.** `arp-scan --interface <if> --localnet` per
-   candidate, plus an explicit `<cidr>` sweep when the interface's own address
-   is not link-local. This needs raw sockets — the installer is already root
-   (§9.1). `arp-scan` joins the apt list in
+   `/sys/class/net` and drops `lo`, `docker*`, `veth*`, `br-*`, `virbr*`,
+   anything whose `carrier` is not `1` (no link, or administratively down),
+   and anything whose `flags` carry `IFF_NOARP` or `IFF_POINTOPOINT` (tun
+   devices such as `tailscale0` cannot answer ARP). An interface **without an
+   IPv4 address is kept** so step 2 can report it. `CAMERA_SCAN_IFACE`
+   (§11.2) replaces this list with exactly one interface.
+2. **Classify each candidate by address.** `discover()` reads every IPv4
+   address on the interface (`ip -4 -o addr show dev <if>`):
+
+   | Interface state | Action | Recorded in |
+   |---|---|---|
+   | Has an address inside `<cidr>` | Swept, with that address as the ARP sender | `ScanResult.interfaces` |
+   | Has addresses, none inside `<cidr>` | Skipped; swept only when named by `CAMERA_SCAN_IFACE` | `ScanResult.skipped` |
+   | Link up, no IPv4 address | Never swept; warns with the `nmcli ... ipv4.method link-local` fix | `ScanResult.unaddressed` |
+
+   When nothing qualifies, no scan runs, `ScanResult.tool` is `none`, and a
+   warning names `--camera-scan-iface` / `--camera-scan-cidr`.
+   An unparseable `<cidr>` is handled the same way. `--camera-scan-cidr`
+   rejects one at argument parsing, before it can be persisted to
+   `installer.conf`.
+3. **Primary: `arp-scan`.** `arp-scan --interface <if> --arpspa <addr>
+   <cidr>` per swept interface (`--arpspa` is omitted for an explicitly named
+   interface with no in-range address). This needs raw sockets — the
+   installer is already root (§9.1). `arp-scan` joins the apt list in
    [`STEP-1` §3](STEP-1-PREREQUISITES.md#3-ds-91-41-apt-prerequisite-package-list).
    A full `/16` sweep takes roughly two minutes, so the range is
    configurable via `CAMERA_SCAN_CIDR` and step-driven calls wrap it in the
    blocking wait screen (`waitui.py`, §3.1).
-3. **Fallback: the kernel ARP cache.** When `arp-scan` is absent, prime the
+
+   **RESOLVED — never `--localnet`.** An earlier revision swept
+   `--localnet` on every candidate. On a workstation whose PoE port had no
+   address, that port was dropped and `--localnet` ran on the campus Wi-Fi's
+   `/8` instead: 21 minutes, about 508,000 junk replies, zero cameras, and an
+   ARP sweep of a network the installer has no business probing. Sweeping
+   only `<cidr>`, only on interfaces that sit in it, bounds every scan by
+   configuration rather than by whatever network an adapter joined.
+4. **Fallback: the kernel ARP cache.** When `arp-scan` is absent, prime the
    cache by pinging `prime_ips` — the last-known IPs from the previous
    inventory, or the bundled seed (§4.1) on first run — then read `ip -4 neigh
    show`. This **cannot** find a camera that moved to an address nobody has
    seen; `ScanResult.tool` records which mechanism ran so the limitation is
    visible rather than implied.
-4. **Filter by OUI**, case- and separator-insensitively (`d0:3b:f4`,
+5. **Filter by OUI**, case- and separator-insensitively (`d0:3b:f4`,
    `D0-3B-F4`, and `d03b.f401.5279` are the same prefix). Non-matching hosts
-   are retained in `ScanResult.unmatched`, so an operator can tell "the scan
-   found nothing" apart from "the scan did not run".
+   are retained in `ScanResult.unmatched`, de-duplicated by MAC (a proxy-ARP
+   device answers for every address with one MAC), so an operator can tell
+   "the scan found nothing" apart from "the scan did not run".
 
 ### 15.3 RTSP probe
 
@@ -1275,6 +1301,13 @@ during onboarding and stored in `<install_dir>/secrets/camera.env` with mode
 every log line (§4.2). `ffmpeg` joins the same apt list
 ([`STEP-1` §3](STEP-1-PREREQUISITES.md#3-ds-91-41-apt-prerequisite-package-list)).
 
+**REQUIRED — every RTSP child is bounded.** `probe_rtsp()` and
+`grab_still()` both pass `-timeout <timeout_us>` (default 5 s, an input
+option placed before `-i`) and a process timeout of `timeout_us` plus 10 s; a
+camera that accepts the connection and then stalls yields `stream_ok: false`
+or no still rather than a hung scan. Each probe and still grab is logged as
+it starts so a long scan reads as progress.
+
 A failing probe on an activated camera is usually the manual pre-flight in
 §13 not having been done — the camera ships un-activated and refuses RTSP
 until an admin password is set.
@@ -1284,7 +1317,9 @@ until an admin password is set.
 For each newly discovered MAC with no persisted position:
 
 1. `grab_still()` captures a single frame (`ffmpeg -frames:v 1`) to
-   `<install_dir>/cameras/still-<mac>.jpg`.
+   `<install_dir>/cameras/still-<mac>.jpg` — only for a camera found in this
+   scan whose §15.3 probe did not fail, since any other grab can only time
+   out.
 2. `bind_positions()` prints that path and asks the operator which position
    the camera occupies — one of the known positions from the seed inventory
    (`top-left`, `top-right`, `middle-top-left`, and so on) or a newly typed
@@ -1307,7 +1342,7 @@ to label them. An unattended run must never wait for a human.
 | Artifact | Path |
 |---|---|
 | Runtime inventory (MAC-keyed, hand-editable positions) | `<install_dir>/cameras.yml` |
-| Raw scan record — MACs, interfaces, unmatched hosts, timestamps | `<install_dir>/cameras.scan.json`, written with the §6.3 `write_json_atomic` helper |
+| Raw scan record — MACs, swept/`unaddressed`/`skipped` interfaces, unmatched hosts, timestamps | `<install_dir>/cameras.scan.json`, written with the §6.3 `write_json_atomic` helper |
 | Still frames captured for binding | `<install_dir>/cameras/still-<mac>.jpg` |
 | Pointer consumed by steps and bundled bash | `CAMERAS_FILE` in `installer.conf` (§11.2) |
 | Scan tuning | `CAMERA_SCAN_CIDR`, `CAMERA_SCAN_IFACE` in `installer.conf` (§11.2) |
@@ -1344,6 +1379,13 @@ class Camera:
     enabled: bool = True
     stream_ok: bool | None = None          # §15.3 probe result
 
+@dataclass
+class ScanResult:
+    cameras: list[Camera]; unmatched: list[str]; tool: str   # "arp-scan" | "ip-neigh" | "none"
+    interfaces: list[str]                  # swept (§15.2 step 2)
+    unaddressed: list[str] = []            # link up, no IPv4
+    skipped: list[str] = []                # address outside the scan CIDR
+
 def normalize_mac(raw) -> str
 def matches_oui(mac, oui=CAMERA_OUI) -> bool
 def parse_inventory(text) -> list[Camera]
@@ -1351,7 +1393,7 @@ def render_inventory(cameras, *, header) -> str
 def candidate_interfaces(*, runner=subprocess.run) -> list[str]
 def discover(*, oui, cidr, interfaces=None, prime_ips=(), runner=...) -> ScanResult
 def probe_rtsp(camera, *, user, password, timeout_us=5_000_000, runner=...) -> bool
-def grab_still(camera, *, user, password, dest, runner=...) -> Path | None
+def grab_still(camera, *, user, password, dest, timeout_us=5_000_000, runner=...) -> Path | None
 def bind_positions(cameras, *, prompt, non_interactive, runner=...) -> list[Camera]
 def merge(previous, discovered) -> list[Camera]
 def refresh(install_dir, *, seed_header=None, prompt=input, runner=...) -> ScanResult

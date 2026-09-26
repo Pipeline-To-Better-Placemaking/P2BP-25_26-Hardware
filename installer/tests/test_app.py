@@ -198,6 +198,17 @@ def test_parse_args_log_dir():
     assert app.parse_args(["--log-dir", "/tmp/mv3dt-logs"]).log_dir == "/tmp/mv3dt-logs"
 
 
+def test_camera_scan_cidr_accepts_a_valid_range():
+    args = app.parse_args(["--camera-scan-cidr", "192.168.1.0/24"])
+    assert args.camera_scan_cidr == "192.168.1.0/24"
+
+
+@pytest.mark.parametrize("bad", ["169.254.0.0/33", "not-a-cidr", "300.1.1.1/8"])
+def test_camera_scan_cidr_rejects_an_invalid_range_before_it_is_persisted(bad):
+    with pytest.raises(SystemExit):
+        app.parse_args(["--camera-scan-cidr", bad])
+
+
 def test_parse_args_scan_cameras_defaults():
     args = app.parse_args([])
     assert args.scan_cameras is False
