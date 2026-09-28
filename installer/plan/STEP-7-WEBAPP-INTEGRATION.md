@@ -816,5 +816,5 @@ Repo files referenced:
 > `scripts/intrinsics_calibrator.py` and the write-back in
 > `scripts/homography.py`. All are removed from this fork per
 > [`DELETION-REVIEW` §3](DELETION-REVIEW.md#3-deletions-gated-on-the-harvest-the-jetson-tree)
-> and remain in the parent repository. Named as provenance only — deliberately
+> and remain in this repository's git history. Named as provenance only — deliberately
 > not linked, so the links cannot rot.

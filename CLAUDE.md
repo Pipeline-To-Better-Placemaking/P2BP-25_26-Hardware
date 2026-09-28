@@ -23,7 +23,8 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 > docs first. **Read
 > [`installer/plan/DELETION-REVIEW.md`](installer/plan/DELETION-REVIEW.md)
 > before deleting or resurrecting anything** — it records what went, why, and
-> where each pattern landed. The originals remain in the parent repository.
+> where each pattern landed. The originals remain in this repository's git
+> history, before their deletion commit.
 
 ## Working in this repo
 

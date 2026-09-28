@@ -361,7 +361,7 @@ that script did and where each responsibility went.
 ### 5.1 Operator procedure
 
 1. **Open the Releases page** in a browser on the target workstation:
-   <https://github.com/KevinTTO5/P2BP-25_26-Hardware_Test/releases/latest>.
+   <https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases/latest>.
 2. **Download both assets** attached to the release: the executable
    `mv3dt-installer` and its checksum `mv3dt-installer.sha256`.
 3. **Verify, mark executable, run** — from the download directory:
@@ -1471,5 +1471,5 @@ Repo files referenced:
 > `scripts/heartbeat.py`, `scripts/config_io.py`, and `install.sh` at the repo
 > root). Those files are removed from this fork per
 > [`DELETION-REVIEW` §3](DELETION-REVIEW.md#3-deletions-gated-on-the-harvest-the-jetson-tree)
-> and remain available in the parent repository. They are named here as
-> provenance only — deliberately not linked, so the links cannot rot.
+> and remain available in this repository's git history before their deletion
+> commit. They are named here as provenance only — deliberately not linked, so the links cannot rot.

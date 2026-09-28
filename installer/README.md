@@ -92,7 +92,7 @@ proceeding. Until it lands, the table above is yours to honor.
 Releases are published at:
 
 ```
-https://github.com/KevinTTO5/P2BP-25_26-Hardware_Test/releases
+https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases
 ```
 
 > **(planned) — the release job.** The CI workflow that builds the binary on
@@ -109,8 +109,8 @@ verify, then run:
 
 ```bash
 cd ~/Downloads
-curl -fLO https://github.com/KevinTTO5/P2BP-25_26-Hardware_Test/releases/latest/download/mv3dt-installer
-curl -fLO https://github.com/KevinTTO5/P2BP-25_26-Hardware_Test/releases/latest/download/mv3dt-installer.sha256
+curl -fLO https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases/latest/download/mv3dt-installer
+curl -fLO https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases/latest/download/mv3dt-installer.sha256
 sha256sum -c mv3dt-installer.sha256
 chmod +x mv3dt-installer
 sudo ./mv3dt-installer
@@ -397,7 +397,7 @@ release job. The framework behavior summarized above is specified in
 this guide condenses it; on a **(planned)** item the spec states the intent
 while this guide records what the binary does meanwhile.
 
-- <https://github.com/KevinTTO5/P2BP-25_26-Hardware_Test/releases> — the
+- <https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases> — the
   Releases page; **the only supported source** of the `mv3dt-installer`
   binary and its `.sha256` checksum.
 - <https://pyinstaller.org/en/stable/usage.html#options> — backs the

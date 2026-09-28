@@ -1054,6 +1054,6 @@ the logic Step 6 supervises/ports — **not** DeepStream docs):
 > `scripts/systemd_services.py`, `scripts/signals.py`, and `install.sh`). Those
 > files are removed per
 > [`DELETION-REVIEW` §3](DELETION-REVIEW.md#3-deletions-gated-on-the-harvest-the-jetson-tree)
-> and remain in the parent repository. Every convention borrowed from them is
+> and remain in this repository's git history. Every convention borrowed from them is
 > written out in full above; they are named here as provenance only —
 > deliberately not linked, so the links cannot rot.

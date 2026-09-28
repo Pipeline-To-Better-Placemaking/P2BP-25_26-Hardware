@@ -29,9 +29,10 @@ repository; no history rewrite has been performed, so `.git` is still ~892 MB
 > `laptop/deepstream/*.txt` from the survey. Any future triage should enumerate
 > by `git ls-files` without extension filters.
 
-This repo is a **fork** (`KevinTTO5/P2BP-25_26-Hardware_Test`, single `origin`,
-no upstream configured) and the work is moving to the DeepStream workstation.
-Every file removed here survives in the parent repo, so the governing question
+This repo began as a **fork** (`KevinTTO5/P2BP-25_26-Hardware_Test`) whose
+`main` later replaced `Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware`'s,
+and the work moved to the DeepStream workstation. Every file removed here
+survives in this repository's git history, so the governing question
 is not "is deletion safe?" but **"does this file contribute code or a pattern
 the workstation plan needs — above all, for talking to the web app?"**
 
@@ -47,7 +48,7 @@ written against. Hence two tiers — [§2](#2-immediate-deletions-no-harvest-req
 
 **REQUIRED** — every file in the repo is placed in exactly one of four
 categories by the single test below. A file is retained only if it earns
-retention; "might be useful later" is not a category, because the parent repo
+retention; "might be useful later" is not a category, because the git history
 already serves that purpose.
 
 | Category | Test | Outcome |
@@ -321,7 +322,7 @@ Ordered, one commit per group, so any step can be reverted independently:
    ```
 
 **Rollback:** every deletion is recoverable via `git revert` of the relevant
-commit, or from the parent repository. No history rewrite is performed, so no
+commit, or from this repository's history. No history rewrite is performed, so no
 deletion in this document is destructive to the object store.
 
 ---
