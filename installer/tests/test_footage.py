@@ -218,7 +218,10 @@ def test_exact_ffmpeg_argv(tmp_path):
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-y",
         "-rtsp_transport", "tcp", "-timeout", "5000000",
         "-i", f"rtsp://{USER}:{PASSWORD}@169.254.1.10:554/Streaming/Channels/101",
-        "-t", "300", "-map", "0:v:0", "-c:v", "copy", "-an",
+        "-t", "300", "-map", "0:v:0",
+        "-vf", "scale=1920:1080:out_range=tv",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        "-an",
         "-movflags", "+faststart",
         "-f", "mp4", str(project / "c1-top-left.mp4.part"),
     ]

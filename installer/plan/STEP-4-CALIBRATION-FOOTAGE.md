@@ -21,7 +21,8 @@ purpose.
 
 It ports the recording logic of `laptop/scripts/record_cameras_mp4.sh`
 (`ffmpeg -rtsp_transport tcp ... -map 0:v:0 -c:v copy -an -movflags
-+faststart`, one child per camera, all started together).
++faststart`, one child per camera, all started together), with one change:
+clips are re-encoded at 1920x1080 instead of stream-copied (§2).
 [`DELETION-REVIEW` §8](DELETION-REVIEW.md#8-script-disposition-under-the-binary-distribution)
 dropped that script from the binary for having "no plan coverage"; this
 document is that coverage. The script itself stays a developer-only tool and
@@ -60,6 +61,7 @@ has no knowledge of AMC or of step state; Step 4 decides **when** to call it.
 | RTSP socket timeout | `-timeout 5000000` (5 s, before `-i`) | matches [`00` §15.3](00-FRAMEWORK-AND-BOOTSTRAP.md#153-rtsp-probe) |
 | Process timeout | clip length plus `60` seconds | — |
 | Minimum free space | `1 GiB` per camera on the footage root's filesystem | — |
+| Clip resolution | `1920x1080`, H.264, `yuv420p` | AMC input requirement ([AMC README, "Tracklet-Based Calibration: Input Video Requirements"](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/README.md#tracklet-based-calibration-input-video-requirements)) |
 
 The `ffmpeg` argv for each camera is exactly:
 
@@ -67,13 +69,23 @@ The `ffmpeg` argv for each camera is exactly:
 ffmpeg -hide_banner -loglevel error -nostats -y \
   -rtsp_transport tcp -timeout 5000000 \
   -i "rtsp://<user>:<pass>@<ip>:554<rtsp_path>" \
-  -t <seconds> -map 0:v:0 -c:v copy -an -movflags +faststart \
+  -t <seconds> -map 0:v:0 -vf scale=1920:1080:out_range=tv \
+  -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p \
+  -an -movflags +faststart \
   -f mp4 "<project dir>/<clip file name>.part"
 ```
 
-`-c:v copy` records the camera's native 3072x1728 stream without transcoding,
-so recording costs no GPU and negligible CPU. `-f mp4` is required because the
-`.part` suffix hides the container type from `ffmpeg`.
+**RESOLVED — re-encode, don't stream-copy.** AMC 3.2.1 requires 1920x1080
+input and its multi-view config pins `video_resolution: [1920, 1080]`. The
+fleet's native main stream is 3072x1728, which `-c:v copy` passed through
+unchanged. The clip is therefore always scaled and re-encoded, whatever the
+camera sends: a camera already set to 1080p costs only the encode, and a
+camera left at its native resolution still produces a valid clip.
+`out_range=tv` with `-pix_fmt yuv420p` converts the cameras' full-range
+`yuvj420p` to the standard limited range DeepStream and AMC decode;
+`-pix_fmt` alone keeps the full-range tag. `veryfast` keeps each child well
+under real time on CPU, so all children can run at once. `-f mp4` is
+required because the `.part` suffix hides the container type from `ffmpeg`.
 
 The marker is JSON:
 
@@ -353,6 +365,8 @@ from the developer harness.
 - [DS 9.1 AutoMagicCalib](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_AutoMagicCalib.html) — **the six-step browser workflow whose Video Upload step this footage feeds.**
 - [FFmpeg RTSP demuxer options](https://ffmpeg.org/ffmpeg-protocols.html#rtsp) — `-rtsp_transport tcp` and the `-timeout` socket option.
 - [FFmpeg MOV/MP4 muxer](https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv) — `-movflags +faststart`.
+- [AutoMagicCalib 3.2.1 README, "Tracklet-Based Calibration: Input Video Requirements"](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/README.md#tracklet-based-calibration-input-video-requirements) — **the 1920x1080 input resolution the clips are scaled to (§2).**
+- [FFmpeg scale filter](https://ffmpeg.org/ffmpeg-filters.html#scale-1) — `scale=1920:1080:out_range=tv`.
 
 Repo files referenced:
 
