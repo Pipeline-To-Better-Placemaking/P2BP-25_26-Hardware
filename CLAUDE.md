@@ -73,6 +73,13 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
   `parallel-worktree-dev` unit's commit, or a `merge-prs` squash-merge — use
   the `git-commits` skill. Commits carry no `Co-Authored-By` trailer, no
   `Claude-Session` link, no agent-authorship footer of any kind.
+- **Release flow:** `parallel-worktree-dev` builds and reviews PRs,
+  `/merge-prs <ordered list>` merges them, and `/release` then cuts the next
+  patch release from the most recent `v*` tag (bump, commit, tag, wait for
+  `release.yml`, verify, print the workstation update commands). `/release`
+  refuses to run if that tag has no published release yet. Both commands
+  live in `.claude/commands/` and only load when Claude Code is started
+  from the repo root.
 
 ## Documentation
 
