@@ -695,6 +695,23 @@ def test_ensure_installer_binary_frozen_copies_from_sys_executable(tmp_path, mon
     assert dest.read_bytes() == fake_exe.read_bytes()
 
 
+def test_ensure_installer_binary_replaces_a_same_size_stale_copy(tmp_path, monkeypatch):
+    """Two releases can build to the same size; a size-only comparison left
+    the old copy in place behind every wrapper and unit."""
+    fake_exe = tmp_path / "fake-mv3dt-installer"
+    fake_exe.write_bytes(b"release-b")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe))
+    ctx = FakeContext(tmp_path)
+    dest = ctx.install_dir / "bin" / "mv3dt-installer"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"release-a")
+
+    step3.ensure_installer_binary(ctx)
+
+    assert dest.read_bytes() == b"release-b"
+
+
 # ---------------------------------------------------------------------------
 # preflight() -- section 7.1
 # ---------------------------------------------------------------------------

@@ -72,6 +72,19 @@ INFER_PRIMARY_TEMPLATE_NAME = "config_infer_primary.txt"
 MSGCONV_TEMPLATE_NAME = "msgconv_config.txt"
 RENDERED_APP_CONFIG_NAME = "deepstream_app_config.rendered.txt"
 
+# The tracker's ReID model (NVIDIA TAO ReidentificationNet), the option
+# DeepStream 9.1's own sources/tracker_ReID/README recommends. DeepStream 9.1
+# ships no samples/models/Tracker/ directory, so nothing provides it unless
+# the installer does. The rendered tracker config names this file through
+# `tltEncodedModel` relative to `<install_dir>/deepstream`, and DeepStream
+# builds the TensorRT engine beside it on first start.
+REID_MODEL_URL = (
+    "https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/"
+    "versions/deployable_v1.0/files/resnet50_market1501.etlt"
+)
+REID_MODEL_NAME = "resnet50_market1501.etlt"
+REID_RELATIVE_DIR = pathlib.Path("deepstream") / "models" / "reid"
+
 
 class AmcApiError(RuntimeError):
     """A fatal response or invalid result from the local AMC service."""
@@ -558,6 +571,9 @@ _SOURCE_BLOCK_RE = re.compile(r"\[source(\d+)\][^\[]*", re.DOTALL)
 _URI_LINE_RE = re.compile(r"(?m)^uri=.*$")
 
 
+_ENABLE_LINE_RE = re.compile(r"(?m)^enable=.*$")
+
+
 def _rtsp_uri(cam, *, user: str, password: str) -> str:
     return f"rtsp://{user}:{password}@{cam.ip}:554{cam.rtsp_path}"
 
@@ -580,7 +596,10 @@ def render_app_config(
     def replace_source(match: "re.Match[str]") -> str:
         index = int(match.group(1))
         if index >= len(cameras):
-            return match.group(0)
+            # No camera for this slot: disable it rather than leave the
+            # template's placeholder URI enabled, which deepstream-app
+            # retries forever with "Failed to connect".
+            return _ENABLE_LINE_RE.sub("enable=0", match.group(0), count=1)
         uri = _rtsp_uri(cameras[index], user=cam_user, password=cam_password)
         return _URI_LINE_RE.sub(f"uri={uri}", match.group(0), count=1)
 
@@ -631,6 +650,50 @@ def _load_enabled_cameras(ctx: "Context") -> list:
         )
         if camera.enabled
     ]
+
+
+def _reid_model_path(ctx: "Context") -> pathlib.Path:
+    return ctx.install_dir / REID_RELATIVE_DIR / REID_MODEL_NAME
+
+
+def _ensure_reid_model(ctx: "Context") -> Optional[str]:
+    """Download the tracker's ReID model once. Returns an error string, or
+    `None` when the model is present (already, or freshly downloaded)."""
+    target = _reid_model_path(ctx)
+    if target.is_file() and target.stat().st_size > 0:
+        ctx.report_already_installed("reid-model", REID_MODEL_NAME)
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f".{REID_MODEL_NAME}.tmp")
+    try:
+        result = ctx.run_root(
+            "curl",
+            "-fsSL",
+            "--retry",
+            "3",
+            "-o",
+            str(staged),
+            REID_MODEL_URL,
+            check=False,
+            capture_output=True,
+            text=True,
+            stream=False,
+        )
+        if result.returncode != 0 or not staged.is_file():
+            return (
+                f"ReID model download failed (exit {result.returncode}): "
+                f"{(result.stderr or '').strip()[-500:]}"
+            )
+        if staged.stat().st_size == 0:
+            return "ReID model download produced an empty file"
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+    # The pipeline may run as the invoking user (STEP-6), and DeepStream
+    # writes the engine next to the model on first start.
+    _chown_tree(ctx, target.parent)
+    ctx.report_installed("reid-model", REID_MODEL_NAME)
+    return None
 
 
 def _render_configs(
@@ -998,6 +1061,9 @@ def _wire_download(
     reporter("calibration-export", label)
     config_mod.persist_value(ctx.install_dir, CONF_CALIBRATION_DIR_KEY, str(dest))
     ctx.conf[CONF_CALIBRATION_DIR_KEY] = str(dest)
+    reid_failure = _ensure_reid_model(ctx)
+    if reid_failure is not None:
+        return StepResult(status=StepStatus.FAILED, message=reid_failure)
     _render_configs(ctx, inputs=inputs, calibration_dir=dest)
     _delete_footage_after_ingest(ctx, inputs)
     return StepResult(status=StepStatus.COMPLETE)
@@ -1168,6 +1234,11 @@ class Step4CalibOutputWiring:
                 return StepResult(
                     status=StepStatus.FAILED, message=f"missing {deepstream_dir / name}"
                 )
+        reid_model = _reid_model_path(ctx)
+        if not reid_model.is_file() or reid_model.stat().st_size == 0:
+            return StepResult(
+                status=StepStatus.FAILED, message=f"missing ReID model {reid_model}"
+            )
         slug = _slugify(inputs.project_name, location_id=inputs.location_id)
         timer = f"mv3dt-ingest-{slug}.timer"
         service = f"mv3dt-ingest-{slug}.service"

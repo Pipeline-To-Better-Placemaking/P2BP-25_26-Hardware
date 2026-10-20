@@ -41,8 +41,8 @@ labelfile-path=models/peoplenet/labels.txt
 # Engine created on first run (FP16).
 model-engine-file=models/peoplenet/resnet34_peoplenet.onnx_b8_gpu0_fp16.engine
 
-input-dims=3;544;960;0
-output-blob-names=output_cov/Sigmoid;output_bbox/BiasAdd
+infer-dims=3;544;960
+output-blob-names=output_cov/Sigmoid:0;output_bbox/BiasAdd:0
 
 batch-size=8
 

@@ -104,7 +104,7 @@ these files are the reference implementation the specs are written against.
 | `scripts/json_models/` | 6 DTO modules; the `cloud_storage` and `heartbeat_payload` field sets are inlined into `STEP-7` §C/§D before removal |
 | `scripts/camera_controllers/` | `annke_controller.py` — see [§4](#4-explicit-calls-resolved--both-deleted) |
 | `services/` | 11 systemd units + the logrotate drop-in; `tracker.path` / `tracker-toggle.service` are inlined into [`STEP-6` §B.1](STEP-6-REMOTE-SUPERVISION.md#b1-the-agent-systemd-unit) first |
-| `models/` | 22 MB OSNet ReID weights + encoder — DeepStream supplies its own ReID engine via `config_tracker_NvMOT.yml` |
+| `models/` | 22 MB OSNet ReID weights + encoder — not needed: the tracker uses NVIDIA's TAO ReidentificationNet instead. Note the original basis here, "DeepStream supplies its own ReID engine", was wrong for DS 9.1, which ships no tracker models; Step 4 downloads the model ([`STEP-4` §6.3](STEP-4-CALIB-OUTPUT-WIRING.md#63-reid-model)) |
 | `install.sh` | Jetson installer; its credential-capture (`42-109`) and unit-enable (`147-207`) logic is ported to `00` §14 / [`STEP-6` §A.4](STEP-6-REMOTE-SUPERVISION.md#a4-installer-integration-mirror-installsh) |
 | `requirements.txt` | `ultralytics` / `torch` / `playwright` — Jetson tracker dependencies with no workstation role |
 | `config/`, `homographies/` | Runtime state and dead sample data ([§2](#2-immediate-deletions-no-harvest-required)) |
