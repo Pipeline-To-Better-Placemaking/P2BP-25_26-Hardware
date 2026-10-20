@@ -1,6 +1,6 @@
 # Step 3 — AutoMagicCalib launcher (owner: DevC)
 
-Status: Step specification; depends on [`00` §8](00-FRAMEWORK-AND-BOOTSTRAP.md#8-logging--reporting-contract) and [`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-privilege-and-user-action-contract), and does **not** restate those shared logging or privilege contracts.
+Status: Step specification; depends on [`00` §8](00-FRAMEWORK-AND-BOOTSTRAP.md#8-verbose-logging--reporting-contract) and [`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-user-action-display--privilegesudo-contract), and does **not** restate those shared logging or privilege contracts.
 
 This step installs and launches NVIDIA AutoMagicCalib (AMC) from the
 **standalone, equality-pinned AMC 3.2.1 checkout**. It replaces

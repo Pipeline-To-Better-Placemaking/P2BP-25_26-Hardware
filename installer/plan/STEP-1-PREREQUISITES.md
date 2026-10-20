@@ -452,7 +452,7 @@ Two corrections, both REQUIRED:
   the one that is actually active is stopped (`systemctl is-active` first).
 - **No display manager running is success, not failure.** There is nothing
   to stop, which is precisely the state after the operator has done what
-  [§5.1a](#51a-documented-drift---silent-and-the-session-guard-resolved)
+  [§5.1a](#51a-desktop-safe-systemd-handoff-resolved)
   asked of them. Failure is reserved for an active display manager that
   refuses to stop.
 

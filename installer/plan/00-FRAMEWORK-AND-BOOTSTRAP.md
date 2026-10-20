@@ -1,7 +1,7 @@
 # 00 — Installer Framework and Bootstrap (owner: DevA)
 
-Status: shared foundation. The five step docs
-(`STEP-1-PREREQUISITES.md` … `STEP-5-PER-PROJECT-EXES.md`) depend on the
+Status: shared foundation. The seven step docs
+(`STEP-1-PREREQUISITES.md` … `STEP-7-WEBAPP-INTEGRATION.md`) depend on the
 contracts defined here. Do not restate these contracts in step docs — link
 back to this document. See
 [`AI-AGENT-SKILLS-ASSESSMENT.md`](AI-AGENT-SKILLS-ASSESSMENT.md) for a
@@ -33,11 +33,14 @@ Goals:
   requires, and resume at the exact step on the next launch.
 - Verbose, auditable: every dependency touch is reported with name + exact
   version, in a fixed human-readable format, and written to a transcript log.
-- Five independently-buildable steps behind a stable module contract.
+- Seven independently-buildable steps behind a stable module contract:
+  Steps 1–5 install the stack and per-project pipelines; Steps 6 and 7 are
+  opt-in ([§3.4](#34-opt-in-step-gates)) and add systemd supervision with
+  MQTT remote control ([`STEP-6`](STEP-6-REMOTE-SUPERVISION.md)) and the
+  HTTP web-app data plane ([`STEP-7`](STEP-7-WEBAPP-INTEGRATION.md)).
 
 Non-goals (see [§13](#13-out-of-scope--defer-to-human)): hardware/BIOS setup,
-per-camera network configuration, production hardening, systemd
-supervision, and anything the DS 9.1 docs mark as manual.
+per-camera web-UI configuration, and anything the DS 9.1 docs mark as manual.
 
 ---
 
@@ -67,20 +70,24 @@ existing harness is untouched during the port):
 installer/
 ├── plan/                           # these spec docs (this file is 00-*)
 ├── installer.spec                  # PyInstaller build recipe
-├── pyproject.toml                  # deps + console-script entrypoint
+├── pyproject.toml                  # deps; deliberately no console script
 └── mv3dt_installer/                # the Python package
     ├── __main__.py                 # `python -m mv3dt_installer` entrypoint
     ├── app.py                      # top-level TUI orchestrator / dispatch loop
     ├── state.py                    # StateMachine + state.json (§6)
     ├── logs.py                     # shared logger + transcript (§8)
     ├── report.py                   # verify_pinned / report_* helpers (§8.3)
+    ├── progress.py                 # renderer + apt/download adapters (doc 08)
+    ├── progress_exec.py            # adapter/process orchestration (doc 08)
     ├── reboot.py                   # boot-id reboot detection (§7)
     ├── privilege.py                # root + $SUDO_USER resolution (§9)
     ├── preflight.py                # OS/arch + invoking-user gates (§3.2)
     ├── onboarding.py               # first-run credential capture (§10, §14)
     ├── ngc.py                      # NGC key capture + secure store (§10)
     ├── webapp.py                   # web-app credential store (§14)
+    ├── camera_credentials.py       # RTSP credential store (secrets/camera.env)
     ├── cameras.py                  # MAC-OUI camera discovery (§15)
+    ├── footage.py                  # calibration footage recorder (STEP-4-CALIBRATION-FOOTAGE)
     ├── waitui.py                   # blocking wait/poll screen (§3.2)
     ├── systemd.py                  # unit render + idempotent install
     ├── config.py                   # install-location config (§11)
@@ -91,7 +98,9 @@ installer/
     │   ├── step2_deepstream_sdk.py       # DevB
     │   ├── step3_amc_launcher.py         # DevC
     │   ├── step4_calib_output_wiring.py  # DevD
-    │   └── step5_per_project_exes.py     # DevD
+    │   ├── step5_per_project_exes.py     # DevD
+    │   ├── step6_remote_supervision.py   # DevD, opt-in
+    │   └── step7_webapp_integration.py   # DevD, opt-in
     └── assets/                     # bundled bash/config, staged at runtime
         ├── scripts/                # installer-side bash (idempotent)
         │   ├── lib/
@@ -99,11 +108,17 @@ installer/
         │   ├── 10_setup_mosquitto.sh
         │   └── 60_record_tracking.sh
         ├── systemd/                # @PLACEHOLDER@ unit templates
-        │   ├── mv3dt-ingest.path.in
-        │   └── mv3dt-ingest.service.in
+        │   ├── mv3dt-driver-handoff.service.in + .sh  # Step 1
+        │   ├── mv3dt-pipeline@.service.in             # Step 6
+        │   ├── mv3dt-agent.service.in                 # Step 6
+        │   ├── mv3dt-reporter.service.in              # Step 7
+        │   ├── mv3dt-uploader.service.in              # Step 7
+        │   └── mv3dt-ingest.path.in, .service.in      # unused: Step 4 renders its timer pair inline
+        ├── polkit/
+        │   └── 49-mv3dt-agent.rules.in  # Step 6 scoped systemctl rule
         ├── cameras/
         │   └── cameras.yml         # seed inventory + fleet header (§15)
-        ├── deepstream/             # config templates (tracker/infer/app)
+        ├── deepstream/             # empty in git; templates added from laptop/deepstream/ at build (§4.1)
         └── mosquitto/              # mv3dt.conf drop-in
 ```
 
@@ -286,25 +301,30 @@ renders (§3.3). No workflow ever writes a tracked file.
 - `Analysis(['installer/mv3dt_installer/__main__.py'], ...)`.
 - `datas` bundles the runtime assets so they ship inside the binary:
   - `installer/mv3dt_installer/assets/**` → `assets/` (the whole tree, §3.1)
+    — this tree already holds tracked copies of the Mosquitto config
+    (`assets/mosquitto/mv3dt.conf`, identical to
+    [`laptop/mosquitto/mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf)) and
+    the seed camera inventory §15 reads (`assets/cameras/cameras.yml`, a
+    copy of [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml)
+    differing only in its credentials comment). Neither is pulled from
+    `laptop/` at build time, so a change to the `laptop/` original must be
+    copied here by hand.
   - the DeepStream config templates from
-    [`laptop/deepstream/`](../../laptop/deepstream/) (tracker/infer/app/msgconv)
-  - [`laptop/mosquitto/mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf)
-  - [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) →
-    `assets/cameras/cameras.yml`, the seed inventory §15 reads
+    [`laptop/deepstream/`](../../laptop/deepstream/) (tracker/infer/app/msgconv),
+    the only data the spec still reads from `laptop/` at build time
 - `--onefile` → one executable at `dist/mv3dt-installer`. The build step
   passes `--distpath dist` with no `working-directory` override, so the
   output directory is `dist` at the **repo root**, not under `installer/`.
-  (`installer.spec`'s own build-header comment still says `installer/dist`;
-  that comment is stale against the actual workflow and is not fixed here —
-  it lives in a different plan unit's file.) The repo-root `dist/` is not
-  covered by any `.gitignore` rule today: `installer/.gitignore`'s `dist/`
-  line is scoped to the `installer/` subtree and only ignores
-  `installer/dist/`. A developer running the build command locally from the
-  repo root gets the same `dist/mv3dt-installer` the workflow does.
-- No hidden GUI toolkits and no third-party parsers on the hot path: the
-  camera inventory reader in `cameras.py` is hand-rolled rather than pulling
-  in PyYAML, so the frozen binary gains no hidden-import surface. Keep the dep
-  list minimal so the binary is small and boots fast on a bare TTY.
+  The repo-root `dist/` is not covered by any `.gitignore` rule today:
+  `installer/.gitignore`'s `dist/` line is scoped to the `installer/` subtree
+  and only ignores `installer/dist/`. A developer running the build command
+  locally from the repo root gets the same `dist/mv3dt-installer` the
+  workflow does.
+- No hidden GUI toolkits. The camera inventory reader in `cameras.py` is
+  hand-rolled rather than pulling in PyYAML; Step 4's tracker-config wiring
+  does import PyYAML (`pyyaml` is a declared dependency), as Step 6 imports
+  `paho-mqtt`. Keep the dep list minimal so the binary is small and boots
+  fast on a bare TTY.
 
 ### 4.2 Locating and staging bundled assets at runtime
 
@@ -354,7 +374,8 @@ def asset_path(*parts: str) -> pathlib.Path:
 ## 5. Distribution: the GitHub Release binary
 
 One artifact, downloaded from this repo's **Releases** page onto a bare
-Ubuntu 24.04 workstation that has `git` and nothing else. This section
+Ubuntu 24.04 workstation; nothing beyond a browser or `curl` is needed to
+fetch it. This section
 supersedes the deleted `installer/bootstrap/bootstrap.sh`; §5.3 records what
 that script did and where each responsibility went.
 
@@ -389,9 +410,9 @@ and inside the transcript (§3.2 gives the exact ordering):
 
 1. **Platform preflight** — Ubuntu 24.04 + `x86_64`, running as root via
    `sudo`, and `$SUDO_USER` resolving to a real non-root login (§9.2).
-   `MV3DT_SKIP_PLATFORM_CHECK=1` is the **planned** developer escape hatch
-   that downgrades the platform half to a warning; it arrives with
-   `preflight.py` and exists nowhere in the tree today. The `$SUDO_USER`
+   `MV3DT_SKIP_PLATFORM_CHECK=1` is the developer escape hatch that
+   downgrades the platform half to a warning (`preflight.py`); it is
+   deliberately left out of the operator guide. The `$SUDO_USER`
    gate gets no escape hatch at all, because without it every secret and
    every per-user artifact lands in `/root`.
 2. **Install location** — prompts with `/opt/mv3dt` prefilled (§11.1) and
@@ -1362,8 +1383,9 @@ activation / OSD pre-flight, all of which
 than commentary.
 
 [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) itself **stays
-exactly where it is**, unmoved and undeleted; it is additionally bundled into
-the binary as `assets/cameras/cameras.yml` (§4.1) and used for exactly two
+exactly where it is**, unmoved and undeleted; a tracked copy at
+`installer/mv3dt_installer/assets/cameras/cameras.yml` is what the binary
+bundles (§4.1), and that copy is used for exactly two
 things: that header block, and its eight pinned IPs as `prime_ips` for the
 §15.2 fallback.
 

@@ -3,7 +3,7 @@
 Status: step spec. This document depends on the shared framework in
 [`00` §12](00-FRAMEWORK-AND-BOOTSTRAP.md#12-step-module-interface-the-contract-for-steps-15)
 and the AMC launcher contract in
-[`STEP-3` §6](STEP-3-AMC-LAUNCHER.md#6-project-identity-and-step-4-contract).
+[`STEP-3` §6.2](STEP-3-AMC-LAUNCHER.md#62-amc-project-contract).
 It does **not** restate their state, privilege, or project-creation contracts.
 
 Step 4 consumes the **persisted AMC 3.2.1 project identity**, waits for that
@@ -21,7 +21,7 @@ Module:
 `step4_calib_output_wiring` with `order = 4`.
 
 **LOCKED:** Step 4 uses the AMC API contract produced by
-[`STEP-3` §6](STEP-3-AMC-LAUNCHER.md#6-project-identity-and-step-4-contract).
+[`STEP-3` §6.2](STEP-3-AMC-LAUNCHER.md#62-amc-project-contract).
 It never guesses a project by name and never watches the obsolete
 `$AMC_ROOT/projects/$PROJECT_NAME/exports/` path.
 
@@ -45,7 +45,7 @@ In scope:
 Out of scope:
 
 - Creating or selecting an AMC project — owned by
-  [`STEP-3` §6](STEP-3-AMC-LAUNCHER.md#6-project-identity-and-step-4-contract).
+  [`STEP-3` §6.2](STEP-3-AMC-LAUNCHER.md#62-amc-project-contract).
 - Driving the browser calibration workflow.
 - Launching the DeepStream pipeline — owned by Step 5.
 - Parsing calibration matrices or judging calibration quality.
@@ -134,7 +134,7 @@ into another hour-long wait.
 ### 3.3 Wait outcomes
 
 The shared wait helper from
-[`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-privilege-boundary-root-versus-invoking-user)
+[`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-user-action-display--privilegesudo-contract)
 owns timing and cancellation.
 
 | Outcome | Cause | Step result |
@@ -217,7 +217,7 @@ prompting. Once chosen, the absolute destination is persisted as
 `CALIBRATION_DIR`; every later ingest reuses it.
 
 Files are owned by the invoking user in accordance with
-[`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-privilege-boundary-root-versus-invoking-user).
+[`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-user-action-display--privilegesudo-contract).
 
 ---
 

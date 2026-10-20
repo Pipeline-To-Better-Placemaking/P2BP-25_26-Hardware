@@ -8,14 +8,22 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 3D tracking system (MV3DT). It is now a **single subsystem**: the DeepStream
 9.1 workstation.
 
-1. **DeepStream 9.1 harness** (`laptop/`) — the working scripted workflow for
-   multi-view calibration (AutoMagicCalib) and MV3DT inference. Start at
+1. **`installer/`** — the `mv3dt-installer` binary, the operator path. All
+   seven steps are implemented and released; the specs live in
+   `installer/plan/`. Steps 1–5 cover install and per-project pipelines;
+   `STEP-6` adds systemd supervision + MQTT remote control; `STEP-7` adds the
+   HTTP web-app data plane. Start at
+   [`installer/README.md`](installer/README.md).
+2. **DeepStream 9.1 harness** (`laptop/`) — the developer-only scripted
+   workflow the binary supersedes. See
    [`laptop/README.md`](laptop/README.md) and
    [`laptop/docs/SCRIPTED-WORKFLOW.md`](laptop/docs/SCRIPTED-WORKFLOW.md).
-2. **`installer/plan/`** — specs for the unified `mv3dt-installer` binary that
-   supersedes the numbered `laptop/scripts/`. Steps 1–5 cover install and
-   per-project pipelines; `STEP-6` adds systemd supervision + MQTT remote
-   control; `STEP-7` adds the HTTP web-app data plane.
+
+> **Shipped is not validated.** What has actually run on the workstation —
+> and what has not, such as a completed calibration — is the dated table in
+> [`installer/plan/DEVELOPMENT-STATUS.md`](installer/plan/DEVELOPMENT-STATUS.md).
+> Treat any workstation fact (camera IPs, ports, project names) older than
+> its "last verified" date as unverified, and check it on the machine first.
 
 > **The Jetson camera-node stack has been removed** (`scripts/`, `services/`,
 > `models/`, `install.sh`, `requirements.txt`, `config/`, `homographies/`,
@@ -28,12 +36,15 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 
 ## Working in this repo
 
-- **The plan docs are the authoritative spec for the web-app connection.**
+- **The plan docs are the authoritative spec for the desktop side of the
+  web-app connection.**
   [`STEP-7`](installer/plan/STEP-7-WEBAPP-INTEGRATION.md) (signed-URL upload,
   registration/status, web-app-initiated operations) and
   [`00` §14](installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md) (credentials,
   endpoint normalization, redaction) were ported from the deleted Jetson tree
-  and are written to be implementable without it. Don't reinvent that contract.
+  and are written to be implementable without it. Don't reinvent that
+  contract. **Route names, auth, and wire shapes are owned by the web app
+  repo** (`P2BP-25_26-Web`); STEP-7 §G mirrors it and records the gaps.
 - **The operator artifact is the GitHub Release binary.** A workstation
   downloads a prebuilt `mv3dt-installer` from the repo's Releases page,
   verifies the checksum, and runs it. **Nothing clones this repo onto a
@@ -62,9 +73,12 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
   is reserved for future work — don't add YOLO wiring without being asked.
 - [`laptop/config/cameras.yml`](laptop/config/cameras.yml) is the camera
   inventory **and** the record of the fleet's hardware facts (MACs, native
-  3072x1728 sensor resolution, vendor/firmware, required manual pre-flight).
-  Its header is load-bearing documentation, not commentary. Note its caveat:
-  the pinned `169.254.*` link-local IPs are volatile.
+  3072x1728 sensor resolution, the configured 1920x1080 main stream,
+  vendor/firmware, required manual pre-flight). Its header is load-bearing
+  documentation, not commentary. Note its caveat: the pinned `169.254.*`
+  link-local IPs are volatile. The binary bundles a tracked copy at
+  `installer/mv3dt_installer/assets/cameras/cameras.yml`; keep the header of
+  both copies in sync by hand.
 - `laptop/config/` is explicitly allowlisted in `.gitignore`; `laptop.env`
   (operator secrets) is not committed — only `laptop.env.example` is.
 - Line endings are enforced LF via `.gitattributes`; images/weights/binaries
