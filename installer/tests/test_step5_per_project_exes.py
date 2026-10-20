@@ -825,13 +825,13 @@ def test_supervision_active_false_when_gate_on_but_unit_not_enabled(tmp_path):
 
 
 def test_supervision_active_true_when_gate_on_and_unit_enabled(tmp_path):
-    runner = ScriptedRunner(default_returncode=0)  # is-enabled succeeds
+    runner = ScriptedRunner(default_returncode=0, default_stdout="enabled\n")  # is-enabled succeeds
     ctx = FakeContext(tmp_path, conf={config_mod.GATE_REMOTE_SUPERVISION: "remote"}, runner_root=runner)
     assert step5._supervision_active(ctx, "north-lobby-2") is True
 
 
 def test_pipeline_start_dispatches_to_systemctl_when_supervised(tmp_path, monkeypatch):
-    runner = ScriptedRunner(default_returncode=0)  # is-enabled AND systemctl start both succeed
+    runner = ScriptedRunner(default_returncode=0, default_stdout="enabled\n")  # is-enabled AND systemctl start both succeed
     ctx = FakeContext(tmp_path, conf={config_mod.GATE_REMOTE_SUPERVISION: "local"}, runner_root=runner)
     _make_entry(ctx.install_dir)
 
@@ -897,7 +897,7 @@ def test_pipeline_start_foreground_flag_forces_unsupervised_even_when_active(tmp
 
 
 def test_pipeline_stop_dispatches_to_systemctl_when_supervised(tmp_path):
-    runner = ScriptedRunner(default_returncode=0)
+    runner = ScriptedRunner(default_returncode=0, default_stdout="enabled\n")
     ctx = FakeContext(tmp_path, conf={config_mod.GATE_REMOTE_SUPERVISION: "local"}, runner_root=runner)
     _make_entry(ctx.install_dir)
 
@@ -908,7 +908,7 @@ def test_pipeline_stop_dispatches_to_systemctl_when_supervised(tmp_path):
 
 
 def test_pipeline_stop_all_supervised_still_tears_down_amc_and_mosquitto(tmp_path, monkeypatch):
-    runner = ScriptedRunner(default_returncode=0)
+    runner = ScriptedRunner(default_returncode=0, default_stdout="enabled\n")
     ctx = FakeContext(tmp_path, conf={config_mod.GATE_REMOTE_SUPERVISION: "local"}, runner_root=runner)
     _make_entry(ctx.install_dir)
 

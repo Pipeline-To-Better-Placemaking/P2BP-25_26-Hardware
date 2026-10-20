@@ -46,15 +46,16 @@ def _no_real_unit_dir(monkeypatch, tmp_path):
 class RecordingRunner:
     """Stand-in for `subprocess.run` that records argv instead of forking."""
 
-    def __init__(self, returncode: int = 0):
+    def __init__(self, returncode: int = 0, stdout: str = ""):
         self.calls: list[list[str]] = []
         self.kwargs: list[dict] = []
         self.returncode = returncode
+        self.stdout = stdout
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
         self.kwargs.append(kwargs)
-        return subprocess.CompletedProcess(list(argv), self.returncode)
+        return subprocess.CompletedProcess(list(argv), self.returncode, self.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -432,17 +433,35 @@ def test_is_active_false_on_nonzero_exit():
     assert systemd.is_active("mv3dt-ingest-demo.path", runner=runner) is False
 
 
-def test_is_enabled_argv_and_true_on_zero_exit():
-    runner = RecordingRunner(returncode=0)
-    assert systemd.is_enabled("mv3dt-ingest-demo.path", runner=runner) is True
-    assert runner.calls == [
-        ["systemctl", "is-enabled", "--quiet", "mv3dt-ingest-demo.path"]
-    ]
+def test_is_enabled_argv_and_true_when_enabled():
+    runner = RecordingRunner(returncode=0, stdout="enabled\n")
+    assert systemd.is_enabled("mv3dt-ingest-demo.timer", runner=runner) is True
+    assert runner.calls == [["systemctl", "is-enabled", "mv3dt-ingest-demo.timer"]]
+    assert runner.kwargs[0]["capture_output"] is True
+    assert runner.kwargs[0]["text"] is True
+
+
+def test_is_enabled_true_when_enabled_runtime():
+    runner = RecordingRunner(returncode=0, stdout="enabled-runtime\n")
+    assert systemd.is_enabled("x.service", runner=runner) is True
+
+
+@pytest.mark.parametrize("state", ["static", "indirect", "alias", "generated"])
+def test_is_enabled_false_for_zero_exit_states_that_are_not_enabled(state):
+    """systemctl exits 0 for these too; the v0.4.10 Step 4 verify failure was
+    a `static` oneshot service read as enabled."""
+    runner = RecordingRunner(returncode=0, stdout=f"{state}\n")
+    assert systemd.is_enabled("x.service", runner=runner) is False
 
 
 def test_is_enabled_false_on_nonzero_exit():
-    runner = RecordingRunner(returncode=1)
+    runner = RecordingRunner(returncode=1, stdout="disabled\n")
     assert systemd.is_enabled("mv3dt-ingest-demo.path", runner=runner) is False
+
+
+def test_is_enabled_false_on_zero_exit_with_no_output():
+    runner = RecordingRunner(returncode=0)
+    assert systemd.is_enabled("x.service", runner=runner) is False
 
 
 def test_status_helpers_treat_an_unusable_runner_result_as_failure():
