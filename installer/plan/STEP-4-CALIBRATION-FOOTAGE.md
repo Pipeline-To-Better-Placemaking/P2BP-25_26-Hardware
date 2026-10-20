@@ -76,11 +76,14 @@ ffmpeg -hide_banner -loglevel error -nostats -y \
 ```
 
 **RESOLVED — re-encode, don't stream-copy.** AMC 3.2.1 requires 1920x1080
-input and its multi-view config pins `video_resolution: [1920, 1080]`. The
-fleet's native main stream is 3072x1728, which `-c:v copy` passed through
-unchanged. The clip is therefore always scaled and re-encoded, whatever the
-camera sends: a camera already set to 1080p costs only the encode, and a
-camera left at its native resolution still produces a valid clip.
+input and its multi-view config pins `video_resolution: [1920, 1080]`. When
+this was decided the fleet's main streams were left at the sensor's native
+3072x1728, which `-c:v copy` passed through unchanged. As of 2026-10-20 the
+connected cameras' main streams are set to 1920x1080 at 22 fps
+([`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-10-20)),
+but the clip is still always scaled and re-encoded, whatever the camera
+sends: a camera already set to 1080p costs only the encode, and a camera left
+at its native resolution, or reset to it, still produces a valid clip.
 `out_range=tv` with `-pix_fmt yuv420p` converts the cameras' full-range
 `yuvj420p` to the standard limited range DeepStream and AMC decode;
 `-pix_fmt` alone keeps the full-range tag. `veryfast` keeps each child well

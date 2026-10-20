@@ -8,29 +8,24 @@ framework contracts — those live in
 
 `mv3dt-installer` is a **single self-contained binary** that takes a bare
 Ubuntu 24.04 workstation to a working DeepStream 9.1 / AutoMagicCalib MV3DT
-setup. **(planned)** It is meant to be built once in CI and published as a
-GitHub Release asset, so the target machine downloads one file and runs it —
-never building anything and never needing a checkout of this repository. See
-[§1](#1-what-this-binary-is) for how that compares to today's actual build
-model.
+setup. It is built once in CI and published as a GitHub Release asset, so the
+target machine downloads one file and runs it — never building anything and
+never needing a checkout of this repository.
 
 This guide covers the operator path: where to get the binary, how to verify
-and run it, every flag it accepts, what the first run asks for, and where it
-keeps state and logs. Developers building or testing the installer from a
-clone want [§8](#8-developer-workflow).
+and run it, every flag and subcommand it accepts, what the first run asks
+for, and where it keeps state and logs. Developers building or testing the
+installer from a clone want [§8](#8-developer-workflow).
 
-> **REQUIRED reading — planned versus shipped.** The installer is being built
-> in stages, so this guide describes a system that is partly in flight.
-> Anything marked **(planned)** is specified in [`plan/`](plan/) and being
-> built, but is **not** in a binary you can run today; everything unmarked is
-> current behavior. The largest planned piece is the step modules themselves:
-> today's binary parses flags, resolves its install location, manages state,
-> and dispatches an empty step registry, so it installs no DeepStream yet.
-> [§4](#4-command-line-flags)'s table carries the same distinction in a
-> `Status` column. Where a citation into
-> [`00`](plan/00-FRAMEWORK-AND-BOOTSTRAP.md) backs a **(planned)**
-> statement, that section of the spec is itself being rewritten by the same
-> work and may still read the other way today.
+> **REQUIRED reading — what ships today.** Every behavior in this guide is
+> in the current release: the framework, all seven steps
+> ([`STEP-1`](plan/STEP-1-PREREQUISITES.md) through
+> [`STEP-7`](plan/STEP-7-WEBAPP-INTEGRATION.md)), and the release job. What
+> is still open — and what has and has not been proven on real hardware —
+> is tracked in
+> [`DEVELOPMENT-STATUS` §5](plan/DEVELOPMENT-STATUS.md#5-what-remains), not
+> here. A feature that has shipped is not the same as one that has been
+> validated on the workstation.
 
 ---
 
@@ -48,19 +43,12 @@ every run picks up where the last one stopped, re-runs nothing that already
 completed, and survives the reboots the driver/CUDA install requires. Running
 it a second time is always safe.
 
-> **(planned) LOCKED — you do not clone this repo on the workstation.** The
-> Release binary is meant to be the unit of delivery, built once in CI, with
-> no `git clone`, no `pip install`, and no local build on the target
-> machine; the binary carries its own assets and unpacks them at runtime.
-> This is the target design, not what
-> [`00` §4](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#4-pyinstaller-packaging)
-> describes today: on `main`, §4.1 still has the binary built **during**
-> bootstrap, on the target machine, from a cloned copy of this repo, and
-> §4.2 says that clone is deliberately left in place afterward for
-> logs/debugging.
-> [`PR #31`](https://github.com/KevinTTO5/P2BP-25_26-Hardware_Test/pull/31)
-> is rewriting doc 00 to match the CI-build model this callout describes;
-> until it merges, treat this callout as forward-looking, not settled fact.
+> **LOCKED — you do not clone this repo on the workstation.** The Release
+> binary is the unit of delivery, built once in CI
+> ([`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)),
+> with no `git clone`, no `pip install`, and no local build on the target
+> machine; the binary carries its own assets and unpacks them at runtime
+> ([`00` §4.2](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#42-locating-and-staging-bundled-assets-at-runtime)).
 
 ---
 
@@ -68,7 +56,7 @@ it a second time is always safe.
 
 | Requirement | Value | Why |
 |---|---|---|
-| OS | Ubuntu 24.04 LTS | **(planned)** The published binary is meant to be built once in CI against this release's glibc; on `main` today, [`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary) still describes the binary being built on the target machine itself during bootstrap, so pin to Ubuntu 24.04 either way |
+| OS | Ubuntu 24.04 LTS | The release binary is built on a pinned `ubuntu-24.04` runner and links against that release's glibc ([`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)) |
 | Architecture | `x86_64` | The only architecture the release build targets |
 | Privilege | `sudo` from a real login user, not a bare root shell | Package installs and writes to `/etc/profile.d` and `/var/lib` ([`00` §9.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#91-privilege-handling)) |
 | GPU | NVIDIA, Ampere or newer | DeepStream 9.1 pins ([`laptop/docs/DEEPSTREAM-SETUP.md`](../laptop/docs/DEEPSTREAM-SETUP.md)) |
@@ -81,9 +69,10 @@ that user's home, as that user
 From a bare root shell where `SUDO_USER` is unset, the resolver falls back to
 the current user, and those files land in `/root` instead.
 
-**(planned)** A startup preflight that refuses an unsupported Ubuntu release,
-a non-`x86_64` machine, or exactly that unset-`SUDO_USER` case, rather than
-proceeding. Until it lands, the table above is yours to honor.
+A startup preflight enforces this: it refuses an Ubuntu release other than
+24.04, a non-`x86_64` machine, and an invoking user that resolves to `root`
+(the unset-`SUDO_USER` case above), rather than proceeding
+([`00` §5.2](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#52-what-the-binary-does-on-first-launch)).
 
 ---
 
@@ -95,14 +84,10 @@ Releases are published at:
 https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases
 ```
 
-> **(planned) — the release job.** The CI workflow that builds the binary on
-> a pinned Ubuntu 24.04 runner and publishes it is in flight. Until it lands
-> there is nothing on the Releases page to download, and the only way to
-> obtain a binary is the local build in [§8.3](#83-local-build). The
-> procedure below is the operator path once that job exists, and is what
-> [`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)
-> is being rewritten to specify.
-
+Pushing a `v*` tag runs
+[`release.yml`](../.github/workflows/release.yml), which builds the binary on
+a pinned Ubuntu 24.04 runner and publishes it
+([`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)).
 Each release carries exactly two assets — the binary `mv3dt-installer` and
 its checksum `mv3dt-installer.sha256`. Download both into the same directory,
 verify, then run:
@@ -127,9 +112,9 @@ is incomplete or the two files came from different releases. Delete both and
 download them again; do not run a binary that failed verification.
 
 To pin a specific release instead of `latest`, replace `latest/download` with
-`download/<tag>`, for example `download/v0.2.0`. **(planned)** The tag and
-the binary's own `--version` output will always agree, because the release
-job asserts it and fails the build on drift.
+`download/<tag>`, for example `download/v0.4.10`. The tag and the binary's own
+`--version` output always agree, because the release job asserts it and fails
+the build on drift.
 
 ---
 
@@ -137,26 +122,43 @@ job asserts it and fails the build on drift.
 
 Framework-level flags
 ([`00` §3.3](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#33-cli-flags-framework-level)).
-`Status` separates what the binary accepts today from what is specified and
-still landing — check `./mv3dt-installer --help` on the build you actually
-have.
+`./mv3dt-installer --help` on the build you actually have is authoritative.
 
-| Flag | Argument | What it does | Status |
+| Flag | Argument | What it does |
+|---|---|---|
+| `--install-dir` | `PATH` | Override the default install location (`/opt/mv3dt`); highest-precedence tier of [`00` §11.2](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#112-persistence--sharing-with-later-steps) |
+| `--status` | — | Print the state table and exit; read-only, and the one flag that does not need `sudo` |
+| `--resume` | — | Default behavior, stated explicitly for clarity; effectively a no-op |
+| `--reset-state` | — | Wipe `state.json` and start fresh; the recorded install directory is preserved across the reset |
+| `--reset-step` | `N` | Clear one step's completion by its order number so it re-runs, then exit |
+| `--non-interactive` | — | Never prompt; use defaults and already-persisted config, and fail if a required value is missing |
+| `--no-pause` | — | Skip the "press Enter" confirmations |
+| `--verbose` | — | Show every line of command output instead of the rolling 8-line window ([`00` §8.5](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#85-verbosity-and-live-command-output-required)); re-run with this when reporting a problem |
+| `--log-dir` | `PATH` | Override the transcript directory ([§6.2](#62-logs)) |
+| `--version` | — | Print the version and exit; a release binary also prints the tag, commit, and build time CI stamped into it |
+| `--remote-supervision` | `off`, `local`, `remote` | Set the Step 6 gate ([`00` §3.4](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)) without being prompted; overrides an already-persisted value and logs the change |
+| `--webapp-integration` | `off`, `on` | Set the Step 7 gate the same way |
+| `--scan-cameras` | — | Refresh the camera fleet after initial automatic Step 4 discovery, probe RTSP, bind new positions, write the inventory, print the table, and exit; needs `sudo` for raw sockets |
+| `--camera-scan-cidr` | `CIDR` | Override the discovery sweep range (default `169.254.0.0/16`); persisted as `CAMERA_SCAN_CIDR` |
+| `--camera-scan-iface` | `IFACE` | Restrict discovery to one interface; persisted as `CAMERA_SCAN_IFACE` |
+
+### 4.1 Subcommands
+
+`mv3dt-installer <subcommand> [...]` bypasses the install loop and runs one
+step's tool directly, long after install. Several are what the installed
+systemd units invoke; an operator rarely needs those by hand. Each accepts
+`--help`. All need `sudo` unless the table says otherwise.
+
+| Subcommand | What it does | Usually run by | Spec |
 |---|---|---|---|
-| `--install-dir` | `PATH` | Override the default install location (`/opt/mv3dt`); highest-precedence tier of [`00` §11.2](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#112-persistence--sharing-with-later-steps) | shipped |
-| `--status` | — | Print the state table and exit; read-only, and the one flag that does not need `sudo` | shipped |
-| `--resume` | — | Default behavior, stated explicitly for clarity; effectively a no-op | shipped |
-| `--reset-state` | — | Wipe `state.json` and start fresh; the recorded install directory is preserved across the reset | shipped |
-| `--reset-step` | `N` | Clear one step's completion by its order number so it re-runs, then exit | shipped |
-| `--non-interactive` | — | Never prompt; use defaults and already-persisted config, and fail if a required value is missing | shipped |
-| `--no-pause` | — | Skip the "press Enter" confirmations | shipped |
-| `--log-dir` | `PATH` | Override the transcript directory ([§6.2](#62-logs)) | shipped |
-| `--version` | — | Print the version and exit | shipped; the stamped form carrying tag, commit, and build timestamp is **planned**, arriving with the release job |
-| `--remote-supervision` | `off`, `local`, `remote` | Set the Step 6 gate ([`00` §3.4](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)) without being prompted; overrides an already-persisted value and logs the change | shipped |
-| `--webapp-integration` | `off`, `on` | Set the Step 7 gate the same way | shipped |
-| `--scan-cameras` | — | Refresh the camera fleet after initial automatic Step 4 discovery, probe RTSP, bind new positions, write the inventory, print the table, and exit; needs `sudo` for raw sockets | shipped |
-| `--camera-scan-cidr` | `CIDR` | Override the discovery sweep range (default `169.254.0.0/16`); persisted as `CAMERA_SCAN_CIDR` | shipped |
-| `--camera-scan-iface` | `IFACE` | Restrict discovery to one interface; persisted as `CAMERA_SCAN_IFACE` | shipped |
+| `amc` | Start (or with `--down`, stop) the AutoMagicCalib stack and open its UI | Operator, via `<install_dir>/bin/amc` | [`STEP-3` §8](plan/STEP-3-AMC-LAUNCHER.md#8-launcher-and-verification) |
+| `ingest` | One status check against AMC; downloads and installs a `COMPLETED` result | `mv3dt-ingest-<slug>.timer` | [`STEP-4` §7](plan/STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration) |
+| `pipeline` | Start, stop, or dry-run one project's DeepStream pipeline; `--service-exec` is the non-root mode the pipeline unit runs | Operator, via `<install_dir>/bin/pipeline-<slug>`; `mv3dt-pipeline@<slug>.service` | [`STEP-5` §3.3](plan/STEP-5-PER-PROJECT-EXES.md#33-what-the-exe-does-at-runtime-pipeline-subcommand) |
+| `record` | Run the bundled `60_record_tracking.sh` for a project, writing under `<install_dir>/tracking_exports/` | Operator | [`STEP-5` §1.2](plan/STEP-5-PER-PROJECT-EXES.md#12-outputs-what-step-5-writes) |
+| `projects` | `--list`, `--reconcile`, or `--remove <NAME>` registered projects | Operator | [`STEP-5` §5.4](plan/STEP-5-PER-PROJECT-EXES.md#54-project-removal-amc-gui-driven--reconciliation-check) |
+| `agent` | MQTT control agent: run/stop/restart pipelines on command. **Runs as the invoking user, not root** | `mv3dt-agent.service` | [`STEP-6` §B](plan/STEP-6-REMOTE-SUPERVISION.md#b-the-control-agent-remote) |
+| `reporter` | Web-app status/heartbeat loop (`--once` for a single cycle) | `mv3dt-reporter.service` | [`STEP-7` §D](plan/STEP-7-WEBAPP-INTEGRATION.md#d-registration-and-status) |
+| `uploader` | Web-app artifact upload loop (`--once` for a single pass) | `mv3dt-uploader.service` | [`STEP-7` §E](plan/STEP-7-WEBAPP-INTEGRATION.md#e-artifact-upload-daemon) |
 
 Not passing one of the two gate flags differs from passing `off` explicitly:
 an unpassed flag leaves the value to the next tier of precedence —
@@ -268,16 +270,13 @@ or corrupt file is read as "nothing has run yet" rather than as an error.
 
 `--log-dir PATH` moves both
 ([`00` §8.2](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#82-transcript-log-file)). The
-transcript captures the installer's own output. **(planned)** Capturing the
-stdout and stderr of the bash fragments it shells out to as well — today that
-output is collected and then discarded rather than logged.
+transcript captures the installer's own output and the stdout and stderr of
+every command it runs, including the bundled bash fragments.
 
-Secrets are redacted before anything is written: a log line that would carry
-the NGC key or the web-app API key prints `NGC_API_KEY=<redacted>` or
-`API_KEY=<redacted>` instead, and the modules that own those secrets do that
-redaction themselves. **(planned)** Extending the same redaction over the
-shelled-out script output described above, once it is captured. When
-reporting a problem, attach `latest.log`:
+Secrets are redacted before anything is written, in both the installer's own
+lines and the captured command output: a line that would carry the NGC key or
+the web-app API key prints `NGC_API_KEY=<redacted>` or `API_KEY=<redacted>`
+instead. When reporting a problem, attach `latest.log`:
 
 ```bash
 sudo tail -n 200 /var/lib/mv3dt-installer/logs/latest.log
@@ -290,11 +289,13 @@ directory `0700` and files `0600`
 ([`00` §10.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#101-storage-contract),
 [`00` §14.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#141-storage-contract)):
 
-| Path | Contents | Status |
-|---|---|---|
-| `<install_dir>/secrets/ngc.env` | `NGC_API_KEY=...` — the key is required, so a blank answer re-prompts rather than writing anything | shipped |
-| `<install_dir>/secrets/webapp.env` | `API_KEY=...` and `ENDPOINT=...`, only when the web-app gate is `on` | shipped |
-| `<install_dir>/installer.conf` | Non-secret `KEY=VALUE` config: the two gates, the resolved install directory, and the shared values later steps read | shipped |
+| Path | Contents |
+|---|---|
+| `<install_dir>/secrets/ngc.env` | `NGC_API_KEY=...` — the key is required, so a blank answer re-prompts rather than writing anything |
+| `<install_dir>/secrets/camera.env` | `CAM_USER=...` and `CAM_PASSWORD=...`, the shared RTSP credential ([§5](#5-first-run-what-it-asks-for), prompt 5) |
+| `<install_dir>/secrets/webapp.env` | `API_KEY=...` and `ENDPOINT=...`, only when the web-app gate is `on` |
+| `<install_dir>/agent/agent.env` | The Step 6 agent's broker credentials, only when the remote-supervision gate is `remote` ([`STEP-6` §D](plan/STEP-6-REMOTE-SUPERVISION.md#d-security-remote-control-must-be-authenticated)) |
+| `<install_dir>/installer.conf` | Non-secret `KEY=VALUE` config: the two gates, the resolved install directory, and the shared values later steps read |
 
 ---
 
@@ -304,12 +305,10 @@ directory `0700` and files `0600`
   exits cleanly. Reboot, then run `sudo ./mv3dt-installer` again — it detects
   that the reboot happened and continues
   ([`00` §7](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#7-reboot-detection--continuation-contract)).
-  The detection is shipped; the steps that request a reboot are **(planned)**
-  with the step modules.
+  Step 1's NVIDIA driver install is the step that asks for one.
 - **After a manual action.** A USER-ACTION block lists exactly what to do by
   hand; do it, then run the installer again. Nothing already complete is
-  repeated. Same split as above: the block is shipped, its callers are
-  **(planned)**.
+  repeated.
 - **Force one step to re-run.** `sudo ./mv3dt-installer --reset-step N` with
   that step's order number, then run normally.
 - **Start over.** `sudo ./mv3dt-installer --reset-state` clears all step
@@ -360,9 +359,8 @@ installer/dist/mv3dt-installer --version
 installer/dist/mv3dt-installer --status
 ```
 
-This produces the same `--onefile` executable the release job will publish,
-and until that job lands it is the only way to get a binary at all
-([§3](#3-download-verify-run)). It is still not a substitute for a released
+This produces the same `--onefile` executable the release job publishes
+([§3](#3-download-verify-run)), but it is not a substitute for a released
 one: a locally built binary links against the build host's glibc, so only a
 build on Ubuntu 24.04 is guaranteed to start on the target
 ([`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)).
@@ -382,8 +380,6 @@ release job for anything an operator will run.
 - **The scripted `laptop/` harness**, which remains a developer tool and is
   not the operator path; see
   [`laptop/docs/SCRIPTED-WORKFLOW.md`](../laptop/docs/SCRIPTED-WORKFLOW.md).
-  While the step modules are still **(planned)**, it is also the only way to
-  actually stand the pipeline up.
 - **Camera activation, OSD, and stream-profile setup**, which stay manual
   ([`00` §13](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#13-out-of-scope--defer-to-human)).
 
@@ -394,8 +390,7 @@ release job for anything an operator will run.
 Release artifacts and their verification come from this repository's own
 release job. The framework behavior summarized above is specified in
 [`00`](plan/00-FRAMEWORK-AND-BOOTSTRAP.md), which is authoritative wherever
-this guide condenses it; on a **(planned)** item the spec states the intent
-while this guide records what the binary does meanwhile.
+this guide condenses it.
 
 - <https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases> — the
   Releases page; **the only supported source** of the `mv3dt-installer`
@@ -415,6 +410,10 @@ Repo files referenced:
   — what the gated and ungated steps actually do.
 - [`installer/installer.spec`](installer.spec) — the PyInstaller recipe used
   by both the release job and the local build in §8.3.
+- [`.github/workflows/release.yml`](../.github/workflows/release.yml) — the
+  release job: tag-triggered build, version gate, and asset publish.
+- [`installer/plan/DEVELOPMENT-STATUS.md`](plan/DEVELOPMENT-STATUS.md) —
+  what remains, and what has actually been proven on the workstation.
 - [`laptop/config/cameras.yml`](../laptop/config/cameras.yml) — the camera
   inventory and the record of the fleet's hardware facts and required manual
   pre-flight.

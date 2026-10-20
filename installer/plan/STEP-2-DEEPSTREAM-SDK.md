@@ -285,7 +285,7 @@ method was chosen.
   relative `onnx-file=models/peoplenet/resnet34_peoplenet.onnx` and
   `labelfile-path=models/peoplenet/labels.txt` resolve once Step 5 execs
   `deepstream-app` with `cwd=<install_dir>/deepstream`
-  ([`STEP-4` §6.3](STEP-4-CALIB-OUTPUT-WIRING.md#63-config_infer_primarytxt-peoplenet--reference-only)/[§6.5](STEP-4-CALIB-OUTPUT-WIRING.md#65-output-tree)).
+  ([`STEP-4` §6.2](STEP-4-CALIB-OUTPUT-WIRING.md#62-application-config)).
 - **Tag:** `installer.conf`'s `peoplenet_ngc_tag` key, defaulting to
   `nvidia/tao/peoplenet:deployable_quantized_onnx_v2.6.3` — the same value
   `laptop/config/laptop.env.example`'s `PEOPLENET_NGC_TAG` pins.
@@ -298,7 +298,7 @@ method was chosen.
   not the publishing org encoded in the model tag and can be ambiguous for a
   multi-org account. NVIDIA documents personal and service keys as direct
   bearer tokens for this endpoint.
-- **Procedure, as the invoking user ([`00` §9.2](00-FRAMEWORK-AND-BOOTSTRAP.md#92-running-as-the-invoking-user) —
+- **Procedure, as the invoking user ([`00` §9.2](00-FRAMEWORK-AND-BOOTSTRAP.md#92-resolving-the-invoking-user--home) —
   network acquisition, like `docker` and the AMC clone, must never run
   unwrapped as root):**
   1. Parse `org[/team]/model:version` from `peoplenet_ngc_tag` and construct
@@ -495,12 +495,12 @@ install/verify:
 These are awareness constraints on *which* verification path Step 2 takes;
 they do not add scope for detector/model *configuration* work (authoring or
 editing inference-graph config), which stays with
-[`STEP-4` §6.3](STEP-4-CALIB-OUTPUT-WIRING.md#63-config_infer_primarytxt-peoplenet--reference-only)
+[`STEP-4` §6.2](STEP-4-CALIB-OUTPUT-WIRING.md#62-application-config)
 and later steps.
 
 > **Resolved:** see
 > [§5.4](#54-peoplenet-model-acquisition-resolved). [`00` §10](00-FRAMEWORK-AND-BOOTSTRAP.md#10-ngc-api-key-capture--local-secure-storage)
-> and [`STEP-4` §1](STEP-4-CALIB-OUTPUT-WIRING.md#1-scope)/[§6.3](STEP-4-CALIB-OUTPUT-WIRING.md#63-config_infer_primarytxt-peoplenet--reference-only)
+> and [`STEP-4` §1](STEP-4-CALIB-OUTPUT-WIRING.md#1-scope-and-identity)/[§6.2](STEP-4-CALIB-OUTPUT-WIRING.md#62-application-config)
 > both state that Step 2 places the PeopleNet model artifacts; that
 > acquisition is now specified and implemented in §5.4.
 

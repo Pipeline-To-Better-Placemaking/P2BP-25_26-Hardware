@@ -17,122 +17,86 @@ reasonably conclude the diagnostic work is done. It is not.
 
 Current release: **v0.4.10**. Current version string:
 `installer/mv3dt_installer/__init__.py` `__version__ = "0.4.10"`.
-The release is published with a checksum-verified binary. `main` points to
-`4dc8592` (`v0.4.9`); there are no open PRs as of 2026-09-25.
+The release is published with a checksum-verified binary.
 
-### Current workstation handoff (2026-09-25)
+### Current workstation state (last verified 2026-10-20)
 
-**The workstation was reset to a fresh install on 2026-09-25.** The operator
-removed all installer state and non-driver installs: `state.json` and
-`/var/lib/mv3dt-installer`, the install directory (`installer.conf`,
-`secrets/`), the AMC checkout and its projects, `~/.ngc`, every `mv3dt-*`
-systemd unit, the polkit rule, the mosquitto drop-in, the DeepStream `.deb`,
-and the Docker, Compose, mosquitto, and NVIDIA Container Toolkit packages.
-The NVIDIA driver, CUDA 13.2, cuDNN, and TensorRT were kept. The `Gallery`
-AMC project (`20260915_070210_5527`) recorded by the earlier v0.4.6 run no
-longer exists.
+**REQUIRED — read this as dated evidence, not standing fact.** Every row
+names the date it was last confirmed on the workstation. A row older than the
+work you are about to do is unverified: re-check it on the machine before
+relying on it, then update the row and its date. Earlier handoffs, including
+the 2026-09-25 fresh-install record, are in this file's git history.
 
-The fresh-install runs on **v0.4.7** and then **v0.4.8** establish this
-boundary:
+| Fact | Value | Last verified | Source |
+|---|---|---|---|
+| Cameras in use | 2 of the 8 fleet cameras: `169.254.14.217` (`d0:3b:f4:02:44:84`) and `169.254.50.89` (`d0:3b:f4:02:44:87`) | 2026-10-20 | `ip neigh show dev enp8s0`; operator |
+| Camera main stream (`Streaming/Channels/101`) | H.264 Main, 1920x1080, 22 fps, plus a G.711 µ-law (`pcm_mulaw`) audio track | 2026-10-20 | `ffmpeg` probe of `169.254.50.89`; operator, for the fleet |
+| PoE interface | `enp8s0` up at `169.254.3.134/16` (link-local) via `Wired connection 1` | 2026-10-20 | `ip -br addr`, `nmcli` |
+| Location and AMC project | `LOCATION_ID=Kevin-House`; AMC project `Living-Room` (`20261019_151133_2885`). `Valencia-West` is no longer used | 2026-10-20 | `installer.conf`; `GET /v1/get_project_info` |
+| Calibration | **First successful calibration**: `Living-Room` is `COMPLETED` from two simultaneous 10-minute clips (1920x1080, recorded outside the installer and uploaded in the AMC UI). Step 4 ingested it as `Living-Room@20261020T170847Z`, installed the four DeepStream configs, deleted the footage folder, and enabled `mv3dt-ingest-living-room.timer` | 2026-10-20 | Step 4 transcript; AMC API |
+| Installer version on the workstation | not recorded | — | `./mv3dt-installer --version` |
+| Step completion | Steps 1–3 complete; **Step 4 `FAILED` in `verify()`** with `mv3dt-ingest-living-room.service must not be enabled` — a false alarm: systemd reports that oneshot service `static`, which the check misread as enabled. Fixed on branch `fix/is-enabled-static`, pending release | 2026-10-20 | Step 4 transcript; `systemctl is-enabled` |
+| AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib`; `HOST_IP=192.168.4.106` (home network, baked into the AMC UI at container start) | 2026-10-20 | `docker ps`; `installer.conf`; `compose/.env` |
+| AMC network exposure | UI `5000` and API `8000` listen on all interfaces with no authentication; anyone on the same network can create, run, or delete projects | 2026-10-20 | `ss -tlnp` |
+| Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
 
-| Stage | Evidence from the 2026-09-25 runs | What remains |
-|---|---|---|
-| Steps 1–2 | Completed on the fresh install (v0.4.7); the kept driver/CUDA stack was detected rather than reinstalled. | Do not reset or reinstall them. |
-| Step 3: Docker | On v0.4.7, `systemctl restart docker` after `nvidia-ctk runtime configure` failed with `no sockets found via socket activation`: `docker.socket` was inactive after the purge and reinstall. Fixed by hand with `systemctl enable --now docker.socket`. `daemon.json` validated clean. | None in the installer; a future reset procedure should also remove `/etc/docker`, `/var/lib/docker`, and `/var/lib/containerd`. |
-| Step 3: AMC | v0.4.7 timed out after 120 s during first-launch model downloads (fixed in v0.4.8, PR #84). On **v0.4.8** Step 3 completed in 10m07s: UI `http://localhost:5000`, API `http://localhost:8000`, AMC checkout `/home/p2bp-admin/auto-magic-calib` at the pinned commit. The gated VGGT weights returned `401` (non-blocking). | None. |
-| AMC project | `Valencia-West`, project ID `20260925_160145_8306`, created and persisted by Step 3 on v0.4.8. State `INIT`: no videos uploaded, no calibration run. | Record and upload footage, then run the six-step AMC calibration. |
-| Step 4: camera scan | The v0.4.8 automatic first scan found **0 cameras** after 21m24s. The PoE port `enp8s0` had link but no IPv4, so discovery dropped it and ran `arp-scan --localnet` on the campus Wi-Fi `wlp9s0` (`10.10.217.57/8`), reporting about 508,000 junk hosts. Fixed by hand with `nmcli` (`Wired connection 1`: `ipv4.method link-local`, giving `169.254.3.134/16`), and in the installer by PR #85 ([`00` §15.2](00-FRAMEWORK-AND-BOOTSTRAP.md#152-discovery-mechanism)). A rerun with `--scan-cameras --camera-scan-iface enp8s0` found both connected cameras, `169.254.17.217` (`d0:3b:f4:02:44:e2`) and `169.254.20.96` (`d0:3b:f4:01:52:9a`), grabbed stills, and bound positions interactively. `CAMERA_SCAN_IFACE=enp8s0` is persisted. | Only 2 of the 8 fleet cameras are connected; add the rest later with `--scan-cameras`. |
-| Step 4: wait | Step 4 reached the completion wait and polled project `20260925_160145_8306` in state `INIT`. Each poll's JSON reply was streamed into the live window, hiding the wait hint (fixed in v0.4.9, PR #86). | Run v0.4.9 and record footage (below). |
+> **Swapping cameras invalidates the inventory.** Link-local IPs change with
+> the hardware, so after connecting a different camera, refresh with
+> `sudo ./mv3dt-installer --scan-cameras --camera-scan-iface enp8s0` before
+> recording ([`00` §15](00-FRAMEWORK-AND-BOOTSTRAP.md#15-camera-discovery)).
 
-> **VGGT warning is expected.** First launch logs HTTP `401` for the gated
-> `facebook/VGGT-1B-Commercial` weights. It is non-blocking: Step 3 does not
-> require them and Step 4 pins `result_type=amc`.
+The cameras' main streams already match the 1920x1080 AMC input requirement,
+so the v0.4.10 recorder's re-encode
+([`STEP-4-CALIBRATION-FOOTAGE` §2](STEP-4-CALIBRATION-FOOTAGE.md#2-pinned-values)) costs only
+the encode, not a downscale.
 
-**What v0.4.7 changed:** `onboarding.py` now captures `CAM_USER` visibly and
-`CAM_PASSWORD` without echo, stores them in restricted
-`<install_dir>/secrets/camera.env`, and migrates/removes any legacy plaintext
-values in `installer.conf`. On a normal Step 4 run, an absent or empty camera
-inventory triggers discovery, RTSP probes, and guided position binding.
-`--scan-cameras` remains the explicit later refresh command. Camera
-auto-discovery is a scan on Step 4 entry, not continuous hot-plug monitoring.
+**Releases that changed the workstation path:**
 
-**What v0.4.8 changed:** Step 3's backend readiness wait is bounded at 1800 s
-instead of 120 s, ends early if `auto-magic-calib-ms` stops running, and shows
-the service's latest log line every 10 s so first-launch downloads read as
-progress.
+| Release | Change |
+|---|---|
+| v0.4.7 | Camera credentials captured once into `<install_dir>/secrets/camera.env`; an absent inventory triggers discovery, RTSP probes, and position binding on Step 4 entry |
+| v0.4.8 | Step 3's AMC readiness wait bounded at 1800 s, ending early if `auto-magic-calib-ms` stops, with its latest log line shown every 10 s (PR #84) |
+| v0.4.9 | Discovery sweeps only carrier-up interfaces holding an address in `CAMERA_SCAN_CIDR`, never `--localnet` (PR #85); Step 4 polls quietly (PR #86); Step 4 records calibration footage for an `INIT` project and deletes it after ingest (PRs #87, #88) |
+| v0.4.10 | Footage re-encoded to 1920x1080 H.264 `yuv420p` instead of stream-copied (PR #29); the `/release` command (PR #30) |
 
-**What v0.4.9 changed:**
+Step 4's ingest path ran on the workstation on 2026-10-20; its footage
+recorder (v0.4.9, v0.4.10) has not.
 
-1. **Bounded camera discovery** (PR #85): only interfaces with carrier and
-   ARP capability are candidates; only those holding an address inside
-   `CAMERA_SCAN_CIDR` are swept, and only that CIDR — never `--localnet`. A
-   link-up interface without IPv4 is reported with the `nmcli` link-local fix.
-   `ffprobe`/`ffmpeg` are time-bounded and each scan phase is logged.
-2. **Quiet status polling** (PR #86): Step 4's status and log polls no longer
-   stream their JSON into the live window, and the task line reads "waiting
-   for AMC project <PROJECT_NAME> to complete".
-3. **Calibration footage capture** (PRs #87, #88,
-   [`STEP-4-CALIBRATION-FOOTAGE.md`](STEP-4-CALIBRATION-FOOTAGE.md)): while
-   the AMC project is `INIT`, Step 4 offers to record a synchronized 5-minute
-   clip from every enabled camera into
-   `~/Downloads/mv3dt-calibration-footage/<PROJECT_NAME>/`, hints the operator
-   to upload them at AMC's Video Upload step, and deletes the folder after a
-   successful ingest.
+**Standing operator notes** — carried from earlier sessions, not installer
+defects, and not re-verified since 2026-09-25:
 
-None of the v0.4.9 paths has run on the workstation yet; they have unit
-tests and passed the release build.
-
-**Operator-side notes from 2026-09-25**, not installer defects:
-
+- First AMC launch logs HTTP `401` for the gated
+  `facebook/VGGT-1B-Commercial` weights. It is non-blocking: Step 3 does not
+  require them and Step 4 pins `result_type=amc`.
 - The camera web UI's live view reports "live video feed not available" in
-  Firefox/Chrome on Ubuntu, which is expected for Hikvision-OEM firmware
-  without its Windows plugin, especially on an H.265 stream. RTSP itself
-  works (stills were grabbed). Setting each camera's main stream to **H.264**
-  (smart codec off) is recommended before recording, for browser live view
-  and for AMC upload compatibility. Verify a stream with
-  `ffplay -rtsp_transport tcp "rtsp://<user>:<password>@<ip>:554/Streaming/Channels/101"`
-  (replace the placeholders, without the angle brackets).
-- Ubuntu repeatedly shows "Activation of network connection failed". The
-  cause, most likely a second auto-connect profile such as a DHCP wired
-  profile on `enp8s0` or an out-of-range saved Wi-Fi network, was not yet
-  identified. Do not modify `Wired connection 1`, `UCFKiosk`, or `tailscale0`
-  while investigating.
+  Firefox/Chrome on Ubuntu, expected for Hikvision-OEM firmware without its
+  Windows plugin. RTSP itself works.
+- Ubuntu showed "Activation of network connection failed" repeatedly; the
+  cause was not identified. Do not modify `Wired connection 1`, `UCFKiosk`,
+  or `tailscale0` while investigating.
 - The OSD pre-flight (disable "Display Name" and "Display Date") from
-  [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) should be
-  done on both cameras before recording.
+  [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) must be done
+  on each connected camera before recording.
 
 The acceptance target is a real calibration export installed by Step 4
-(`transforms.yml`), followed by real camera/pipeline validation. No completed
-Step 4 or live Step 5 validation is evidenced yet. Physically connecting the
-remaining cameras, camera activation, and the browser calibration remain
+(`transforms.yml`), followed by real camera/pipeline validation. Neither is
+evidenced yet. Camera activation, OSD, and the browser calibration remain
 operator work; do not claim software automation has completed them.
 
-To resume on the workstation, stop the waiting v0.4.8 installer with Ctrl-C,
-download both **v0.4.9** release assets into `~/Downloads`, verify
-`sha256sum -c mv3dt-installer.sha256`, make the binary executable, and run
-`sudo ./mv3dt-installer --verbose`. This preserves completed Steps 1–3, the
-AMC project, and the camera inventory, and resumes at Step 4, which should
-offer to record footage because the project is still `INIT`. Have someone
-walk through the whole scene during the recording, upload the clips in the
-AMC UI, and complete calibration; Step 4 continues on its own when the
-project reaches `COMPLETED`. Do not use `--reset-state`, purge NVIDIA
-packages, or delete AMC data for this handoff. Treat any new failure as
-evidence to diagnose from the full transcript before changing a step.
+To resume on the workstation:
 
-```bash
-cd "$HOME/Downloads"
-rm -f -- mv3dt-installer mv3dt-installer.sha256
-curl -fLO https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases/download/v0.4.9/mv3dt-installer
-curl -fLO https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/releases/download/v0.4.9/mv3dt-installer.sha256
-sha256sum -c mv3dt-installer.sha256
-chmod +x mv3dt-installer
-./mv3dt-installer --version
-sudo ./mv3dt-installer --verbose
-```
+1. **Install the release carrying the `is_enabled` fix without resetting
+   state** ([`installer/README.md` §3](../README.md#3-download-verify-run)),
+   and run it with `--verbose`. Step 4 re-runs: the ingest is a no-op
+   (unchanged result) and `verify()` should now pass.
+2. **Record the installer version** in the table above.
+3. **Continue into Step 5** and collect live pipeline evidence
+   ([section 5](#5-what-remains)).
 
-The `rm -f` above removes only the two prior files in `~/Downloads`; it
-does not reset installation progress. Do not paste camera passwords, the
-NGC API key, or unredacted RTSP URLs into public issues or chat logs.
+Do not use `--reset-state`, purge NVIDIA packages, or delete AMC data. Treat
+any failure as evidence to diagnose from the full transcript before changing
+a step. Do not paste camera passwords, the NGC API key, or unredacted RTSP
+URLs into public issues or chat logs.
 
 ---
 
@@ -184,10 +148,10 @@ From `installer/`:
 python3 -m pytest tests/ -q
 ```
 
-Current result on an **arm64 macOS** development machine:
+Current result on an **arm64 macOS** development machine (2026-10-20):
 
 ```
-1 failed, 1322 passed, 7 skipped
+1 failed, 1411 passed, 7 skipped
 ```
 
 **The single failure is environmental, not a regression (REQUIRED to know
@@ -365,13 +329,16 @@ calibration result:
   camera scan and position-binding flow automatically. Timer-driven re-ingest
   uses the same API path.
 
-The next acceptance milestone is a **v0.4.9 live Ubuntu 24.04 workstation
-run**: record calibration footage through Step 4, complete a real AMC
-calibration in the launched UI, and verify that Step 4 installs the exported
-`transforms.yml` and deletes the footage. The 2026-09-25 runs completed
-Steps 1–3 and camera discovery/binding for 2 cameras on this workstation.
-Unit tests and frozen-build CI cover the new Step 4 branches but do not
-replace the camera and browser-backed run.
+The first successful calibration on the live workstation happened on
+2026-10-20 (`Living-Room`), and Step 4 ingested it; only its `verify()`
+failed, on a false alarm since fixed
+([Current workstation state](#current-workstation-state-last-verified-2026-10-20)).
+The next acceptance milestone is **Step 4 passing `verify()` on the fixed
+release, then a live Step 5 pipeline run**. Footage for that calibration was
+recorded outside the installer, so Step 4's own footage recorder still has no
+workstation run.
+Unit tests and frozen-build CI cover the Step 4 branches but do not replace
+the camera and browser-backed run.
 
 ---
 
@@ -406,14 +373,10 @@ replace the camera and browser-backed run.
 
 The immediate priority is the live acceptance path, in this order:
 
-1. Run the v0.4.9 binary without resetting state. Confirm Step 4 offers
-   footage recording for the `INIT` project, records both connected cameras
-   into `~/Downloads/mv3dt-calibration-footage/Valencia-West/`, and shows the
-   upload hint on a readable wait screen.
-2. Upload the clips, complete the actual AMC browser calibration, and let
-   Step 4 ingest its result. Verify the installed `transforms.yml`, the
-   rendered DeepStream configuration, and that the footage folder was
-   deleted.
+1. Release the `is_enabled` fix and rerun without resetting state; confirm
+   Step 4 reaches `COMPLETE`.
+2. Verify the installed `transforms.yml` and the rendered DeepStream
+   configuration under `/opt/mv3dt/deepstream/`.
 3. Only then run the real per-project pipeline/Step 5 path and collect live
    frame-flow evidence. The removed camera-free sample test is not a
    substitute. Diagnose any new failure from the complete workstation log
@@ -469,7 +432,7 @@ before it needs code.
 
 For the current state to be what this document claims:
 
-- [x] `python3 -m pytest tests/ -q` from `installer/` gives 1322 passed,
+- [x] `python3 -m pytest tests/ -q` from `installer/` gives 1411 passed,
       7 skipped and exactly the one environmental failure in
       [section 2.1](#21-test-suite) on arm64 macOS.
 - [ ] `rg` for `follow_apt` and `follow_download` finds the Step 1 and
@@ -507,11 +470,13 @@ Facts in this document are drawn from the repository through release
 workstation runs, and earlier workstation runs of `mv3dt-installer` 0.1.2 through
 0.1.9, which are the source of the observed-failure inventory in
 [`08` §2](08-PROGRESS-AND-OBSERVABILITY.md#2-observed-failures-this-doc-exists-to-fix).
-The arm64 test counts were confirmed by running the suite on 2026-09-21.
-The operator's 2026-09-25 v0.4.7 and v0.4.8 fresh-install runs (Steps 1–3
-complete, camera discovery and binding for 2 cameras, Step 4 waiting on an
-`INIT` project) are the latest workstation evidence; no v0.4.9 workstation
-transcript has been supplied.
+The arm64 test counts were confirmed by running the suite on 2026-10-20.
+The operator's 2026-09-25 v0.4.7 and v0.4.8 fresh-install runs are the latest
+workstation **transcripts**; no v0.4.9 or v0.4.10 transcript has been
+supplied. The camera, network, and project facts dated 2026-10-20 in
+[Current workstation state](#current-workstation-state-last-verified-2026-10-20)
+come from live probes, a Step 4 transcript, AMC's API, and the operator's
+report that day.
 
 - [apt `APT::Status-Fd`](https://manpages.debian.org/bookworm/apt/apt.conf.5.en.html)
   — **backs the apt integration described in [section 3.3](#33-the-progress-and-observability-subsystem)**:

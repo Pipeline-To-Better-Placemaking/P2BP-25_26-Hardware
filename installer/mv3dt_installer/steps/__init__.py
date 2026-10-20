@@ -3,7 +3,7 @@
 Implements doc `00-FRAMEWORK-AND-BOOTSTRAP.md` §12.1 (the `Step` protocol)
 and §12.2 (`StepStatus`, `StepResult`, and the `UserAction` type referenced
 from §9.3). This module is framework-only: it defines the contract that
-`stepN_*.py` modules (step1_prerequisites.py … step5_per_project_exes.py)
+`stepN_*.py` modules (step1_prerequisites.py … step7_webapp_integration.py)
 implement and register against. No step business logic lives here.
 
 The optional `phases` declaration and its accessors implement doc
@@ -107,10 +107,10 @@ class Step(Protocol):
 
 
 # Ordered (by `.order`) registry of step implementations. Populated at
-# import time by each `stepN_*.py` module via `register()`; empty until
-# those modules exist (they are separate, out-of-scope work — doc 00 is
-# framework-only). Iterating `STEP_REGISTRY` always yields steps in
-# ascending `.order`.
+# import time by each `stepN_*.py` module via `register()`; `__main__.py`
+# imports all seven for that side effect, so a process that imports only
+# this package sees it empty. Iterating `STEP_REGISTRY` always yields steps
+# in ascending `.order`.
 STEP_REGISTRY: list[Step] = []
 
 

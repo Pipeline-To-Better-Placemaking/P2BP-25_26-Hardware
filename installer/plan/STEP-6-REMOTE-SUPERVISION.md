@@ -1,7 +1,11 @@
 # STEP 6 — 24/7 supervised pipeline + remote MQTT control (owner: DevD)
 
-Status: NEW step, added after
-[`STEP-5-PER-PROJECT-EXES.md`](STEP-5-PER-PROJECT-EXES.md). It specifies the
+Status: step spec, implemented in `step6_remote_supervision.py` and shipped
+behind the opt-in remote-supervision gate
+([`00` §3.4](00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)); not yet
+exercised on the workstation
+([`DEVELOPMENT-STATUS` §5](DEVELOPMENT-STATUS.md#5-what-remains)). Added after
+[`STEP-5-PER-PROJECT-EXES.md`](STEP-5-PER-PROJECT-EXES.md), it specifies the
 `step6_remote_supervision` module. It builds strictly on the contracts in
 [`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — the
 step-module interface (§12), `Context` services, install-location config
@@ -130,9 +134,7 @@ the installer. `User=`, below, is a different kind of substitution: there is
 no systemd specifier for "the invoking user of the installer," so that one
 field is filled in once at install time via `systemd.render_unit()`
 (framework module, [`00` §4.2](00-FRAMEWORK-AND-BOOTSTRAP.md#42-locating-and-staging-bundled-assets-at-runtime)
-staging + `@MARKER@`-style substitution, same mechanism
-[`STEP-4` §4.5](STEP-4-CALIB-OUTPUT-WIRING.md#45-re-ingest-on-later-recalibrations-systemd-path-unit)
-uses for the ingest units) — the bundled template on disk is
+staging + `@MARKER@`-style substitution) — the bundled template on disk is
 `mv3dt-pipeline@.service.in` with an `@USER@` marker, not the literal `%i`
 unit shown rendered below:
 
@@ -280,13 +282,10 @@ since that script is being removed
    `systemd.render_unit()` — substituting `@USER@` with the invoking user —
    then install the rendered text into `/etc/systemd/system/` via
    `systemd.install_unit()` (content-idempotent, root-owned `0644`; see the
-   callout below). `systemd.py` today only implements the STEP-4-specific
-   `render_ingest_units()` wrapper around the generic `render_unit()`
-   primitive; Step 6 calls `render_unit()` directly (or adds its own thin
-   wrapper) since `mv3dt-pipeline@.service.in` and `mv3dt-agent.service.in`
-   are a different template pair. Neither `.in` template exists yet under
-   `installer/mv3dt_installer/assets/systemd/` — creating them is part of
-   implementing this step.
+   callout below). Both templates live under
+   `installer/mv3dt_installer/assets/systemd/`, alongside the polkit rule
+   template `assets/polkit/49-mv3dt-agent.rules.in`
+   ([§B.1.1](#b11-the-polkit-rule-locked-form)).
 2. `systemctl daemon-reload` — **required** before any `enable`, or systemd
    acts on a stale view of the unit files.
 3. For each project in `registry.json`:
@@ -307,9 +306,11 @@ since that script is being removed
 > render a unit that still carries an unsubstituted placeholder; refuses to
 > enable a unit whose `ExecStart` binary is absent; and routes every
 > `systemctl` invocation through an injected runner, which production callers
-> set to `ctx.run_root`. [`STEP-4` §4.5](STEP-4-CALIB-OUTPUT-WIRING.md#45-re-ingest-on-later-recalibrations-systemd-path-unit)
-> uses the same helper for its ingest path units, so the two steps cannot
-> drift on unit-install semantics.
+> set to `ctx.run_root`. [`STEP-4` §7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration)
+> installs, reloads, and enables its ingest `.timer`/`.service` pair through
+> the same helper, so the two steps cannot drift on unit-install semantics.
+> (Step 4 renders that pair inline rather than from a bundled `.in`
+> template.)
 
 **Sudo/root:** all of the above require root; Step 6 uses `ctx.run_root(...)`
 (framework §12.3). The installer already runs as root under plain `sudo`

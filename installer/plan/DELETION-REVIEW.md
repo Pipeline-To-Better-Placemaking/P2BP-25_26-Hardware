@@ -70,10 +70,10 @@ is no pattern in them worth porting.
 
 | Target | Size / count | Verdict basis |
 |---|---|---|
-| `amc/alignment_data (Copy)/`, `amc/single_view_results (Copy)/` | **964 MB, 14,606 tracked files** | AMC run output — `kitti_detector/` per-frame label dumps, overlay JPGs, per-camera YAMLs. The `(Copy)` suffixes mark a manual paste, not a curated fixture. [`STEP-4` §2](STEP-4-CALIB-OUTPUT-WIRING.md#2-what-the-amc-output-is) treats the AMC export as an opaque directory produced **at run time** under `$AMC_ROOT/projects/$PROJECT_NAME/exports/`, never read from the repo tree. |
+| `amc/alignment_data (Copy)/`, `amc/single_view_results (Copy)/` | **964 MB, 14,606 tracked files** | AMC run output — `kitti_detector/` per-frame label dumps, overlay JPGs, per-camera YAMLs. The `(Copy)` suffixes mark a manual paste, not a curated fixture. [`STEP-4` §4](STEP-4-CALIB-OUTPUT-WIRING.md#4-result-download-and-validation) fetches the AMC result **at run time** through AMC's API, never from the repo tree. |
 | `homographies/` (whole directory) | 15 files | EPFL multi-camera dataset samples — 14 `*-homography.yml` (`4p-c0`, `campus4-c*`, `passageway1-c*`, `terrace1-c*`) plus `4p-ground-truth.txt` (2,957 lines of frame/track/bbox annotations). The runtime resolved homographies **by MAC** — `camera_handler.py:241`, `aruco_scanner.py:101`, and `homography.py:760` all used `{safe_mac}_homography.yml`. No committed file matched that scheme, so nothing ever read these. |
 | `.DS_Store` | 6 KB | macOS Finder artifact. Also absent from `.gitignore` — add it there in the same change. |
-| `virtual-cameras/` (whole directory, incl. the 48 MB `mediamtx.exe`) | **48 MB** | Windows binary in a repo whose installer targets Ubuntu 24.04 `x86_64` ([`00` §5.1](00-FRAMEWORK-AND-BOOTSTRAP.md#51-exact-responsibilities-in-order)); also exposed to line-ending mangling (see the hazard note below). Both POSIX launchers already used the `bluenviron/mediamtx:latest` **Docker image** (`start_rtsp_cams.sh:22-24`) and the Windows launcher already fell back to it (`start_rtsp_cams.ps1:35-36`), so the whole directory is replaceable by one `docker run` — see [§4](#4-explicit-calls-resolved--both-deleted) item 2. |
+| `virtual-cameras/` (whole directory, incl. the 48 MB `mediamtx.exe`) | **48 MB** | Windows binary in a repo whose installer targets Ubuntu 24.04 `x86_64` ([`00` §5.2](00-FRAMEWORK-AND-BOOTSTRAP.md#52-what-the-binary-does-on-first-launch)); also exposed to line-ending mangling (see the hazard note below). Both POSIX launchers already used the `bluenviron/mediamtx:latest` **Docker image** (`start_rtsp_cams.sh:22-24`) and the Windows launcher already fell back to it (`start_rtsp_cams.ps1:35-36`), so the whole directory is replaceable by one `docker run` — see [§4](#4-explicit-calls-resolved--both-deleted) item 2. |
 | `config/config.json`, `config/cameras_runtime.json` | small | Committed before `config/` was added to `.gitignore`, so they still override the ignore rule. Device-specific runtime state — `cameras_runtime.json` is written by `camera_scanner.py`. **Harvest first:** these two files were the sole source of the fleet MAC inventory and the native sensor resolution — extracted to `cameras.yml` per [§4.1](#41-camera-facts-harvested-before-deletion) before removal. |
 
 > **Line-ending hazard (fix with the same change):** `.gitattributes` sets
@@ -218,9 +218,9 @@ whose `cameras.yml` *is* a static list. Flagged, not solved.
 | `laptop/mosquitto/mv3dt.conf` | Bundled to `assets/mosquitto/`. Consumed by the bundled `10_setup_mosquitto.sh` ([§8](#8-script-disposition-under-the-binary-distribution)). Permanent. |
 | `laptop/config/cameras.yml` | Bundled to `assets/cameras/` by the [`installer.spec`](../installer.spec) entry that lands with `cameras.py`. Its header block (fleet MAC inventory, sensor resolution, volatility caveat, manual pre-flight — [§4.1](#41-camera-facts-harvested-before-deletion)) is copied into every generated `<install_dir>/cameras.yml`, and its pinned IPs seed the ARP-cache fallback. Stays exactly where it is in git. |
 | `laptop/config/laptop.env.example` | **Not bundled.** Operator state moves to `installer.conf` ([`00` §11.2](00-FRAMEWORK-AND-BOOTSTRAP.md#112-persistence--sharing-with-later-steps)); the example file is retained for the developer harness only. |
-| `laptop/docs/*`, `laptop/README.md` | Cited 22+ times across the plans; `DEEPSTREAM-SETUP.md` is the source of truth for the version pins in [`STEP-1` §2](STEP-1-PREREQUISITES.md#2-the-ds-90-dgpu-prerequisite-pins-equality). |
+| `laptop/docs/*`, `laptop/README.md` | Cited 22+ times across the plans; `DEEPSTREAM-SETUP.md` is the source of truth for the version pins in [`STEP-1` §2](STEP-1-PREREQUISITES.md#2-the-ds-91-dgpu-prerequisite-pins-equality). |
 | `laptop/scripts/00_bootstrap.sh`, `lib/common.sh`, `30_start_amc.sh`, `50_start_pipeline.sh`, `99_stop_all.sh` | Ported by Steps 1, 2, 3, 5, and 6. Retained as the **developer harness** ([§8](#8-script-disposition-under-the-binary-distribution)); no operator procedure runs them. |
-| `laptop/scripts/40_export_watcher.sh` | **Superseded operationally (pending)** — the [`STEP-4` §4.4](STEP-4-CALIB-OUTPUT-WIRING.md#44-one-shot-vs-watcher) rewrite (U7, PR #28, not yet merged) adds in-session blocking on the export directory plus a systemd path unit for later recalibrations, so no operator types a watcher command once it lands. As §4.4 reads today the installer stays one-shot and the script is NOT superseded. Retained in git as a developer tool. |
+| `laptop/scripts/40_export_watcher.sh` | **Superseded operationally** — [`STEP-4` §7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration) installs a per-project `mv3dt-ingest-<slug>.timer` that polls AMC's API and ingests each completed recalibration, so no operator runs a watcher command. Retained in git as a developer tool. |
 | `laptop/scripts/10_setup_mosquitto.sh` | **Bundled** into the binary as `assets/scripts/10_setup_mosquitto.sh` and owned by [`STEP-1` §3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker). The `laptop/` copy is the developer-harness original. |
 | `laptop/scripts/20_verify_cameras.sh` | **Not bundled.** Its `ffprobe`-over-RTSP check becomes the RTSP probe in `cameras.py` ([§6](#6-coverage-gaps-this-triage-exposed) gap 2); the ping sweep is [`STEP-5` §3.3](STEP-5-PER-PROJECT-EXES.md#33-what-the-exe-does-at-runtime-pipeline-subcommand)'s. Retained in git as a developer tool. |
 | `laptop/scripts/60_record_tracking.sh` | **Bundled** as `assets/scripts/60_record_tracking.sh` — it is the **producer of the artifacts** [`STEP-7` §E.1](STEP-7-WEBAPP-INTEGRATION.md#e1-what-gets-uploaded) uploads (`tracks.jsonl`, `tracks.csv`, `summary.json`). The `laptop/` copy is the developer-harness original. |
@@ -247,7 +247,7 @@ text is retained in each item so the reason the script was kept is not lost.
 
 1. **Mosquitto install — RESOLVED, owned by
    [`STEP-1` §3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker).**
-   The gap was real: [`STEP-4` §1](STEP-4-CALIB-OUTPUT-WIRING.md#1-scope)
+   The gap was real: [`STEP-4` §1](STEP-4-CALIB-OUTPUT-WIRING.md#1-scope-and-identity)
    deferred broker install to "Step 1/2 bootstrap", neither
    [`STEP-1`](STEP-1-PREREQUISITES.md) nor
    [`STEP-2`](STEP-2-DEEPSTREAM-SDK.md) mentioned it, and
@@ -275,15 +275,15 @@ text is retained in each item so the reason the script was kept is not lost.
    the ping sweep stays in `STEP-5`, the `ffprobe` check moved to
    `cameras.py` — so this row and `STEP-5` agree.
 
-3. **The export watcher — RESOLVED, superseded operationally by the
-   [`STEP-4` §4.4](STEP-4-CALIB-OUTPUT-WIRING.md#44-one-shot-vs-watcher)
-   auto-ingest rewrite.**
+3. **The export watcher — RESOLVED, superseded operationally by
+   [`STEP-4` §7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration)
+   auto-ingest.**
    The earlier reading — "not superseded, do not delete" — was written before
-   auto-ingest was designed. `STEP-4` §4.4 now reads in the resolved voice
-   ("LOCKED — the operator never types a command to run a script"): the
-   one-shot ingest+render logic is ported into `run()`, and continuous
-   re-ingest is handed to the systemd path unit described in §4.5, superseding
-   the watcher's `inotifywait` loop operationally.
+   auto-ingest was designed. Step 4 now ingests in `run()`, and continuous
+   re-ingest is a per-project `mv3dt-ingest-<slug>.timer` that polls AMC's
+   API every 60 seconds. That replaced the interim design of a systemd `.path`
+   unit watching an export directory AMC 3.2.1 does not create, and it
+   supersedes the watcher's `inotifywait` loop operationally.
    [`40_export_watcher.sh`](../../laptop/scripts/40_export_watcher.sh) stays
    retained in git as a developer tool — the standalone watch mode has no
    installer equivalent and is never deletable — but it is no longer
@@ -349,14 +349,14 @@ still how this repo is exercised from a clone.
 | `10_setup_mosquitto.sh` | **Bundled** | `assets/scripts/10_setup_mosquitto.sh` | [`STEP-1` §3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker) | Yes, developer-only original |
 | `20_verify_cameras.sh` | **Dropped** as an operator script; the `ffprobe` check is ported | — | `cameras.py` RTSP probe + [`STEP-5` §3.3](STEP-5-PER-PROJECT-EXES.md#33-what-the-exe-does-at-runtime-pipeline-subcommand) ping sweep | Yes, developer-only |
 | `30_start_amc.sh` | Superseded — ported to Python | — | [`STEP-3`](STEP-3-AMC-LAUNCHER.md) | Yes, developer-only |
-| `40_export_watcher.sh` | Superseded operationally by auto-ingest (pending U7, PR #28) | — | [`STEP-4` §4.4](STEP-4-CALIB-OUTPUT-WIRING.md#44-one-shot-vs-watcher) | Yes, developer-only |
+| `40_export_watcher.sh` | Superseded operationally by auto-ingest | — | [`STEP-4` §7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration) | Yes, developer-only |
 | `50_start_pipeline.sh` | Superseded — ported into the per-project exe | — | [`STEP-5` §3.3](STEP-5-PER-PROJECT-EXES.md#33-what-the-exe-does-at-runtime-pipeline-subcommand) | Yes, developer-only |
 | `60_record_tracking.sh` | **Bundled** | `assets/scripts/60_record_tracking.sh` | [`STEP-5`](STEP-5-PER-PROJECT-EXES.md); its artifacts feed [`STEP-7` §E.1](STEP-7-WEBAPP-INTEGRATION.md#e1-what-gets-uploaded) | Yes, developer-only original |
 | `70_plot_floorplan.py` | **Dropped** — matplotlib bloat; the web app visualizes | — | None (web app) | Yes, developer tool |
 | `99_stop_all.sh` | Superseded — ported into the per-project exe | — | [`STEP-5` §3.4](STEP-5-PER-PROJECT-EXES.md#34-stopping-the-pipeline) | Yes, developer-only |
 | `record_cameras_mp4.sh` | **Not bundled** — ported to Python as `installer/mv3dt_installer/footage.py` | — | [`STEP-4-CALIBRATION-FOOTAGE`](STEP-4-CALIBRATION-FOOTAGE.md) | Yes, developer tool |
 | `view_cameras.sh` | **Dropped** — no plan coverage | — | None | Yes, developer tool |
-| `lib/common.sh` | Not bundled; a purpose-written sibling is | `assets/scripts/lib/common.sh` (sibling, **not** a copy) | [`00` §4.2](00-FRAMEWORK-AND-BOOTSTRAP.md#42-locating-bundled-assets-at-runtime) | Yes, developer-only |
+| `lib/common.sh` | Not bundled; a purpose-written sibling is | `assets/scripts/lib/common.sh` (sibling, **not** a copy) | [`00` §4.2](00-FRAMEWORK-AND-BOOTSTRAP.md#42-locating-and-staging-bundled-assets-at-runtime) | Yes, developer-only |
 
 ### 8.1 Which copy do I edit?
 
@@ -400,8 +400,8 @@ Repo files referenced:
   bundling, §5.1 target platform, §13 out-of-scope scope calls, and §14 the
   web-app credential contract that gates
   [§3](#3-deletions-gated-on-the-harvest-the-jetson-tree).
-- [`STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md) — §2 treats
-  the AMC export as run-time-produced (basis for deleting `amc/`); §4.4 is the
+- [`STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md) — §4 fetches
+  the AMC result at run time (basis for deleting `amc/`); §7 is the
   auto-ingest that supersedes the export watcher operationally
   ([§6](#6-coverage-gaps-this-triage-exposed) gap 3).
 - [`STEP-5-PER-PROJECT-EXES.md`](STEP-5-PER-PROJECT-EXES.md) — §3.3 the ping

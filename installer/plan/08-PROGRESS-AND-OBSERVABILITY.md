@@ -300,7 +300,7 @@ no; active display manager: gdm3)
 ```
 
 This is already implemented for the caveat-6a guard
-([`STEP-1` §5.1a](STEP-1-PREREQUISITES.md#51a-documented-drift---silent-and-the-session-guard-resolved));
+([`STEP-1` §5.1a](STEP-1-PREREQUISITES.md#51a-desktop-safe-systemd-handoff-resolved));
 this section generalises it to every inferred refusal across steps 1-7.
 
 ### 6.1 Failure context block
