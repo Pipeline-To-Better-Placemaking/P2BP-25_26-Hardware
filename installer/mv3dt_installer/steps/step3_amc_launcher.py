@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import filecmp
 import json
 import os
 import pathlib
@@ -1040,11 +1041,15 @@ def ensure_installer_binary(ctx: "Context") -> pathlib.Path:
 
     if getattr(sys, "frozen", False):
         src = pathlib.Path(sys.executable)
+        # Compare contents, not just size: two releases can build to the
+        # same size, and a stale copy keeps running the old pipeline and
+        # ingest code behind every wrapper and systemd unit.
         if src.is_file() and (
-            not dest.exists() or dest.stat().st_size != src.stat().st_size
+            not dest.exists() or not filecmp.cmp(src, dest, shallow=False)
         ):
             shutil.copy2(src, dest)
             dest.chmod(0o755)
+            ctx.log.info(f"updated {dest} from {src}")
     elif not dest.exists():
         ctx.log.warn(
             f"not a frozen binary; cannot stage {dest} from a source checkout "

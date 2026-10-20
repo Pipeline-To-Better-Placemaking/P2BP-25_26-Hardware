@@ -20,8 +20,7 @@
 
 BaseConfig:
   minDetectorConfidence: 0.4
-  minTrackerConfidence: 0.5
-  maxTargetsPerStream: 150
+  checkClassMatch: 1
 
 TargetManagement:
   preserveStreamUpdateOrder: 0
@@ -35,7 +34,6 @@ TrajectoryManagement:
 DataAssociator:
   dataAssociatorType: 0
   associationMatcherType: 1
-  checkClassMatch: 1
   minMatchingScore4Overall: 0.0
   minMatchingScore4SizeSimilarity: 0.4
   minMatchingScore4Iou: 0.1
@@ -53,25 +51,36 @@ VisualTracker:
   useColorNames: 1
   useHog: 1
   featureImgSizeLevel: 2
-  SearchRegionPaddingScale: 1.5
 
 ReID:
-  reidType: 2
-  batchSize: 100
-  workspaceSize: 1000
-  reidFeatureSize: 256
-  reidHistorySize: 100
-  inferDims: [256, 128, 3]
-  networkMode: 1
-  inputOrder: 1
-  colorFormat: 0
-  offsets: [0.0, 0.0, 0.0]
-  netScaleFactor: 1.0
-  inputBlobName: "input"
-  outputBlobName: "output"
-  modelEngineFile: "/opt/nvidia/deepstream/deepstream-9.0/samples/models/Tracker/resnet50_market1501.engine"
-  keepAspc: 1
-  addFeatureNormalization: 1
+  reidType: 2    # The type of reid among { DUMMY=0, NvDEEPSORT=1, Reid based reassoc=2, both NvDEEPSORT and reid based reassoc=3}
+
+  # [Reid Network Info]
+  batchSize: 100    # Batch size of reid network
+  workspaceSize: 1000    # Workspace size to be used by reid engine, in MB
+  reidFeatureSize: 256    # Size of reid feature
+  reidHistorySize: 100    # Max number of reid features kept for one object
+  inferDims: [3, 256, 128]    # Reid network input dimension CHW or HWC based on inputOrder
+  networkMode: 1    # Reid network inference precision mode among {fp32=0, fp16=1, int8=2 }
+
+  # [Input Preprocessing]
+  inputOrder: 0    # Reid network input order among { NCHW=0, NHWC=1 }. Batch will be converted to the specified order before reid input.
+  colorFormat: 0    # Reid network input color format among {RGB=0, BGR=1 }. Batch will be converted to the specified color before reid input.
+  offsets: [123.6750, 116.2800, 103.5300]    # Array of values to be subtracted from each input channel, with length equal to number of channels
+  netScaleFactor: 0.01735207    # Scaling factor for reid network input after substracting offsets
+  keepAspc: 1    # Whether to keep aspc ratio when resizing input objects for reid
+  useVPICropScaler: 1 # Use VPI for image cropping and rescaling
+
+  # [Output Postprocessing]
+  addFeatureNormalization: 1       # If reid feature is not normalized in network, adding normalization on output so each reid feature has l2 norm equal to 1
+  minVisibility4GalleryUpdate: 0.6 # Add ReID embedding to the gallery only if the visibility is not lower than this
+
+  # [Paths and Names]
+  # Relative to the pipeline working directory (<install_dir>/deepstream).
+  # Step 4 downloads the .etlt; DeepStream builds the engine on first start.
+  tltEncodedModel: "models/reid/resnet50_market1501.etlt" # NVIDIA TAO model path
+  tltModelKey: "nvidia_tao" # NVIDIA TAO model key
+  modelEngineFile: "models/reid/resnet50_market1501.etlt_b100_gpu0_fp16.engine" # Engine file path
 
 # Single-View 3D Tracking. AMC (§8.6 Execute + §8.7 Export) writes one
 # per-camera calibration YAML under calibration/<LOCATION_ID>/camera<N>.yml.

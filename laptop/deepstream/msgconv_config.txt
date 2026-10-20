@@ -34,4 +34,193 @@ enable=1
 id=mv3dt
 description=MV3DT multi-view 3D tracking
 source=DeepStream-NvMultiObjectTracker
-version=9.0
+version=9.1
+
+# Blocks 1-8: deepstream-test5-app looks up [sensorN]/[placeN]/[analyticsN]
+# per message and logs "No entry for sensorN" when one is missing. On the
+# 2026-10-20 workstation run, two cameras requested indices 1 and 2, so
+# blocks are defined for every index up to the 8-camera fleet.
+
+[sensor1]
+enable=1
+type=Camera
+id=camera1
+description=MV3DT camera 1
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place1]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics1]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor2]
+enable=1
+type=Camera
+id=camera2
+description=MV3DT camera 2
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place2]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics2]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor3]
+enable=1
+type=Camera
+id=camera3
+description=MV3DT camera 3
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place3]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics3]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor4]
+enable=1
+type=Camera
+id=camera4
+description=MV3DT camera 4
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place4]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics4]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor5]
+enable=1
+type=Camera
+id=camera5
+description=MV3DT camera 5
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place5]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics5]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor6]
+enable=1
+type=Camera
+id=camera6
+description=MV3DT camera 6
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place6]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics6]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor7]
+enable=1
+type=Camera
+id=camera7
+description=MV3DT camera 7
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place7]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics7]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1
+
+[sensor8]
+enable=1
+type=Camera
+id=camera8
+description=MV3DT camera 8
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[place8]
+enable=1
+id=laptop-site
+type=lab
+name=laptop-lab
+location=0.0;0.0;0.0
+coordinate=0.0;0.0;0.0
+
+[analytics8]
+enable=1
+id=mv3dt
+description=MV3DT multi-view 3D tracking
+source=DeepStream-NvMultiObjectTracker
+version=9.1

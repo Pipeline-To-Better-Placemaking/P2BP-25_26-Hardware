@@ -126,10 +126,8 @@ enable=1
 tracker-width=960
 tracker-height=544
 gpu-id=0
-ll-lib-file=/opt/nvidia/deepstream/deepstream-9.0/lib/libnvds_nvmultiobjecttracker.so
+ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
 ll-config-file=config_tracker_NvMOT.yml
-enable-batch-process=1
-enable-past-frame=1
 
 # Fake sink placeholder so deepstream-app can run headless during smoke
 # tests. The MQTT message sink is [sink1]. Disable this for on-screen review
@@ -146,7 +144,7 @@ enable=1
 type=6
 msg-conv-config=msgconv_config.txt
 msg-conv-payload-type=0
-msg-broker-proto-lib=/opt/nvidia/deepstream/deepstream-9.0/lib/libnvds_mqtt_proto.so
+msg-broker-proto-lib=/opt/nvidia/deepstream/deepstream/lib/libnvds_mqtt_proto.so
 msg-broker-conn-str=127.0.0.1;1883
 topic=mv3dt/${LOCATION_ID}/sv3d
 msg-broker-config=

@@ -35,7 +35,8 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | Location and AMC project | `LOCATION_ID=Kevin-House`; AMC project `Living-Room` (`20261019_151133_2885`). `Valencia-West` is no longer used | 2026-10-20 | `installer.conf`; `GET /v1/get_project_info` |
 | Calibration | **First successful calibration**: `Living-Room` is `COMPLETED` from two simultaneous 10-minute clips (1920x1080, recorded outside the installer and uploaded in the AMC UI). Step 4 ingested it as `Living-Room@20261020T170847Z`, installed the four DeepStream configs, deleted the footage folder, and enabled `mv3dt-ingest-living-room.timer` | 2026-10-20 | Step 4 transcript; AMC API |
 | Installer version on the workstation | not recorded | — | `./mv3dt-installer --version` |
-| Step completion | Steps 1–3 complete; **Step 4 `FAILED` in `verify()`** with `mv3dt-ingest-living-room.service must not be enabled` — a false alarm: systemd reports that oneshot service `static`, which the check misread as enabled. Fixed on branch `fix/is-enabled-static`, pending release | 2026-10-20 | Step 4 transcript; `systemctl is-enabled` |
+| Step completion | Steps 1–4 complete on v0.4.11 (Step 4's `static` false alarm fixed by #31). Step 5 created `pipeline-living-room`, whose first start failed on v0.4.11's 9.0-era pipeline templates | 2026-10-20 | v0.4.11 transcript |
+| Pipeline | With the v0.4.12 changes applied by hand to the installed configs: MQTT sink connects, ReID engine builds, PeopleNet detects, both cameras run at 22 FPS under `deepstream-test5-app`, which builds one message per tracked person. **Delivery of those messages to `mv3dt/Kevin-House/sv3d` not yet observed.** Multi-camera MV3DT fusion is not configured (see section 5) | 2026-10-20 | live runs; `deepstream-test5-app` log |
 | AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib`; `HOST_IP=192.168.4.106` (home network, baked into the AMC UI at container start) | 2026-10-20 | `docker ps`; `installer.conf`; `compose/.env` |
 | AMC network exposure | UI `5000` and API `8000` listen on all interfaces with no authentication; anyone on the same network can create, run, or delete projects | 2026-10-20 | `ss -tlnp` |
 | Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
@@ -85,13 +86,14 @@ operator work; do not claim software automation has completed them.
 
 To resume on the workstation:
 
-1. **Install the release carrying the `is_enabled` fix without resetting
-   state** ([`installer/README.md` §3](../README.md#3-download-verify-run)),
-   and run it with `--verbose`. Step 4 re-runs: the ingest is a no-op
-   (unchanged result) and `verify()` should now pass.
-2. **Record the installer version** in the table above.
-3. **Continue into Step 5** and collect live pipeline evidence
-   ([section 5](#5-what-remains)).
+1. **Install v0.4.12 without resetting state**
+   ([`installer/README.md` §3](../README.md#3-download-verify-run)).
+2. **Re-run Step 4 and Step 5** with `--reset-step 4`, then `--reset-step 5`,
+   then a normal `--verbose` run. Step 4 re-renders the pipeline configs from
+   the corrected templates and downloads the ReID model; Step 5 regenerates
+   the wrappers. The run also refreshes `<install_dir>/bin/mv3dt-installer`.
+3. **Start the pipeline and watch the broker** for messages on
+   `mv3dt/Kevin-House/sv3d`, then record the result in the table above.
 
 Do not use `--reset-state`, purge NVIDIA packages, or delete AMC data. Treat
 any failure as evidence to diagnose from the full transcript before changing
@@ -333,8 +335,9 @@ The first successful calibration on the live workstation happened on
 2026-10-20 (`Living-Room`), and Step 4 ingested it; only its `verify()`
 failed, on a false alarm since fixed
 ([Current workstation state](#current-workstation-state-last-verified-2026-10-20)).
-The next acceptance milestone is **Step 4 passing `verify()` on the fixed
-release, then a live Step 5 pipeline run**. Footage for that calibration was
+Step 4 passed on v0.4.11, and the pipeline ran by hand with the v0.4.12
+fixes. The next acceptance milestone is **observed MQTT track messages from
+the installer-rendered pipeline on v0.4.12**, then MV3DT fusion. Footage for that calibration was
 recorded outside the installer, so Step 4's own footage recorder still has no
 workstation run.
 Unit tests and frozen-build CI cover the Step 4 branches but do not replace
@@ -373,12 +376,16 @@ the camera and browser-backed run.
 
 The immediate priority is the live acceptance path, in this order:
 
-1. Release the `is_enabled` fix and rerun without resetting state; confirm
-   Step 4 reaches `COMPLETE`.
-2. Verify the installed `transforms.yml` and the rendered DeepStream
-   configuration under `/opt/mv3dt/deepstream/`.
-3. Only then run the real per-project pipeline/Step 5 path and collect live
-   frame-flow evidence. The removed camera-free sample test is not a
+1. Install v0.4.12, re-run Steps 4 and 5, and confirm track messages reach
+   Mosquitto on `mv3dt/Kevin-House/sv3d` with people in view.
+2. **Configure MV3DT fusion.** The tracker template's `MV3DT:` keys
+   (`mqttBrokerIP`, `mqttBrokerPort`) are not DeepStream settings; MV3DT
+   peers communicate through a `Communicator` section
+   (`communicatorType: 2`) and a pub/sub topic file, which NVIDIA's
+   `deepstream-tracker-3d-multi-view` reference generates. Rebuild the
+   template on that reference, and drop Step 4's checks of the invalid keys.
+3. Run the pipeline under Step 6 supervision and collect live frame-flow
+   evidence. The removed camera-free sample test is not a
    substitute. Diagnose any new failure from the complete workstation log
    before changing code or cutting another release.
 

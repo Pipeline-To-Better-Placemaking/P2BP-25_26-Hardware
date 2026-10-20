@@ -422,6 +422,26 @@ def test_pipeline_subcommand_dry_run_does_not_exec(tmp_path):
     assert calls == []
 
 
+def test_pipeline_execs_deepstream_test5_app(tmp_path, monkeypatch):
+    """deepstream-app connects the msgbroker sink but never sends anything;
+    deepstream-test5-app attaches the event metadata it publishes."""
+    ctx = FakeContext(tmp_path)
+    entry = _make_entry(ctx.install_dir)
+    monkeypatch.setattr(step5, "ensure_mosquitto", lambda ctx_: None)
+    monkeypatch.setattr(step5, "ping_sweep_cameras", lambda ctx_: None)
+    monkeypatch.setattr(step5, "source_deepstream_env", lambda ctx_: {})
+    monkeypatch.setattr(step5.os, "chdir", lambda path: None)
+    calls = []
+    rc = step5._start_pipeline_foreground(ctx, entry, execv=lambda binary, argv: calls.append(argv))
+    assert rc == 0
+    assert calls and calls[0][0] == "deepstream-test5-app"
+
+
+def test_pipeline_process_name_is_truncated_for_pgrep():
+    assert step5.DEEPSTREAM_APP == "deepstream-test5-app"
+    assert step5.DEEPSTREAM_APP_PROCESS == "deepstream-test"
+
+
 def test_pipeline_subcommand_dispatches_to_start_foreground(tmp_path, monkeypatch):
     ctx = FakeContext(tmp_path)
     _make_entry(ctx.install_dir)
@@ -477,7 +497,7 @@ def test_stop_pipeline_default_only_stops_deepstream(tmp_path):
 
     rc = step5._stop_pipeline(ctx, entry, sleep=_boom)
     assert rc == 0
-    assert runner.called_with_prefix("pkill", "-TERM", "-x", "deepstream-app")
+    assert runner.called_with_prefix("pkill", "-TERM", "-x", step5.DEEPSTREAM_APP_PROCESS)
     assert not runner.called_with_prefix("pkill", "-KILL")
     assert not runner.called_with_prefix("systemctl", "stop", "mosquitto")
 
@@ -492,7 +512,7 @@ def test_stop_pipeline_deepstream_not_running_does_not_kill(tmp_path):
 
 
 class _SequencedPgrepRunner:
-    """Serves a fixed sequence of `pgrep -x deepstream-app` returncodes (one
+    """Serves a fixed sequence of `pgrep -x <DEEPSTREAM_APP_PROCESS>` returncodes (one
     per call -- the *initial* aliveness check consumes the first entry, then
     one entry per grace-period poll), then `1` (not running) once exhausted.
     Every other command returns 0. Used to exercise the SIGTERM->SIGKILL
@@ -530,7 +550,7 @@ def test_stop_pipeline_grace_period_lets_process_exit_without_sigkill(tmp_path):
         ctx, entry, sleep=sleeps.append, grace_polls=5, grace_interval_s=1.0
     )
     assert rc == 0
-    assert runner.called_with_prefix("pkill", "-TERM", "-x", "deepstream-app")
+    assert runner.called_with_prefix("pkill", "-TERM", "-x", step5.DEEPSTREAM_APP_PROCESS)
     assert not runner.called_with_prefix("pkill", "-KILL")
     # Only one grace-period poll happened before the process was confirmed
     # gone, so only one sleep -- not all 5.
@@ -571,7 +591,7 @@ def test_stop_pipeline_waits_full_grace_period_before_sigkill(tmp_path):
 
     rc = step5._stop_pipeline(ctx, entry, sleep=_fake_sleep, grace_polls=3, grace_interval_s=0.01)
     assert rc == 0
-    assert runner.called_with_prefix("pkill", "-KILL", "-x", "deepstream-app")
+    assert runner.called_with_prefix("pkill", "-KILL", "-x", step5.DEEPSTREAM_APP_PROCESS)
 
     sigterm_idx = events.index("sigterm")
     sigkill_idx = events.index("sigkill")

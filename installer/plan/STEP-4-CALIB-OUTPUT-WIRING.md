@@ -245,11 +245,42 @@ The following equality checks remain unchanged:
 `deepstream_app_config.rendered.txt` is regenerated from the bundled
 `deepstream_app_config.txt`. It substitutes `CAM_USER`, `CAM_PASSWORD`, and
 `LOCATION_ID`, then rewrites each enabled `[sourceN]` URI from `CAMERAS_FILE`
-in inventory order.
+in inventory order. **REQUIRED:** every `[sourceN]` slot past the inventory is
+rendered `enable=0`. Left enabled on the template's placeholder URI, each one
+fails to connect and is retried for as long as the pipeline runs.
 
 The rendered config must keep relative references to
 `config_tracker_NvMOT.yml`, `config_infer_primary.txt`, and
 `msgconv_config.txt`. The latter two are copied verbatim beside it.
+`msgconv_config.txt` defines `[sensorN]`, `[placeN]`, and `[analyticsN]` for
+every index from 0 to 8, because `deepstream-test5-app` looks one up per
+message.
+
+**LOCKED:** templates reference the SDK only through the version-neutral
+`/opt/nvidia/deepstream/deepstream` symlink, never a `deepstream-9.x`
+directory. The 9.0 paths the templates carried broke the 9.1 pipeline;
+`tests/test_deepstream_templates.py` rejects any that return.
+
+### 6.3 ReID model
+
+The tracker's ReID stage uses NVIDIA TAO ReidentificationNet, the option
+DeepStream 9.1's `sources/tracker_ReID/README` recommends. DeepStream 9.1
+ships no `samples/models/Tracker/` directory, so Step 4 downloads the model
+before rendering the configs:
+
+| Item | Value |
+|---|---|
+| Source | `https://api.ngc.nvidia.com/v2/models/nvidia/tao/reidentificationnet/versions/deployable_v1.0/files/resnet50_market1501.etlt` |
+| Destination | `<install_dir>/deepstream/models/reid/resnet50_market1501.etlt`, owned by the invoking user |
+| Tracker keys | `tltEncodedModel`, `tltModelKey: "nvidia_tao"`, `modelEngineFile` beside it |
+| Engine | Built by DeepStream on first pipeline start (about a minute), then cached |
+
+The template's `ReID:` block is NVIDIA's own block from the 9.1
+`config_tracker_NvDCF_accuracy.yml`, with only the model paths changed. In
+particular the input is `inferDims: [3, 256, 128]` with `inputOrder: 0`; the
+earlier `[256, 128, 3]` / `inputOrder: 1` made the TensorRT engine build fail.
+A present model is not downloaded again, and `verify()` fails when it is
+missing.
 
 ---
 

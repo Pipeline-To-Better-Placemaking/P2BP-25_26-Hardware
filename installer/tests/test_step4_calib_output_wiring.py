@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -93,6 +94,7 @@ class Runner:
         status_payload=None,
         disable_rc=0,
         enabled_units=None,
+        reid_rc=0,
     ):
         self.states = list(states or ["COMPLETED"])
         self.archive = archive if archive is not None else _zip_bytes()
@@ -103,12 +105,18 @@ class Runner:
         self.status_payload = status_payload
         self.disable_rc = disable_rc
         self.enabled_units = enabled_units
+        self.reid_rc = reid_rc
         self.calls = []
 
     def __call__(self, *args, **kwargs):
         self.calls.append((args, kwargs))
         if args and args[0] == "curl":
             url = args[-1]
+            if url == step4.REID_MODEL_URL:
+                if self.reid_rc:
+                    return subprocess.CompletedProcess(args, self.reid_rc, "", "reid fetch failed")
+                pathlib.Path(args[args.index("-o") + 1]).write_bytes(b"etlt-model")
+                return subprocess.CompletedProcess(args, 0, "", "")
             if "/get_project_info/" in url:
                 if self.status_rc:
                     return subprocess.CompletedProcess(
@@ -812,6 +820,65 @@ def test_render_tracker_and_app_config(templates):
     )
     assert "uri=rtsp://operator:pw@10.0.0.8:554/stream" in app_text
     assert "topic=mv3dt/site-42/sv3d" in app_text
+
+
+def _source_enable(text, index):
+    block = step4._source_block(text, index)
+    return re.search(r"(?m)^enable=(\d)", block).group(1)
+
+
+def test_render_app_config_disables_slots_without_a_camera(templates):
+    """The template has eight [sourceN] slots. Slots past the inventory must
+    be disabled, not left enabled on a placeholder URI that deepstream-app
+    retries forever (2026-10-20 workstation run, two cameras)."""
+    cameras = [
+        SimpleNamespace(ip="10.0.0.8", rtsp_path="/stream"),
+        SimpleNamespace(ip="10.0.0.9", rtsp_path="/stream"),
+    ]
+    app_text = step4.render_app_config(
+        (templates / step4.APP_CONFIG_TEMPLATE_NAME).read_text(encoding="utf-8"),
+        cam_user="operator",
+        cam_password="pw",
+        location_id="site-42",
+        cameras=cameras,
+        template_path="template",
+        calibration_dir="calibration/site-42",
+    )
+    assert [_source_enable(app_text, i) for i in range(8)] == ["1", "1"] + ["0"] * 6
+
+
+def test_run_downloads_reid_model_once(tmp_path, templates):
+    runner = Runner()
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    model = ctx.install_dir / step4.REID_RELATIVE_DIR / step4.REID_MODEL_NAME
+    assert model.read_bytes() == b"etlt-model"
+    fetches = [a for a, _ in runner.calls if a and a[0] == "curl" and a[-1] == step4.REID_MODEL_URL]
+    assert len(fetches) == 1
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    fetches = [a for a, _ in runner.calls if a and a[0] == "curl" and a[-1] == step4.REID_MODEL_URL]
+    assert len(fetches) == 1
+
+
+def test_run_fails_when_reid_download_fails(tmp_path, templates):
+    runner = Runner(reid_rc=22)
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    result = step4.Step4CalibOutputWiring().run(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "ReID model download failed" in result.message
+    reid_dir = ctx.install_dir / step4.REID_RELATIVE_DIR
+    assert not any(reid_dir.glob("*")) if reid_dir.exists() else True
+
+
+def test_verify_requires_reid_model(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    (ctx.install_dir / step4.REID_RELATIVE_DIR / step4.REID_MODEL_NAME).unlink()
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "ReID model" in result.message
 
 
 # ---------------------------------------------------------------------------

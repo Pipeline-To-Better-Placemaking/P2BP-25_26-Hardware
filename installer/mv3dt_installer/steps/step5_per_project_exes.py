@@ -588,6 +588,17 @@ def ping_sweep_cameras(ctx: "Context") -> None:
 
 DEEPSTREAM_PROFILE = pathlib.Path("/etc/profile.d/deepstream.sh")
 
+#: The DeepStream app the pipeline runs. NVIDIA's MV3DT reference is built on
+#: deepstream-test5-app, which attaches the per-object event metadata the
+#: msgconv/msgbroker sink publishes; plain deepstream-app connects the sink
+#: but never gives it anything to send (workstation run, 2026-10-20). It
+#: reads the same config file format.
+DEEPSTREAM_APP = "deepstream-test5-app"
+
+#: Linux truncates a process name to 15 characters, and `pgrep -x`/`pkill -x`
+#: match that truncated name.
+DEEPSTREAM_APP_PROCESS = DEEPSTREAM_APP[:15]
+
 
 def source_deepstream_env(ctx: "Context") -> dict[str, str]:
     """Best-effort `. /etc/profile.d/deepstream.sh; env` diff, returned as
@@ -831,9 +842,9 @@ def _start_pipeline_foreground(
         config_path = preview_path
 
     ctx.log.info(render_validation_banner(entry))
-    ctx.log.info(f"Launching: deepstream-app -c {config_path.name} (cwd: {config_path.parent})")
+    ctx.log.info(f"Launching: {DEEPSTREAM_APP} -c {config_path.name} (cwd: {config_path.parent})")
 
-    argv = ["deepstream-app", "-c", str(config_path)]
+    argv = [DEEPSTREAM_APP, "-c", str(config_path)]
     if dry_run:
         ctx.log.info(f"[dry-run] cd {config_path.parent} && {' '.join(argv)}")
         return 0
@@ -844,7 +855,7 @@ def _start_pipeline_foreground(
     try:
         execv(binary, argv)
     except OSError as exc:
-        ctx.log.error(f"failed to exec deepstream-app: {exc}")
+        ctx.log.error(f"failed to exec {DEEPSTREAM_APP}: {exc}")
         return 1
     return 0  # pragma: no cover -- execv never returns on success
 
@@ -874,7 +885,7 @@ def _start_pipeline_service_exec(
     ensure_mosquitto(ctx)
     env_overlay = source_deepstream_env(ctx)
 
-    argv = ["deepstream-app", "-c", str(config_path)]
+    argv = [DEEPSTREAM_APP, "-c", str(config_path)]
     if dry_run:
         ctx.log.info(f"[dry-run] cd {config_path.parent} && {' '.join(argv)}")
         return 0
@@ -885,7 +896,7 @@ def _start_pipeline_service_exec(
     try:
         execv(binary, argv)
     except OSError as exc:
-        ctx.log.error(f"failed to exec deepstream-app: {exc}")
+        ctx.log.error(f"failed to exec {DEEPSTREAM_APP}: {exc}")
         return 1
     return 0  # pragma: no cover -- execv never returns on success
 
@@ -919,7 +930,7 @@ _STOP_GRACE_INTERVAL_S = 1.0
 
 
 def _pgrep_deepstream_running(ctx: "Context") -> bool:
-    result = ctx.run_root("pgrep", "-x", "deepstream-app", check=False, capture_output=True, text=True)
+    result = ctx.run_root("pgrep", "-x", DEEPSTREAM_APP_PROCESS, check=False, capture_output=True, text=True)
     return result.returncode == 0
 
 
@@ -966,8 +977,8 @@ def _stop_pipeline(
             ctx.log.info(f"Stopping {unit} (systemctl stop)")
             ctx.run_root("systemctl", "stop", unit, check=False, capture_output=True, text=True)
         elif _pgrep_deepstream_running(ctx):
-            ctx.log.info("Stopping deepstream-app (SIGTERM)")
-            ctx.run_root("pkill", "-TERM", "-x", "deepstream-app", check=False, capture_output=True, text=True)
+            ctx.log.info(f"Stopping {DEEPSTREAM_APP} (SIGTERM)")
+            ctx.run_root("pkill", "-TERM", "-x", DEEPSTREAM_APP_PROCESS, check=False, capture_output=True, text=True)
 
             still_running = True
             for _ in range(grace_polls):
@@ -977,12 +988,12 @@ def _stop_pipeline(
                 sleep(grace_interval_s)
 
             if still_running:
-                ctx.log.warn("deepstream-app still running after SIGTERM; sending SIGKILL")
+                ctx.log.warn(f"{DEEPSTREAM_APP} still running after SIGTERM; sending SIGKILL")
                 ctx.run_root(
-                    "pkill", "-KILL", "-x", "deepstream-app", check=False, capture_output=True, text=True
+                    "pkill", "-KILL", "-x", DEEPSTREAM_APP_PROCESS, check=False, capture_output=True, text=True
                 )
         else:
-            ctx.log.info("deepstream-app not running.")
+            ctx.log.info(f"{DEEPSTREAM_APP} not running.")
 
     if stop_amc:
         step3_mod.teardown_amc(ctx)
@@ -1403,7 +1414,7 @@ class Step5PerProjectExes:
         probe = ctx.run_root(
             "bash",
             "-c",
-            f'set +u; [ -f "{DEEPSTREAM_PROFILE}" ] && . "{DEEPSTREAM_PROFILE}"; command -v deepstream-app',
+            f'set +u; [ -f "{DEEPSTREAM_PROFILE}" ] && . "{DEEPSTREAM_PROFILE}"; command -v {DEEPSTREAM_APP}',
             check=False,
             capture_output=True,
             text=True,
@@ -1411,7 +1422,7 @@ class Step5PerProjectExes:
         if probe.returncode != 0:
             return StepResult(
                 status=StepStatus.USER_ACTION_REQUIRED,
-                message="deepstream-app is not resolvable after sourcing /etc/profile.d/deepstream.sh",
+                message=f"{DEEPSTREAM_APP} is not resolvable after sourcing /etc/profile.d/deepstream.sh",
                 user_actions=[UserAction(text="Complete Step 2 (DeepStream SDK install) first.")],
             )
 

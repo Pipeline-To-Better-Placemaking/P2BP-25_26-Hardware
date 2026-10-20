@@ -1065,6 +1065,27 @@ def _step_title(step_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _refresh_installed_binary(ctx: Context) -> None:
+    """Keep `<install_dir>/bin/mv3dt-installer` identical to the running
+    release on every install run.
+
+    The pipeline and record wrappers and the ingest, pipeline, and agent
+    units all run that copy, not the downloaded file. Step 3 creates it and
+    Step 5 rewrites it, but only when those steps run, so an upgrade whose
+    earlier steps are already complete would otherwise leave every one of
+    them on the previous release's code. Before Step 3 has created the copy
+    there is nothing to refresh.
+    """
+    from mv3dt_installer.steps import step3_amc_launcher
+
+    if not (ctx.install_dir / "bin" / step3_amc_launcher.INSTALLER_BIN_NAME).exists():
+        return
+    try:
+        step3_amc_launcher.ensure_installer_binary(ctx)
+    except OSError as exc:
+        ctx.log.warn(f"could not refresh the installed mv3dt-installer copy: {exc}")
+
+
 def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     """The core state-machine dispatch loop (doc 00 §3.2).
 
@@ -1099,6 +1120,8 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     fallback off a tty) is the renderer's, reached only through
     `ctx.progress`.
     """
+    _refresh_installed_binary(ctx)
+
     # Position is counted over every registered step, skipped ones
     # included, so the numbering stays absolute and agrees with the
     # renderer's denominator: an operator whose steps 6 and 7 are gated off

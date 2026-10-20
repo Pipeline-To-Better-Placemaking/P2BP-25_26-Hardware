@@ -207,9 +207,19 @@ resolving the config from the registry rather than the repo tree:
    (port lines 201–210).
 5. **Print the §10.2 validation helpers** ([§6](#6-validation--monitoring)),
    then `cd <install_dir>/deepstream` and
-   `exec deepstream-app -c <rendered_config>` (port lines 374–401). This is
-   the DS 9.1 `deepstream-app` entry point:
-   `deepstream-app -c <path_to_config_file>`.
+   `exec deepstream-test5-app -c <rendered_config>` (port lines 374–401).
+
+   > **RESOLVED (2026-10-20, live workstation): the pipeline runs
+   > `deepstream-test5-app`, not `deepstream-app`.** Both read the same config
+   > format, but plain `deepstream-app` never attaches the per-object event
+   > metadata the `[sink1]` msgconv/msgbroker sink publishes: it connected to
+   > Mosquitto and sent nothing. `deepstream-test5-app` builds a message per
+   > tracked object, and NVIDIA's MV3DT reference app is built on it. Its
+   > process name is truncated to `deepstream-test` (15 characters), which is
+   > what the stop path's `pgrep -x` / `pkill -x` match. Delivery to the
+   > broker is still to be confirmed on the workstation. Remaining
+   > `deepstream-app` mentions in this doc describe the original port and
+   > read as `deepstream-test5-app`.
 - **Flags** the subcommand honors, mirroring `50_start_pipeline.sh`:
   `--preview` (display-enabled config while keeping MQTT publish),
   `--config <path>` (override), `--skip-ping`, `--dry-run`. These are passed
