@@ -75,6 +75,11 @@ _MARKER_RE = re.compile(r"@[A-Z][A-Z0-9_]*@")
 #: outright by systemd's command-line parser.
 _UNQUOTABLE_RE = re.compile(r'["\\\x00-\x1f\x7f]')
 
+#: `systemctl is-enabled` states that mean the unit is wired to start on its
+#: own. systemctl also exits 0 for `static`, `indirect`, `alias`, and
+#: `generated`, none of which is "enabled" in the sense any caller asks about.
+_ENABLED_STATES = frozenset({"enabled", "enabled-runtime"})
+
 Runner = Callable[..., "subprocess.CompletedProcess[Any]"]
 
 
@@ -282,9 +287,25 @@ def is_active(name: str, runner: Runner = subprocess.run) -> bool:
 
 
 def is_enabled(name: str, runner: Runner = subprocess.run) -> bool:
-    """True when `systemctl is-enabled <name>` exits 0."""
-    result = runner(["systemctl", "is-enabled", "--quiet", name], check=False)
-    return _returncode(result) == 0
+    """True when `systemctl is-enabled <name>` reports `enabled` or
+    `enabled-runtime`.
+
+    Reads the printed state rather than trusting the exit status: systemctl
+    exits 0 for `static` too, and a `Type=oneshot` service with no
+    `[Install]` section -- Step 4's ingest `.service` -- is `static`. Trusting
+    the exit status reported that unit as enabled and failed Step 4's
+    `verify()` on a correct install.
+    """
+    result = runner(
+        ["systemctl", "is-enabled", name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if _returncode(result) != 0:
+        return False
+    lines = (getattr(result, "stdout", "") or "").strip().splitlines()
+    return bool(lines) and lines[0].strip() in _ENABLED_STATES
 
 
 # ---------------------------------------------------------------------------

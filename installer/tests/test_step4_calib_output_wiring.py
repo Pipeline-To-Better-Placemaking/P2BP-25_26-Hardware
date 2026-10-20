@@ -137,13 +137,20 @@ class Runner:
                     )
                 pathlib.Path(args[args.index("-o") + 1]).write_bytes(self.archive)
                 return subprocess.CompletedProcess(args, 0, "", "")
-        if args[:3] == ("systemctl", "is-enabled", "--quiet"):
+        if args[:2] == ("systemctl", "is-enabled"):
+            unit = args[-1]
             enabled = (
-                args[3].endswith(".timer")
+                unit.endswith(".timer")
                 if self.enabled_units is None
-                else args[3] in self.enabled_units
+                else unit in self.enabled_units
             )
-            return subprocess.CompletedProcess(args, 0 if enabled else 1, "", "")
+            if enabled:
+                return subprocess.CompletedProcess(args, 0, "enabled\n", "")
+            if unit.endswith(".service"):
+                # A oneshot service with no [Install] section: systemctl
+                # prints `static` and still exits 0, as on a real host.
+                return subprocess.CompletedProcess(args, 0, "static\n", "")
+            return subprocess.CompletedProcess(args, 1, "disabled\n", "")
         if args[:3] == ("systemctl", "disable", "--now"):
             return subprocess.CompletedProcess(
                 args,
@@ -713,6 +720,21 @@ def test_verify_complete_after_run(tmp_path, templates):
     step = step4.Step4CalibOutputWiring()
     assert step.run(ctx).status is StepStatus.COMPLETE
     assert step.verify(ctx).status is StepStatus.COMPLETE
+
+
+def test_verify_accepts_static_oneshot_service(tmp_path, templates):
+    """The ingest `.service` has no [Install] section, so systemctl reports it
+    `static` with exit 0. That is the correct, not-enabled state and must not
+    fail verify (the v0.4.10 workstation failure)."""
+    runner = Runner()
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert step.verify(ctx).status is StepStatus.COMPLETE
+    assert any(
+        args[:2] == ("systemctl", "is-enabled") and args[-1].endswith(".service")
+        for args, _ in runner.calls
+    )
 
 
 def test_verify_rejects_enabled_oneshot_service(tmp_path, templates):
