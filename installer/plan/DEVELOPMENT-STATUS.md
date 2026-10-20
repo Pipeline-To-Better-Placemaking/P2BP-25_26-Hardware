@@ -32,12 +32,12 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | Cameras in use | 2 of the 8 fleet cameras: `169.254.14.217` (`d0:3b:f4:02:44:84`) and `169.254.50.89` (`d0:3b:f4:02:44:87`) | 2026-10-20 | `ip neigh show dev enp8s0`; operator |
 | Camera main stream (`Streaming/Channels/101`) | H.264 Main, 1920x1080, 22 fps, plus a G.711 µ-law (`pcm_mulaw`) audio track | 2026-10-20 | `ffmpeg` probe of `169.254.50.89`; operator, for the fleet |
 | PoE interface | `enp8s0` up at `169.254.3.134/16` (link-local) via `Wired connection 1` | 2026-10-20 | `ip -br addr`, `nmcli` |
-| Active AMC project | `Kevin-House`; `Valencia-West` is no longer used | 2026-10-20 | operator |
-| Calibration | **Never completed successfully** on any project; Step 4 has never ingested a `transforms.yml` | 2026-10-20 | operator |
+| Location and AMC project | `LOCATION_ID=Kevin-House`; AMC project `Living-Room` (`20261019_151133_2885`). `Valencia-West` is no longer used | 2026-10-20 | `installer.conf`; `GET /v1/get_project_info` |
+| Calibration | **First successful calibration**: `Living-Room` is `COMPLETED` from two simultaneous 10-minute clips (1920x1080, recorded outside the installer and uploaded in the AMC UI). Step 4 ingested it as `Living-Room@20261020T170847Z`, installed the four DeepStream configs, deleted the footage folder, and enabled `mv3dt-ingest-living-room.timer` | 2026-10-20 | Step 4 transcript; AMC API |
 | Installer version on the workstation | not recorded | — | `./mv3dt-installer --version` |
-| Step completion | not recorded | — | `./mv3dt-installer --status` |
-| `Kevin-House` AMC project ID and state | not recorded | — | `AMC_PROJECT_ID` in `<install_dir>/installer.conf`, then `GET /v1/get_project_info/<id>` |
-| AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib` | 2026-09-25 | `docker ps`; `installer.conf` |
+| Step completion | Steps 1–3 complete; **Step 4 `FAILED` in `verify()`** with `mv3dt-ingest-living-room.service must not be enabled` — a false alarm: systemd reports that oneshot service `static`, which the check misread as enabled. Fixed on branch `fix/is-enabled-static`, pending release | 2026-10-20 | Step 4 transcript; `systemctl is-enabled` |
+| AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib`; `HOST_IP=192.168.4.106` (home network, baked into the AMC UI at container start) | 2026-10-20 | `docker ps`; `installer.conf`; `compose/.env` |
+| AMC network exposure | UI `5000` and API `8000` listen on all interfaces with no authentication; anyone on the same network can create, run, or delete projects | 2026-10-20 | `ss -tlnp` |
 | Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
 
 > **Swapping cameras invalidates the inventory.** Link-local IPs change with
@@ -59,7 +59,8 @@ the encode, not a downscale.
 | v0.4.9 | Discovery sweeps only carrier-up interfaces holding an address in `CAMERA_SCAN_CIDR`, never `--localnet` (PR #85); Step 4 polls quietly (PR #86); Step 4 records calibration footage for an `INIT` project and deletes it after ingest (PRs #87, #88) |
 | v0.4.10 | Footage re-encoded to 1920x1080 H.264 `yuv420p` instead of stream-copied (PR #29); the `/release` command (PR #30) |
 
-None of the v0.4.9 or v0.4.10 Step 4 paths has a recorded workstation run.
+Step 4's ingest path ran on the workstation on 2026-10-20; its footage
+recorder (v0.4.9, v0.4.10) has not.
 
 **Standing operator notes** — carried from earlier sessions, not installer
 defects, and not re-verified since 2026-09-25:
@@ -84,14 +85,13 @@ operator work; do not claim software automation has completed them.
 
 To resume on the workstation:
 
-1. **Record the missing rows** in the table above — installer version,
-   `--status`, `docker ps`, and the `installer.conf` keys — and date them.
-2. **Run the latest release without resetting state**
-   ([`installer/README.md` §3](../README.md#3-download-verify-run)), with
-   `--verbose`. Step 4 offers footage recording while `Kevin-House` is
-   `INIT`; have someone walk through the whole scene, upload the clips at
-   AMC's Video Upload step, and complete calibration. Step 4 continues on its
-   own when the project reaches `COMPLETED`.
+1. **Install the release carrying the `is_enabled` fix without resetting
+   state** ([`installer/README.md` §3](../README.md#3-download-verify-run)),
+   and run it with `--verbose`. Step 4 re-runs: the ingest is a no-op
+   (unchanged result) and `verify()` should now pass.
+2. **Record the installer version** in the table above.
+3. **Continue into Step 5** and collect live pipeline evidence
+   ([section 5](#5-what-remains)).
 
 Do not use `--reset-state`, purge NVIDIA packages, or delete AMC data. Treat
 any failure as evidence to diagnose from the full transcript before changing
@@ -329,12 +329,14 @@ calibration result:
   camera scan and position-binding flow automatically. Timer-driven re-ingest
   uses the same API path.
 
-The next acceptance milestone is the **first successful calibration on the
-live workstation**: record footage through Step 4 for `Kevin-House`, complete
-a real AMC calibration in the launched UI, and verify that Step 4 installs the
-exported `transforms.yml` and deletes the footage. No calibration has ever
-completed on this workstation
+The first successful calibration on the live workstation happened on
+2026-10-20 (`Living-Room`), and Step 4 ingested it; only its `verify()`
+failed, on a false alarm since fixed
 ([Current workstation state](#current-workstation-state-last-verified-2026-10-20)).
+The next acceptance milestone is **Step 4 passing `verify()` on the fixed
+release, then a live Step 5 pipeline run**. Footage for that calibration was
+recorded outside the installer, so Step 4's own footage recorder still has no
+workstation run.
 Unit tests and frozen-build CI cover the Step 4 branches but do not replace
 the camera and browser-backed run.
 
@@ -371,15 +373,10 @@ the camera and browser-backed run.
 
 The immediate priority is the live acceptance path, in this order:
 
-1. Run the latest release without resetting state. Confirm Step 4 offers
-   footage recording for the `INIT` `Kevin-House` project, records both
-   connected cameras into
-   `~/Downloads/mv3dt-calibration-footage/Kevin-House/`, and shows the upload
-   hint on a readable wait screen.
-2. Upload the clips, complete the actual AMC browser calibration, and let
-   Step 4 ingest its result. Verify the installed `transforms.yml`, the
-   rendered DeepStream configuration, and that the footage folder was
-   deleted.
+1. Release the `is_enabled` fix and rerun without resetting state; confirm
+   Step 4 reaches `COMPLETE`.
+2. Verify the installed `transforms.yml` and the rendered DeepStream
+   configuration under `/opt/mv3dt/deepstream/`.
 3. Only then run the real per-project pipeline/Step 5 path and collect live
    frame-flow evidence. The removed camera-free sample test is not a
    substitute. Diagnose any new failure from the complete workstation log
@@ -478,8 +475,8 @@ The operator's 2026-09-25 v0.4.7 and v0.4.8 fresh-install runs are the latest
 workstation **transcripts**; no v0.4.9 or v0.4.10 transcript has been
 supplied. The camera, network, and project facts dated 2026-10-20 in
 [Current workstation state](#current-workstation-state-last-verified-2026-10-20)
-come from live probes and the operator's report that day, not from an
-installer run.
+come from live probes, a Step 4 transcript, AMC's API, and the operator's
+report that day.
 
 - [apt `APT::Status-Fd`](https://manpages.debian.org/bookworm/apt/apt.conf.5.en.html)
   — **backs the apt integration described in [section 3.3](#33-the-progress-and-observability-subsystem)**:
