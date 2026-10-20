@@ -960,6 +960,12 @@ def _bootstrap_subcommand_context(
         )
         log_dir = pathlib.Path(known.log_dir) if known.log_dir else None
         open_transcript(log_dir)
+        # The install run loads secrets/camera.env into the config (see
+        # main()); a subcommand must too. Without this, `ingest` -- which
+        # the per-project ingest timer runs every 60 s -- stops at
+        # "configuration incomplete: CAM_USER, CAM_PASSWORD", so a
+        # recalibration was never ingested automatically.
+        _load_camera_credentials(cfg)
     else:
         cfg = _read_only_subcommand_config(known, sm)
 
