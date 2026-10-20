@@ -225,20 +225,33 @@ Files are owned by the invoking user in accordance with
 
 ### 6.1 Tracker YAML
 
-Step 4 copies and patches the bundled `config_tracker_NvMOT.yml`:
+**RESOLVED (2026-10-20, live workstation):** the bundled
+`config_tracker_NvMOT.yml` is NVIDIA's `deepstream-tracker-3d` reference
+`config_tracker_NvDCF_accuracy_3D.yml`, with only the changes its header
+lists. The earlier hand-written config configured single-view 3D through
+`SV3DT:` and `MV3DT:` sections that DeepStream does not have. Unknown
+top-level sections are ignored silently, so the tracker ran 2D only, and once
+3D was enabled through the real `ObjectModelProjection:` section that config
+crashed. The reference config ran stable with the same camera models.
+
+Step 4 renders one field:
 
 | Field | Value |
 |---|---|
-| `SV3DT.calibrationDirectory` | `calibration/<LOCATION_ID>` for the default, otherwise the absolute destination |
-| `MV3DT.nodeID` | `LOCATION_ID` |
+| `ObjectModelProjection.cameraModelFilepath` | One absolute path per enabled camera, in source order ([§6.4](#64-camera-models)) |
 
-The following equality checks remain unchanged:
+`verify()` requires that list to have one existing file per enabled camera,
+and `ObjectModelProjection.outputFootLocation == 1`.
 
-| Field | Required value |
-|---|---|
-| `SV3DT.projectionType` | `homography` |
-| `MV3DT.mqttBrokerIP` | `127.0.0.1` |
-| `MV3DT.mqttBrokerPort` | `1883` |
+The pipeline config pairs it with `tracker-width=1920` and
+`tracker-height=1088`: the camera models map to full-frame pixels, and the
+tracker requires both sizes to be multiples of 32. Its `[sink1]` uses
+`libnvds_msgconv_mega.so` with `msg-conv-payload-type=2` and
+`msg-conv-frame-interval=1`, producing one binary protobuf `nv.Frame` per
+camera frame (`sources/libs/nvmsgconv_mega/deepstream_schema/schema.proto` in
+the SDK). Each person carries `bbox3d` (x, y, z, width, length, height, ...)
+and `footLocation3D` in world coordinates; the default JSON converter carried
+neither.
 
 ### 6.2 Application config
 
@@ -281,6 +294,22 @@ particular the input is `inferDims: [3, 256, 128]` with `inputOrder: 0`; the
 earlier `[256, 128, 3]` / `inputOrder: 1` made the TensorRT engine build fail.
 A present model is not downloaded again, and `verify()` fails when it is
 missing.
+
+### 6.4 Camera models
+
+AMC's result ZIP carries one camera model per camera as
+`camInfo/camInfo_NN.yml`: a `projectionMatrix_3x4_w2p` and a `modelInfo`
+list of per-class entries. Step 4 converts each into
+`<install_dir>/deepstream/camera_models/camInfo_NN.yml`, keeping the matrix
+and flattening `modelInfo` to the `height`/`radius` map that NVIDIA's sample
+`camInfo.yml` and the proven workstation configuration use. A model count
+that differs from the enabled camera count fails the step.
+
+> **REQUIRED — camera order.** AMC names cameras `cam_00`, `cam_01`, ... in
+> upload order, and Step 4 pairs `camInfo_NN` with the NNth enabled camera in
+> the inventory. Upload the clips at AMC's Video Upload step in inventory
+> order. Mapping through AMC's `camera_name_map` instead is flagged
+> follow-up work.
 
 ---
 

@@ -123,8 +123,8 @@ config-file=config_infer_primary.txt
 
 [tracker]
 enable=1
-tracker-width=960
-tracker-height=544
+tracker-width=1920
+tracker-height=1088
 gpu-id=0
 ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so
 ll-config-file=config_tracker_NvMOT.yml
@@ -143,7 +143,9 @@ gpu-id=0
 enable=1
 type=6
 msg-conv-config=msgconv_config.txt
-msg-conv-payload-type=0
+msg-conv-payload-type=2
+msg-conv-msg2p-lib=/opt/nvidia/deepstream/deepstream/lib/libnvds_msgconv_mega.so
+msg-conv-frame-interval=1
 msg-broker-proto-lib=/opt/nvidia/deepstream/deepstream/lib/libnvds_mqtt_proto.so
 msg-broker-conn-str=127.0.0.1;1883
 topic=mv3dt/${LOCATION_ID}/sv3d
