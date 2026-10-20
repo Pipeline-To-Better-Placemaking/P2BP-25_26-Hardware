@@ -2296,6 +2296,45 @@ def test_subcommand_context_honours_verbose(monkeypatch, tmp_path):
     assert seen == {"non_interactive": False, "verbose": True}
 
 
+def test_root_subcommand_context_loads_camera_credentials(monkeypatch, tmp_path):
+    """`ingest` (run by the ingest timer) needs CAM_USER/CAM_PASSWORD, which
+    live in secrets/camera.env, not installer.conf. The subcommand context
+    must load them the way the install run does."""
+    from mv3dt_installer import camera_credentials
+
+    seen: dict = {}
+    cfg = SimpleNamespace(install_dir=tmp_path, values={})
+    monkeypatch.setattr(app.privilege, "require_root", lambda: None)
+    monkeypatch.setattr(
+        app.onboarding,
+        "run_platform_preflight",
+        lambda: InvokingUser(
+            name="tester", home=tmp_path, uid=os.getuid(), gid=os.getgid()
+        ),
+    )
+    monkeypatch.setattr(app.config_mod, "load", lambda *a, **k: cfg)
+    monkeypatch.setattr(app.config_mod, "remove_values", lambda *a, **k: None)
+    monkeypatch.setattr(app, "open_transcript", lambda *a, **k: None)
+    monkeypatch.setattr(
+        camera_credentials,
+        "load_credentials",
+        lambda install_dir: camera_credentials.Credentials("admin", "s3cret"),
+    )
+    monkeypatch.setattr(
+        app,
+        "build_context",
+        lambda cfg_, user, non_interactive, verbose=False: seen.update(cfg_.values),
+    )
+
+    app._bootstrap_subcommand_context(
+        ["ingest", "--project", "Living-Room", "--non-interactive"],
+        requires_root=True,
+        state_path=tmp_path / "state.json",
+    )
+
+    assert seen == {"CAM_USER": "admin", "CAM_PASSWORD": "s3cret"}
+
+
 def test_run_root_streaming_redacts_the_terminal_not_the_parsed_buffer(
     tmp_path, monkeypatch
 ):
