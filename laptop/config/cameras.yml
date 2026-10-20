@@ -32,10 +32,13 @@
 #    Re-derive with `arp-scan -l` on the camera LAN if the mapping is needed.)
 #
 # Native sensor resolution: 3072x1728 per camera.
-#   NOTE the deliberate mismatch: laptop/deepstream/deepstream_app_config.txt
-#   sets [streammux] width=1920 height=1080, so the pipeline downscales each
-#   3072x1728 source. That is a throughput choice, not an oversight — but it
-#   means detection runs at 1080p, not sensor resolution.
+# Main stream (/Streaming/Channels/101) as configured: H.264, 1920x1080 at
+#   22 fps (operator, 2026-10-20; previously left at the native 3072x1728).
+#   1080p matches AutoMagicCalib's input requirement and the [streammux]
+#   width=1920 height=1080 in laptop/deepstream/deepstream_app_config.txt, so
+#   the pipeline no longer downscales; detection still runs at 1080p, not
+#   sensor resolution. The stream also carries G.711 mu-law audio, which the
+#   installer's footage recorder drops (-an).
 #
 # CAVEAT — link-local IPs are volatile.
 #   These are 169.254.0.0/16 auto-configured addresses, NOT derived from the
