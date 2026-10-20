@@ -204,9 +204,9 @@ prefix until [§G.4](#g4-required-installer-changes) lands.
    > Timeouts are asymmetric: ~10 s to connect, ~300 s to read, because a large
    > clip legitimately takes minutes.
 
-3. **Confirm the upload.** **Blocked:** the Express backend has no confirm
-   route yet ([§G.3](#g3-gaps-and-decisions), gap 1); the shape below is the
-   ASP.NET contract it is expected to restore.
+3. **Confirm the upload.** **Deferred:** the Express backend has no confirm
+   route ([§G.3](#g3-gaps-and-decisions), gap 1); the shape below is the
+   ASP.NET contract it would restore.
 
    ```
    POST <endpoint>/api/cloud-storage/confirm-upload
@@ -685,8 +685,8 @@ route.
 | Concern | Installer calls today (`step7_webapp_integration.py`) | Express backend | State |
 |---|---|---|---|
 | Upload URL request | `POST /api/files/request-upload` | `POST /api/cloud-storage/request-upload` | **Mismatch** — installer changes ([§G.4](#g4-required-installer-changes)) |
-| Upload confirm | `POST /api/files/confirm-upload` | none — "Not ported" (`routes/cloudStorage.routes.ts`) | **Gap 1** ([§G.3](#g3-gaps-and-decisions)) |
-| Registration / status | `POST /api/Workstation/heartbeat` | none | **Gap 2** ([§G.3](#g3-gaps-and-decisions)) |
+| Upload confirm | `POST /api/files/confirm-upload` | none — "Not ported" (`routes/cloudStorage.routes.ts`) | **Gap 1, deferred** ([§G.3](#g3-gaps-and-decisions)) |
+| Registration / status | `POST /api/Workstation/heartbeat` | none | **Gap 2, deferred** ([§G.3](#g3-gaps-and-decisions)) |
 | Download URL request | not called | `POST /api/cloud-storage/request-download` | Available, unused ([§I](#i-out-of-scope--flag-for-human)) |
 
 Request and response rules the Express port pins down — **RESOLVED**, from
@@ -705,34 +705,31 @@ Request and response rules the Express port pins down — **RESOLVED**, from
 
 ### G.3 Gaps and decisions
 
-1. **Flagged — upload confirmation.** The Express backend has no media
-   service, so it has no confirm route. Phase 3 of
-   [§B.1](#b1-the-three-phases) therefore returns `404`, which
-   [§B.3](#b3-retry-policy-required) treats as non-retryable: every upload
-   would fail **after** its bytes reached storage. Either the web app ports
-   `POST /api/cloud-storage/confirm-upload` with its media service, or the
-   installer treats a successful `PUT` as completion while confirm is absent.
-   Decision for the human; until it is made, leave the web-app gate `off`.
-2. **Flagged — heartbeat route (proposal).** Proposed:
-   `POST /api/workstation/heartbeat` on a new `workstationRouter` guarded by
-   `requireDeviceApiKey`, following the `/api/scan-device` precedent. It
-   cannot live on `deviceRouter`, which applies user-JWT auth to every route
-   (`routes/device.routes.ts`). The handler stores the
-   [§D.1](#d1-the-status-payload) payload in the authenticated device's
-   `health_report` and responds with its `config` (`{}` when null) —
-   [§D.2](#d2-the-response-is-the-config) with no schema change, since both
-   columns already exist for the Jetson payloads. Express matches paths
-   case-insensitively by default, so the installer's current
-   `/api/Workstation/heartbeat` would reach it unchanged. Until the route
-   exists, `verify()` must not treat a `404` on it as an installation defect
-   — it surfaces `USER_ACTION_REQUIRED` pointing here
-   ([§H.1](#h1-lifecycle)).
-3. **Flagged — status field casing across planes.** [§D.1](#d1-the-status-payload)
-   and this module send `{"Active", "Sub"}`;
-   [`STEP-6` §C.5](STEP-6-REMOTE-SUPERVISION.md#c5-status--heartbeat-json-schema-desktop--cloud)'s
-   example and `step6_remote_supervision.py` publish lowercase `active` /
-   `sub`. The "identical field names" requirement both docs state is broken
-   in spec and code alike; pick one casing and change the other plane.
+**DEFERRED (2026-10-20, product owner).** None of the three gaps below is
+being worked on now. They are recorded so they are not rediscovered, and
+stay unresolved until this section is revisited.
+
+1. **Upload confirmation.** The Express backend has no media service, so it
+   has no confirm route, and phase 3 of [§B.1](#b1-the-three-phases) returns
+   `404`. [§B.3](#b3-retry-policy-required) treats that as non-retryable, so
+   every upload would fail **after** its bytes reached storage. The options
+   when revisited: the web app ports `POST /api/cloud-storage/confirm-upload`
+   with its media service, or the installer treats a successful `PUT` as
+   completion. Until then the uploader cannot succeed end to end; keep the
+   web-app gate `off`.
+2. **Heartbeat route.** There is no status route, so the reporter
+   ([§D](#d-registration-and-status)) has nothing to post to. The proposal on
+   record: `POST /api/workstation/heartbeat` on its own router guarded by
+   `requireDeviceApiKey` (not on `deviceRouter`, which requires a user JWT),
+   storing the [§D.1](#d1-the-status-payload) payload in the device's
+   `health_report` and returning its `config`. Until a route exists,
+   `verify()` must not treat a `404` on it as an installation defect — it
+   surfaces `USER_ACTION_REQUIRED` pointing here ([§H.1](#h1-lifecycle)).
+3. **Status field casing across planes.** [§D.1](#d1-the-status-payload) and
+   this module send `{"Active", "Sub"}`;
+   [`STEP-6` §C.5](STEP-6-REMOTE-SUPERVISION.md#c5-status--heartbeat-json-schema-desktop--cloud)
+   and `step6_remote_supervision.py` publish lowercase `active` / `sub`,
+   despite both docs requiring identical names.
 
 ### G.4 Required installer changes
 
@@ -742,8 +739,8 @@ To match [§G.2](#g2-route-table):
 | Constant | Today | Change to |
 |---|---|---|
 | `_REQUEST_UPLOAD_ROUTE` | `/api/files/request-upload` | `/api/cloud-storage/request-upload` |
-| `_CONFIRM_UPLOAD_ROUTE` | `/api/files/confirm-upload` | per [§G.3](#g3-gaps-and-decisions) decision 1 |
-| `WEBAPP_HEARTBEAT_ROUTE` | `/api/Workstation/heartbeat` | `/api/workstation/heartbeat` once decision 2 lands (lowercase for consistency; not required to work) |
+| `_CONFIRM_UPLOAD_ROUTE` | `/api/files/confirm-upload` | unchanged while [§G.3](#g3-gaps-and-decisions) gap 1 is deferred |
+| `WEBAPP_HEARTBEAT_ROUTE` | `/api/Workstation/heartbeat` | unchanged while [§G.3](#g3-gaps-and-decisions) gap 2 is deferred |
 
 Routes are always constructed as `<normalized ENDPOINT> + <route>`, never
 hardcoded with a host, and never assembled with `urljoin`
@@ -772,7 +769,7 @@ Implements the `Step` protocol
   (redacted per [`00` §14.4](00-FRAMEWORK-AND-BOOTSTRAP.md#144-redaction-required)).
   A `401`/`403` → `USER_ACTION_REQUIRED` ("the API key was rejected"). A `404`
   → `USER_ACTION_REQUIRED` pointing at the missing heartbeat route
-  ([§G.3](#g3-gaps-and-decisions), decision 2).
+  ([§G.3](#g3-gaps-and-decisions), gap 2).
 - All good → `COMPLETE`.
 
 #### `run(ctx)`

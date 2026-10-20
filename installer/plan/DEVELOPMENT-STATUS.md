@@ -38,14 +38,12 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | Step completion | not recorded | — | `./mv3dt-installer --status` |
 | `Kevin-House` AMC project ID and state | not recorded | — | `AMC_PROJECT_ID` in `<install_dir>/installer.conf`, then `GET /v1/get_project_info/<id>` |
 | AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib` | 2026-09-25 | `docker ps`; `installer.conf` |
-| Installed camera inventory | bound `…44:e2` and `…52:9a`, which are no longer connected | 2026-09-25 | `<install_dir>/cameras.yml` |
+| Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
 
-> **The installed camera inventory is almost certainly stale.** If
-> `<install_dir>/cameras.yml` still lists `…44:e2` and `…52:9a`, the pipeline
-> and the Step 4 footage recorder cannot reach the cameras in use. Refresh it
-> with `sudo ./mv3dt-installer --scan-cameras --camera-scan-iface enp8s0`
-> before recording
-> ([`00` §15](00-FRAMEWORK-AND-BOOTSTRAP.md#15-camera-discovery)).
+> **Swapping cameras invalidates the inventory.** Link-local IPs change with
+> the hardware, so after connecting a different camera, refresh with
+> `sudo ./mv3dt-installer --scan-cameras --camera-scan-iface enp8s0` before
+> recording ([`00` §15](00-FRAMEWORK-AND-BOOTSTRAP.md#15-camera-discovery)).
 
 The cameras' main streams already match the 1920x1080 AMC input requirement,
 so the v0.4.10 recorder's re-encode
@@ -88,8 +86,7 @@ To resume on the workstation:
 
 1. **Record the missing rows** in the table above — installer version,
    `--status`, `docker ps`, and the `installer.conf` keys — and date them.
-2. **Refresh the camera inventory** as the callout above describes.
-3. **Run the latest release without resetting state**
+2. **Run the latest release without resetting state**
    ([`installer/README.md` §3](../README.md#3-download-verify-run)), with
    `--verbose`. Step 4 offers footage recording while `Kevin-House` is
    `INIT`; have someone walk through the whole scene, upload the clips at
@@ -374,9 +371,9 @@ the camera and browser-backed run.
 
 The immediate priority is the live acceptance path, in this order:
 
-1. Refresh the camera inventory, then run the latest release without
-   resetting state. Confirm Step 4 offers footage recording for the `INIT`
-   `Kevin-House` project, records both connected cameras into
+1. Run the latest release without resetting state. Confirm Step 4 offers
+   footage recording for the `INIT` `Kevin-House` project, records both
+   connected cameras into
    `~/Downloads/mv3dt-calibration-footage/Kevin-House/`, and shows the upload
    hint on a readable wait screen.
 2. Upload the clips, complete the actual AMC browser calibration, and let
