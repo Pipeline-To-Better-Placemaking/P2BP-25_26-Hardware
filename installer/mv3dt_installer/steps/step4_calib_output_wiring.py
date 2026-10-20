@@ -760,12 +760,16 @@ def _render_reingest_units(ctx: "Context", *, inputs: ProjectInputs) -> dict[str
     installer = _systemd_value(ctx.install_dir / "bin" / step3_mod.INSTALLER_BIN_NAME)
     project = _systemd_value(inputs.project_name)
     install_dir = _systemd_value(ctx.install_dir)
+    user = _systemd_value(ctx.user.name)
     service = f"""[Unit]
 Description=Ingest AMC API result for project {project}
 After=docker.service network-online.target
 
 [Service]
 Type=oneshot
+# The installer refuses to run as root without a non-root invoking user
+# (doc 00 section 9.2). A systemd service has no sudo, so name the user here.
+Environment=SUDO_USER={user}
 ExecStart=\"{installer}\" ingest --project \"{project}\" --non-interactive --install-dir \"{install_dir}\"
 """
     timer = f"""[Unit]

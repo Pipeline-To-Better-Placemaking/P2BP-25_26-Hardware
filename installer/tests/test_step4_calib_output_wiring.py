@@ -664,6 +664,12 @@ def test_run_ingests_renders_and_installs_timer(tmp_path, templates):
         encoding="utf-8"
     )
     assert "OnUnitActiveSec=60s" in timer_text
+    service_text = (systemd.UNIT_DIR / "mv3dt-ingest-site-42.service").read_text(
+        encoding="utf-8"
+    )
+    # A root service has no sudo; without SUDO_USER the installer's
+    # preflight refuses to run, so the timer never ingested anything.
+    assert "Environment=SUDO_USER=operator" in service_text
     enabled_calls = [
         call[0][3]
         for call in ctx.runner.calls
