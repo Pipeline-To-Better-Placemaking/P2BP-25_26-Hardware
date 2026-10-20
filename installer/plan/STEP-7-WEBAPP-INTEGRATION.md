@@ -1,7 +1,14 @@
 # STEP 7 — Web-app integration over HTTP (owner: DevD)
 
-Status: NEW step, added after
-[`STEP-6-REMOTE-SUPERVISION.md`](STEP-6-REMOTE-SUPERVISION.md). It specifies the
+Status: step spec, implemented in `step7_webapp_integration.py` and shipped
+behind the opt-in web-app gate
+([`00` §3.4](00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)); **never run
+against a live backend.** The route names, auth, and wire shapes it depends
+on are owned by the web app repository, not by this doc —
+[§G](#g-route-table-reconciled-against-the-express-backend) records where the
+two agree and where they do not, and wins over any route named elsewhere in
+this doc. Added after
+[`STEP-6-REMOTE-SUPERVISION.md`](STEP-6-REMOTE-SUPERVISION.md), it specifies the
 `step7_webapp_integration` module. It builds strictly on the contracts in
 [`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — the
 step-module interface ([`00` §12](00-FRAMEWORK-AND-BOOTSTRAP.md#12-step-module-interface-the-contract-for-steps-15)),
@@ -28,8 +35,11 @@ Scope, from the product owner (LOCKED):
 2. File transfer uses a **three-phase signed-URL flow** — ask the backend for a
    pre-signed URL, `PUT` the bytes directly to storage, then confirm. Bytes
    never transit the API server.
-3. The desktop reuses the **same backend** as the existing P2BP camera nodes,
-   with its own routes ([§G](#g-route-table-open-decision)).
+3. The desktop uses the **P2BP web app's backend** — today the Express API in
+   [`P2BP-25_26-Web`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Web),
+   a port of the ASP.NET backend the camera nodes spoke to — authenticating
+   as a registered device
+   ([§G](#g-route-table-reconciled-against-the-express-backend)).
 4. The web app can trigger **one-shot operations** on the desktop and read
    their results ([§F](#f-web-app-initiated-operations)).
 5. The step is **opt-in** and defaults to off ([§H.2](#h2-gating-opt-in)); an
@@ -38,8 +48,11 @@ Scope, from the product owner (LOCKED):
    issuance — is flagged for the human ([§I](#i-out-of-scope--flag-for-human)).
 
 > **Provenance (REQUIRED reading for the implementer).** Every mechanism below
-> is ported from the P2BP Jetson camera-node agent, which has run this exact
-> contract against this backend in production. The source files are being
+> is ported from the P2BP Jetson camera-node agent, which ran this contract in
+> production against the ASP.NET backend. That backend has since been ported
+> to Express; the port kept the PascalCase DTOs and the device-key auth but
+> renamed and dropped routes, as
+> [§G](#g-route-table-reconciled-against-the-express-backend) records. The source files are being
 > removed from this fork — see
 > [`DELETION-REVIEW` §3](DELETION-REVIEW.md#3-deletions-gated-on-the-harvest-the-jetson-tree)
 > — so each mechanism is specified here **in full**, including the non-obvious
@@ -118,6 +131,11 @@ Fully specified by
 `<install_dir>/secrets/webapp.env`, `chmod 600`, `API_KEY` + normalized
 `ENDPOINT`, the normalization table, and the redaction rules. Step 7 adds only:
 
+- **`API_KEY` is a device API key** issued by the web app for a `devices` row
+  that represents this workstation
+  ([§G.1](#g1-authentication-and-key-issuance)); `ENDPOINT` is the web app's
+  origin (for example `https://<app>.vercel.app`), since the Express API and
+  the React build share one domain.
 - Both long-running units load the credential via `EnvironmentFile=` pointing
   at `secrets/webapp.env`. Because that file is `chmod 600` and owned by the
   invoking user, the units must run as that same user
@@ -148,10 +166,14 @@ API server entirely.
 
 ### B.1 The three phases
 
+Route names below are the Express backend's
+([§G.2](#g2-route-table)); the installer's constants still use an older
+prefix until [§G.4](#g4-required-installer-changes) lands.
+
 1. **Request an upload URL.**
 
    ```
-   POST <endpoint>/api/files/request-upload
+   POST <endpoint>/api/cloud-storage/request-upload
    Authorization: Bearer <API_KEY>
    Content-Type: application/json
 
@@ -162,7 +184,10 @@ API server entirely.
    Response is an `UploadUrlResponseDto` ([§C](#c-the-dto-contract)). An empty
    `SignedUrl` in an otherwise-`200` response is a **failure**, not a success —
    check it explicitly and raise, because the backend has been observed to
-   return `200` with an empty body field under load.
+   return `200` with an empty body field under load. The response's
+   `PathFromRoot` is the backend's sanitized **full object path**
+   (`vision/tracks-raw/tracks_events-20260810.jsonl`), not the directory that
+   was sent; never feed it back as a directory.
 
 2. **`PUT` the bytes to the signed URL.**
 
@@ -179,10 +204,12 @@ API server entirely.
    > Timeouts are asymmetric: ~10 s to connect, ~300 s to read, because a large
    > clip legitimately takes minutes.
 
-3. **Confirm the upload.**
+3. **Confirm the upload.** **Blocked:** the Express backend has no confirm
+   route yet ([§G.3](#g3-gaps-and-decisions), gap 1); the shape below is the
+   ASP.NET contract it is expected to restore.
 
    ```
-   POST <endpoint>/api/files/confirm-upload
+   POST <endpoint>/api/cloud-storage/confirm-upload
    {"PathFromRoot": "/vision/tracks-raw", "FileName": "tracks_events-20260810",
     "Extension": "jsonl"}
    ```
@@ -251,10 +278,9 @@ object is the worst outcome: the bytes are in storage, paid for, and invisible.
 
 ## C. The DTO contract
 
-**RESOLVED — field names are fixed by the existing backend.** Per the "same
-backend, new endpoints" decision ([§G](#g-route-table-open-decision)), the
-routes are open but the payload shapes are not: these are the wire types the
-backend already serializes, in PascalCase. Renaming a field to a more
+**RESOLVED — field names are fixed by the backend.** These are the wire
+types the backend serializes, in PascalCase, and the Express port kept them
+verbatim ([§G.2](#g2-route-table)). Renaming a field to a more
 Pythonic form breaks deserialization server-side. They are inlined here in full
 because their source file is being removed.
 
@@ -621,25 +647,103 @@ never blocks the acknowledgement.
 
 ---
 
-## G. Route table (open decision)
+## G. Route table (reconciled against the Express backend)
 
-Per the product owner: **same backend, new endpoints.** The auth scheme, the
-DTO field names ([§C](#c-the-dto-contract)), the three-phase upload flow, and
-the normalization rules are all settled and carry over unchanged. Only the
-route *names* for the workstation are open.
+**LOCKED — the web app repository is the source of truth for route names,
+authentication, and wire shapes.** This section mirrors
+[`P2BP-25_26-Web`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Web)
+at commit `346796c` (2026-10-13), the Express API under
+`BetterPlacemaking.SERVER.EXPRESS/src/`. Where the two disagree, the web app
+wins: this section and `step7_webapp_integration.py` change to match it, never
+the other way round. Re-check this section whenever either side touches a
+route.
 
-| Concern | Existing camera-node route | Desktop route | State |
+### G.1 Authentication and key issuance
+
+**RESOLVED** by the Express port (`middleware/requireDeviceApiKey.ts`,
+`services/deviceService.ts`):
+
+- The workstation is a row in the web app's `devices` table (`id`,
+  `project_id`, `name`, `config` jsonb, `health_report` jsonb,
+  `api_key_hash`).
+- Every request carries `Authorization: Bearer <raw device API key>`. The
+  backend hashes it (SHA-256, base64) and matches `devices.api_key_hash`;
+  a missing or unknown key is `401` with `{"Message": "..."}`.
+- **Issuance:** a user holding `Project.Devices.Manage` calls
+  `POST /api/device/project/<projectId>/<deviceId>/apikey` and receives
+  `{"ApiKey": "<raw key>"}` — the value onboarding captures as `API_KEY`
+  ([`00` §14.3](00-FRAMEWORK-AND-BOOTSTRAP.md#143-capture--handoff-api-webapppy)).
+  The device row itself is created with `POST /api/device/project/<projectId>`.
+- **Rotation:** calling the `apikey` route again overwrites the stored hash,
+  so the old key stops working immediately. Re-run onboarding with the new
+  key.
+- The `/api/cloud-storage/*` routes accept either a user JWT or a device key
+  (`requireUserOrDeviceAuth`), trying the JWT first.
+
+### G.2 Route table
+
+| Concern | Installer calls today (`step7_webapp_integration.py`) | Express backend | State |
 |---|---|---|---|
-| Registration / status | `POST /api/Device/heartbeat` | `POST /api/Workstation/heartbeat` | **proposed — confirm with the backend owner** |
-| Upload URL request | `POST /api/files/request-upload` | unchanged | settled — the file service is generic |
-| Upload confirm | `POST /api/files/confirm-upload` | unchanged | settled |
+| Upload URL request | `POST /api/files/request-upload` | `POST /api/cloud-storage/request-upload` | **Mismatch** — installer changes ([§G.4](#g4-required-installer-changes)) |
+| Upload confirm | `POST /api/files/confirm-upload` | none — "Not ported" (`routes/cloudStorage.routes.ts`) | **Gap 1** ([§G.3](#g3-gaps-and-decisions)) |
+| Registration / status | `POST /api/Workstation/heartbeat` | none | **Gap 2** ([§G.3](#g3-gaps-and-decisions)) |
+| Download URL request | not called | `POST /api/cloud-storage/request-download` | Available, unused ([§I](#i-out-of-scope--flag-for-human)) |
 
-> **Flagged for human.** The `/api/Workstation/*` name is a working proposal,
-> not a decision. It must be confirmed against the deployed API before
-> implementation, and this table updated with a **RESOLVED** marker naming who
-> confirmed it. Until then `verify()` must not treat a `404` on the
-> registration route as an installation defect — it surfaces
-> `USER_ACTION_REQUIRED` pointing here ([§H.1](#h1-lifecycle)).
+Request and response rules the Express port pins down — **RESOLVED**, from
+`services/cloudStorageService.ts`:
+
+| Field or behavior | Backend rule |
+|---|---|
+| DTO field names | Identical to [§C](#c-the-dto-contract): `PathFromRoot`, `FileName`, `Extension`, `SizeBytes`; response `PathFromRoot`, `SignedUrl`, `ExpiresAt` |
+| `Extension` | Accepted with or without the leading `.`; lowercased; letters and digits only, else `400` |
+| `PathFromRoot` | `\` becomes `/`; leading, trailing, and repeated `/` are collapsed; any character other than letters, digits, `-`, `_`, `:`, `.`, and space becomes `_` |
+| `SizeBytes` | Must be `> 0`, else `400` — consistent with [§B.4](#b4-preconditions-and-refusals) |
+| Validation failure | `400` with `{"Message": "..."}` — non-retryable under [§B.3](#b3-retry-policy-required) |
+| `SignedUrl` | A Supabase Storage signed upload URL, valid 2 hours, created with `upsert` — a second upload to the same path overwrites |
+| Object size | Bounded by the Supabase project's per-file upload limit; check it before shipping recorded clips ([§E.1](#e1-what-gets-uploaded)) |
+| Hosting | One Vercel serverless function: 30 s per request and 4.5 MB request bodies. The status POST is far below both; file bytes never touch it |
+
+### G.3 Gaps and decisions
+
+1. **Flagged — upload confirmation.** The Express backend has no media
+   service, so it has no confirm route. Phase 3 of
+   [§B.1](#b1-the-three-phases) therefore returns `404`, which
+   [§B.3](#b3-retry-policy-required) treats as non-retryable: every upload
+   would fail **after** its bytes reached storage. Either the web app ports
+   `POST /api/cloud-storage/confirm-upload` with its media service, or the
+   installer treats a successful `PUT` as completion while confirm is absent.
+   Decision for the human; until it is made, leave the web-app gate `off`.
+2. **Flagged — heartbeat route (proposal).** Proposed:
+   `POST /api/workstation/heartbeat` on a new `workstationRouter` guarded by
+   `requireDeviceApiKey`, following the `/api/scan-device` precedent. It
+   cannot live on `deviceRouter`, which applies user-JWT auth to every route
+   (`routes/device.routes.ts`). The handler stores the
+   [§D.1](#d1-the-status-payload) payload in the authenticated device's
+   `health_report` and responds with its `config` (`{}` when null) —
+   [§D.2](#d2-the-response-is-the-config) with no schema change, since both
+   columns already exist for the Jetson payloads. Express matches paths
+   case-insensitively by default, so the installer's current
+   `/api/Workstation/heartbeat` would reach it unchanged. Until the route
+   exists, `verify()` must not treat a `404` on it as an installation defect
+   — it surfaces `USER_ACTION_REQUIRED` pointing here
+   ([§H.1](#h1-lifecycle)).
+3. **Flagged — status field casing across planes.** [§D.1](#d1-the-status-payload)
+   and this module send `{"Active", "Sub"}`;
+   [`STEP-6` §C.5](STEP-6-REMOTE-SUPERVISION.md#c5-status--heartbeat-json-schema-desktop--cloud)'s
+   example and `step6_remote_supervision.py` publish lowercase `active` /
+   `sub`. The "identical field names" requirement both docs state is broken
+   in spec and code alike; pick one casing and change the other plane.
+
+### G.4 Required installer changes
+
+`step7_webapp_integration.py` defines the three routes as module constants.
+To match [§G.2](#g2-route-table):
+
+| Constant | Today | Change to |
+|---|---|---|
+| `_REQUEST_UPLOAD_ROUTE` | `/api/files/request-upload` | `/api/cloud-storage/request-upload` |
+| `_CONFIRM_UPLOAD_ROUTE` | `/api/files/confirm-upload` | per [§G.3](#g3-gaps-and-decisions) decision 1 |
+| `WEBAPP_HEARTBEAT_ROUTE` | `/api/Workstation/heartbeat` | `/api/workstation/heartbeat` once decision 2 lands (lowercase for consistency; not required to work) |
 
 Routes are always constructed as `<normalized ENDPOINT> + <route>`, never
 hardcoded with a host, and never assembled with `urljoin`
@@ -667,8 +771,8 @@ Implements the `Step` protocol
   registration route. A connection failure → `FAILED` with the endpoint shown
   (redacted per [`00` §14.4](00-FRAMEWORK-AND-BOOTSTRAP.md#144-redaction-required)).
   A `401`/`403` → `USER_ACTION_REQUIRED` ("the API key was rejected"). A `404`
-  → `USER_ACTION_REQUIRED` pointing at the open route decision
-  ([§G](#g-route-table-open-decision)).
+  → `USER_ACTION_REQUIRED` pointing at the missing heartbeat route
+  ([§G.3](#g3-gaps-and-decisions), decision 2).
 - All good → `COMPLETE`.
 
 #### `run(ctx)`
@@ -757,14 +861,18 @@ app can consume either without a second model.
 - **The web app itself** — its UI, its API implementation, per-host dashboards,
   and how it authorizes an operator to trigger an operation. Step 7 defines
   only the desktop half and the contract it honors.
-- **Route confirmation** — the `/api/Workstation/*` names in
-  [§G](#g-route-table-open-decision) are proposed, not agreed.
-- **API-key issuance, scoping, and rotation** — the framework stores a key
+- **Building the missing backend routes** — the confirm and heartbeat routes
+  in [§G.3](#g3-gaps-and-decisions) are web-app work; this step only states
+  the contract they must meet.
+- **API-key provisioning** — the framework stores a key
   ([`00` §14](00-FRAMEWORK-AND-BOOTSTRAP.md#14-web-app-connection-contract))
-  but never provisions one. Mirrors the treatment of broker credentials in
+  but never provisions one; an operator issues it through the web app
+  ([§G.1](#g1-authentication-and-key-issuance)). Mirrors the treatment of
+  broker credentials in
   [`STEP-6` §8](STEP-6-REMOTE-SUPERVISION.md#8-out-of-scope--flag-for-human).
-- **Download/restore flows** — the DTO pair exists in the backend contract
-  ([§C](#c-the-dto-contract)) but no Step 7 path fetches artifacts back.
+- **Download/restore flows** — the backend serves
+  `POST /api/cloud-storage/request-download`
+  ([§G.2](#g2-route-table)), but no Step 7 path fetches artifacts back.
 - **Retention policy on the backend** — [§E.4](#e4-disk-pressure-remediation)
   manages *local* disk only. How long the web app keeps an uploaded artifact is
   a cloud-side decision.
@@ -777,10 +885,22 @@ app can consume either without a second model.
 ## References
 
 No DeepStream 9.1 documentation is cited: nothing in this step is a DeepStream
-fact. The authority for the transport, the DTO field names, and the failure
-handling is the deployed P2BP backend and the camera-node agent that has been
-speaking to it — captured here in full because those sources are leaving this
+fact. The authority for route names, authentication, and wire shapes is the
+web app repository
+([§G](#g-route-table-reconciled-against-the-express-backend)); the authority for
+the failure handling is the camera-node agent that spoke to the original
+ASP.NET backend — captured here in full because those sources are leaving this
 fork.
+
+- <https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Web> — the web
+  app; **the source of truth for every route in §G**. Files read at commit
+  `346796c`: `BetterPlacemaking.SERVER.EXPRESS/src/app.ts` (router mounts),
+  `routes/cloudStorage.routes.ts` (upload/download routes, the unported
+  confirm), `services/cloudStorageService.ts` (path, extension, and URL rules),
+  `middleware/requireDeviceApiKey.ts` and `requireUserOrDeviceAuth.ts`
+  (device auth), `routes/device.routes.ts` and `services/deviceService.ts`
+  (device rows and key issuance), `db/schema/devices.ts` (`config` /
+  `health_report` columns), and `docs/DEPLOY.md` (Vercel limits).
 
 Repo files referenced:
 
