@@ -20,15 +20,20 @@ Two rules this module enforces rather than documents:
 * `render_unit` raises if any marker survives substitution. A half-rendered
   unit file is worse than a missing one -- systemd would accept it and then
   behave in a way nobody wrote down.
-* `enable_now` refuses when the unit's `ExecStart` binary is absent. The ingest
-  units point at `<install_dir>/bin/mv3dt-installer`, which STEP-3 creates and
-  STEP-3 is unimplemented, so a unit enabled today would fail on every single
-  trigger. Refusing loudly is correct until that lands.
+* `enable_now` refuses when the unit's `ExecStart` binary is absent. The
+  installed units point at `<install_dir>/bin/mv3dt-installer`; a unit enabled
+  before that binary exists would fail on every single trigger.
 
-**Only the `.path` unit is ever enabled.** Its paired `.service` is
-`Type=oneshot` and is owned by the path unit's lifecycle; enabling both makes
-the boot-time state race the path trigger (STEP-6 section A.4's lesson, and the
-carve-out spelled out in section B.1).
+**Only the trigger unit is ever enabled.** Step 4's ingest pair is a `.timer`
+plus a `Type=oneshot` `.service` that Step 4 renders inline
+(`STEP-4-CALIB-OUTPUT-WIRING.md` section 7); only the `.timer` is enabled, and
+the `.service` is owned by its lifecycle. Enabling both makes the boot-time
+state race the trigger (STEP-6 section A.4's lesson, and the carve-out spelled
+out in section B.1).
+
+`render_ingest_units` and the `mv3dt-ingest.path.in` / `mv3dt-ingest.service.in`
+templates are the superseded `.path` design. Nothing in the installer calls
+them; they remain only until they are removed.
 
 Every `systemctl` invocation goes through an injected `runner`, defaulting to
 `subprocess.run`, so tests never touch real systemd. The runner is called with
@@ -135,6 +140,10 @@ def render_ingest_units(
     installer_bin: str | pathlib.Path,
 ) -> dict[str, str]:
     """Render the auto-ingest `.path`/`.service` pair for one project.
+
+    **Unused.** Step 4 replaced this `.path` design with an API-polling
+    `.timer` it renders inline (`STEP-4-CALIB-OUTPUT-WIRING.md` section 7);
+    see the module docstring.
 
     Returns a mapping of unit file name to rendered content, ready to hand to
     `install_unit`::

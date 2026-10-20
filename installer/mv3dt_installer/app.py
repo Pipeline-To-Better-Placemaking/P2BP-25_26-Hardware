@@ -784,15 +784,11 @@ def register_subcommand(
 
         app.register_subcommand("amc", _handle_amc)
 
-    Note the asymmetry with `steps.register()`: that registry is populated
-    by importing `steps/__init__.py`'s own package, which is not the case
-    here -- nothing today imports `step3_amc_launcher` (or any other step
-    module) as a side effect of importing `app`, so `SUBCOMMAND_REGISTRY`
-    stays empty in a process that never explicitly imports a step module.
-    `__main__.py` gains that import once Step 3 (and later steps) actually
-    exist as importable modules; wiring that up is a pre-existing gap
-    shared with `STEP_REGISTRY` (see that registry's own docstring) and is
-    out of scope for this extension point itself.
+    Importing `app` does not import any step module, so
+    `SUBCOMMAND_REGISTRY` stays empty in a process that never explicitly
+    imports one. `__main__.py` imports all seven step modules for exactly
+    that side effect, which populates both this registry and
+    `STEP_REGISTRY`.
 
     `requires_root` (unit U6's fix for a cross-cutting defect PR #50's
     review surfaced): whether `_bootstrap_subcommand_context()` must call

@@ -2,20 +2,20 @@
 #
 # PyInstaller build recipe for mv3dt-installer (doc 00 §2, §4.1).
 #
-# Build (run from the repo root, per doc 00 §4.1):
-#   python3 -m pip install --user pyinstaller
-#   pyinstaller installer/installer.spec --distpath installer/dist \
-#       --workpath /tmp/mv3dt-build
-#
-# Produces a single self-contained executable:
-#   installer/dist/mv3dt-installer
+# Build (run from the repo root). The release job (doc 00 §4.1) runs:
+#   pyinstaller installer/installer.spec --distpath dist \
+#       --workpath /tmp/mv3dt-build --clean --noconfirm
+# producing dist/mv3dt-installer at the repo root. The local build in
+# installer/README.md section 8.3 passes --distpath installer/dist instead,
+# producing installer/dist/mv3dt-installer. Either way the output is one
+# self-contained executable.
 #
 # Bundled data is unpacked at runtime into sys._MEIPASS and resolved via
 # mv3dt_installer.shellout.asset_path() (doc 00 §4.2). This spec ships two
 # kinds of data:
 #   1. Everything already under mv3dt_installer/assets/ (bundled bash
-#      fragments, the tracked mosquitto/mv3dt.conf copy, plus whatever
-#      config templates later steps drop there).
+#      fragments, the tracked mosquitto/mv3dt.conf and cameras/cameras.yml
+#      copies, and the systemd and polkit unit templates).
 #   2. The DeepStream config templates that still live under laptop/
 #      (tracker/infer/app/msgconv), pulled in directly from the laptop/
 #      harness at build time so the single binary is self-contained
