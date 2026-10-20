@@ -746,8 +746,8 @@ def render_validation_banner(entry: ProjectEntry, *, topic_base: str = "mv3dt") 
     """Section 6, verbatim wording."""
     return (
         "\n[validation helpers -- SCRIPTED-WORKFLOW section 10.2]\n"
-        f"  # MV3DT/SV3DT tracks (topic base {topic_base}):\n"
-        f"  mosquitto_sub -h 127.0.0.1 -t '{topic_base}/#' -v\n\n"
+        f"  # Per-frame 3D track messages (binary protobuf, nv.Frame; topic base {topic_base}):\n"
+        f"  mosquitto_sub -h 127.0.0.1 -t '{topic_base}/#' -F '%t %l bytes'\n\n"
         "  # GPU utilization / memory / temperature:\n"
         "  watch -n 1 'nvidia-smi --query-gpu=utilization.gpu,memory.used,temperature.gpu --format=csv'\n\n"
         "  # Broker health:\n"

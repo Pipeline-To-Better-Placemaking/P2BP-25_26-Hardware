@@ -85,6 +85,14 @@ REID_MODEL_URL = (
 REID_MODEL_NAME = "resnet50_market1501.etlt"
 REID_RELATIVE_DIR = pathlib.Path("deepstream") / "models" / "reid"
 
+# Single-view 3D tracking needs one camera model per camera
+# (ObjectModelProjection.cameraModelFilepath). AMC's export carries them as
+# camInfo/camInfo_NN.yml; Step 4 converts each into
+# <install_dir>/deepstream/camera_models/ and lists them in source order.
+AMC_CAMERA_MODEL_DIR = "camInfo"
+CAMERA_MODEL_DIR_NAME = "camera_models"
+_CAMERA_MODEL_MATRIX_KEYS = ("projectionMatrix_3x4_w2p", "projectionMatrix_3x4")
+
 
 class AmcApiError(RuntimeError):
     """A fatal response or invalid result from the local AMC service."""
@@ -543,17 +551,89 @@ def _chown_tree(ctx: "Context", root: pathlib.Path) -> None:
             pass
 
 
-_NODE_ID_RE = re.compile(r"(?m)^(\s*nodeID:\s*).*$")
-_CALIBRATION_DIR_RE = re.compile(r"(?m)^(\s*calibrationDirectory:\s*).*$")
+_CAMERA_MODEL_PLACEHOLDER_RE = re.compile(
+    r"(?m)^([ \t]*)- \$\{CAMERA_MODEL_FILEPATH\}[ \t]*$"
+)
 
 
-def render_tracker_yaml(
-    template_text: str, *, location_id: str, calibration_directory: str
-) -> str:
-    text = _NODE_ID_RE.sub(lambda m: m.group(1) + location_id, template_text, count=1)
-    return _CALIBRATION_DIR_RE.sub(
-        lambda m: m.group(1) + calibration_directory, text, count=1
-    )
+def render_tracker_yaml(template_text: str, *, camera_model_files: list) -> str:
+    """Expand the `- ${CAMERA_MODEL_FILEPATH}` line into one list entry per
+    camera model, in source order."""
+
+    def expand(match: "re.Match[str]") -> str:
+        indent = match.group(1)
+        return "\n".join(f"{indent}- {path}" for path in camera_model_files)
+
+    text, count = _CAMERA_MODEL_PLACEHOLDER_RE.subn(expand, template_text, count=1)
+    if count != 1:
+        raise ValueError("tracker template has no ${CAMERA_MODEL_FILEPATH} entry")
+    return text
+
+
+def convert_camera_model(text: str) -> str:
+    """Convert one AMC camInfo file into the form DS 9.1's tracker loads.
+
+    AMC 3.2.1 writes `modelInfo` as a list of per-class entries
+    (`- classID: 1, height, radius`). NVIDIA's sample camInfo.yml, and the
+    configuration proven on the workstation on 2026-10-20, use a single
+    `modelInfo: {height, radius}` map. The projection matrix is kept under
+    its original key.
+    """
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError("camera model is not a YAML mapping")
+    key = next((k for k in _CAMERA_MODEL_MATRIX_KEYS if k in data), None)
+    if key is None:
+        raise ValueError(
+            "camera model has neither projectionMatrix_3x4_w2p nor projectionMatrix_3x4"
+        )
+    matrix = [float(value) for value in data[key]]
+    if len(matrix) != 12:
+        raise ValueError(f"{key} has {len(matrix)} values, expected 12")
+    info = data.get("modelInfo")
+    if isinstance(info, list):
+        info = info[0] if info else None
+    if not isinstance(info, dict) or "height" not in info or "radius" not in info:
+        raise ValueError("camera model modelInfo needs height and radius")
+    lines = [f"{key}:"]
+    lines += [f"  - {value!r}" for value in matrix]
+    lines += [
+        "modelInfo:",
+        f"  height: {float(info['height'])!r}",
+        f"  radius: {float(info['radius'])!r}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _write_camera_models(
+    ctx: "Context", calibration_dir: pathlib.Path, camera_count: int
+) -> list:
+    """Convert AMC's camInfo_NN.yml files into the camera-model directory and
+    return their paths in source order.
+
+    **REQUIRED:** AMC camera N must be the Nth enabled camera in the
+    inventory -- upload the clips at AMC's Video Upload step in inventory
+    order. AMC names them cam_00, cam_01, ... in upload order.
+    """
+    sources = sorted((calibration_dir / AMC_CAMERA_MODEL_DIR).glob("camInfo_*.yml"))
+    if len(sources) != camera_count:
+        raise ValueError(
+            f"AMC result has {len(sources)} camera model(s) under "
+            f"{calibration_dir / AMC_CAMERA_MODEL_DIR} for {camera_count} enabled "
+            "camera(s); 3D tracking needs exactly one per camera"
+        )
+    out_dir = ctx.install_dir / "deepstream" / CAMERA_MODEL_DIR_NAME
+    paths = []
+    for source in sources:
+        try:
+            converted = convert_camera_model(source.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, TypeError, ValueError) as exc:
+            raise ValueError(f"{source}: {exc}") from exc
+        target = out_dir / source.name
+        _write_text_report(ctx, target, converted, label=f"camera model {source.name}")
+        paths.append(target)
+    _chown_tree(ctx, out_dir)
+    return paths
 
 
 def _parse_tracker_yaml(text: str) -> Optional[dict]:
@@ -606,7 +686,7 @@ def render_app_config(
     text = _SOURCE_BLOCK_RE.sub(replace_source, text)
     return (
         "# Rendered by mv3dt-installer step4_calib_output_wiring\n"
-        f"# Source template: {template_path}\n"
+        f"# Source template: {pathlib.PurePath(template_path).name}\n"
         f"# Calibration dir: {calibration_dir}\n"
         f"# LOCATION_ID    : {location_id}\n"
         "# Edit the committed template, not this file; it is regenerated.\n\n" + text
@@ -618,12 +698,6 @@ def _source_block(text: str, index: int) -> str:
     return match.group(0) if match else ""
 
 
-def _calibration_directory_value(
-    ctx: "Context", location_id: str, calibration_dir: pathlib.Path
-) -> str:
-    if calibration_dir == default_calibration_dir(ctx, location_id):
-        return f"calibration/{location_id}"
-    return str(calibration_dir)
 
 
 def _write_text_report(
@@ -697,16 +771,17 @@ def _ensure_reid_model(ctx: "Context") -> Optional[str]:
 
 
 def _render_configs(
-    ctx: "Context", *, inputs: ProjectInputs, calibration_dir: pathlib.Path
+    ctx: "Context",
+    *,
+    inputs: ProjectInputs,
+    calibration_dir: pathlib.Path,
+    camera_model_files: list,
 ) -> None:
     deepstream_dir = ctx.install_dir / "deepstream"
     tracker_template_path = ctx.asset_path("deepstream", TRACKER_YAML_TEMPLATE_NAME)
     tracker_text = render_tracker_yaml(
         tracker_template_path.read_text(encoding="utf-8"),
-        location_id=inputs.location_id,
-        calibration_directory=_calibration_directory_value(
-            ctx, inputs.location_id, calibration_dir
-        ),
+        camera_model_files=[str(path) for path in camera_model_files],
     )
     _write_text_report(
         ctx,
@@ -1068,7 +1143,18 @@ def _wire_download(
     reid_failure = _ensure_reid_model(ctx)
     if reid_failure is not None:
         return StepResult(status=StepStatus.FAILED, message=reid_failure)
-    _render_configs(ctx, inputs=inputs, calibration_dir=dest)
+    try:
+        camera_model_files = _write_camera_models(
+            ctx, dest, len(_load_enabled_cameras(ctx))
+        )
+        _render_configs(
+            ctx,
+            inputs=inputs,
+            calibration_dir=dest,
+            camera_model_files=camera_model_files,
+        )
+    except ValueError as exc:
+        return StepResult(status=StepStatus.FAILED, message=str(exc))
     _delete_footage_after_ingest(ctx, inputs)
     return StepResult(status=StepStatus.COMPLETE)
 
@@ -1192,25 +1278,28 @@ class Step4CalibOutputWiring:
                 status=StepStatus.FAILED,
                 message=f"could not parse {tracker_path} as YAML",
             )
-        sv3dt = tracker.get("SV3DT") or {}
-        mv3dt = tracker.get("MV3DT") or {}
-        expected = _calibration_directory_value(
-            ctx, inputs.location_id, calibration_dir
-        )
+        projection = tracker.get("ObjectModelProjection") or {}
+        model_files = projection.get("cameraModelFilepath") or []
+        camera_count = len(_load_enabled_cameras(ctx))
+        if not isinstance(model_files, list) or len(model_files) != camera_count:
+            return StepResult(
+                status=StepStatus.FAILED,
+                message=(
+                    "ObjectModelProjection.cameraModelFilepath must list one camera "
+                    f"model per enabled camera ({camera_count})"
+                ),
+            )
+        for model_file in model_files:
+            if not pathlib.Path(str(model_file)).is_file():
+                return StepResult(
+                    status=StepStatus.FAILED, message=f"missing camera model {model_file}"
+                )
         checks = (
             (
-                "SV3DT.calibrationDirectory",
-                str(sv3dt.get("calibrationDirectory", "")),
-                expected,
+                "ObjectModelProjection.outputFootLocation",
+                str(projection.get("outputFootLocation", "")),
+                "1",
             ),
-            ("MV3DT.nodeID", str(mv3dt.get("nodeID", "")), inputs.location_id),
-            (
-                "SV3DT.projectionType",
-                str(sv3dt.get("projectionType", "")),
-                "homography",
-            ),
-            ("MV3DT.mqttBrokerIP", str(mv3dt.get("mqttBrokerIP", "")), "127.0.0.1"),
-            ("MV3DT.mqttBrokerPort", str(mv3dt.get("mqttBrokerPort", "")), "1883"),
         )
         for label, actual, expected_value in checks:
             if not ctx.verify_pinned(label, actual, expected_value):

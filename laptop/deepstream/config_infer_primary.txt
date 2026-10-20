@@ -50,6 +50,8 @@ batch-size=8
 network-mode=2
 
 num-detected-classes=3
+# PeopleNet classes: person=0, bag=1, face=2. Track people only.
+filter-out-class-ids=1;2
 interval=0
 gie-unique-id=1
 process-mode=1

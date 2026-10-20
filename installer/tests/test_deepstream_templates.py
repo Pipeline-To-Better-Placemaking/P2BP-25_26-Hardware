@@ -62,10 +62,55 @@ def test_tracker_reid_matches_the_tao_model():
     assert 'tltModelKey: "nvidia_tao"' in reid
 
 
+def _sections(path: pathlib.Path) -> dict:
+    sections, current = {}, None
+    for line in _setting_lines(path):
+        if not line.startswith((" ", "\t")):
+            current = line.split(":", 1)[0]
+            sections[current] = []
+        elif current:
+            sections[current].append(line.strip())
+    return sections
+
+
 def test_tracker_has_no_parameters_deepstream_9_1_rejects():
-    lines = _setting_lines(TEMPLATES / "config_tracker_NvMOT.yml")
-    for key in ("minTrackerConfidence", "maxTargetsPerStream", "SearchRegionPaddingScale"):
-        assert not any(line.strip().startswith(f"{key}:") for line in lines), key
+    sections = _sections(TEMPLATES / "config_tracker_NvMOT.yml")
+    base = sections.get("BaseConfig", [])
+    for key in ("minTrackerConfidence", "maxTargetsPerStream"):
+        assert not any(line.startswith(f"{key}:") for line in base), key
+    visual = sections.get("VisualTracker", [])
+    assert not any(line.startswith("SearchRegionPaddingScale:") for line in visual)
+
+
+def test_tracker_configures_single_view_3d_the_way_deepstream_reads_it():
+    """DeepStream silently ignores unknown sections: the old SV3DT:/MV3DT:
+    sections were never read. Single-view 3D is ObjectModelProjection."""
+    sections = _sections(TEMPLATES / "config_tracker_NvMOT.yml")
+    assert "SV3DT" not in sections and "MV3DT" not in sections
+    projection = sections["ObjectModelProjection"]
+    assert "- ${CAMERA_MODEL_FILEPATH}" in projection
+    assert any(line.startswith("outputFootLocation: 1") for line in projection)
+    pose = sections["PoseEstimator"]
+    assert any(line.startswith("poseEstimatorType: 0") for line in pose)
+
+
+def test_tracker_size_is_a_multiple_of_32():
+    text = (TEMPLATES / "deepstream_app_config.txt").read_text(encoding="utf-8")
+    width = int(re.search(r"(?m)^tracker-width=(\d+)", text).group(1))
+    height = int(re.search(r"(?m)^tracker-height=(\d+)", text).group(1))
+    assert width % 32 == 0 and height % 32 == 0, (width, height)
+
+
+def test_message_sink_uses_the_3d_protobuf_converter():
+    text = (TEMPLATES / "deepstream_app_config.txt").read_text(encoding="utf-8")
+    assert "msg-conv-payload-type=2" in text
+    assert "msg-conv-msg2p-lib=/opt/nvidia/deepstream/deepstream/lib/libnvds_msgconv_mega.so" in text
+    assert "msg-conv-frame-interval=1" in text
+
+
+def test_detector_reports_people_only():
+    text = (TEMPLATES / "config_infer_primary.txt").read_text(encoding="utf-8")
+    assert "filter-out-class-ids=1;2" in text
 
 
 def test_app_tracker_group_has_no_removed_keys():

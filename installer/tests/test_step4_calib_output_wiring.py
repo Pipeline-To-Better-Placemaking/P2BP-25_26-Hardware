@@ -56,8 +56,35 @@ def templates(tmp_path):
     return dest
 
 
+# AMC 3.2.1's camInfo format: a 3x4 matrix plus a per-class modelInfo list
+# (values from the workstation's 2026-10-20 Living-Room export).
+AMC_CAMINFO = """projectionMatrix_3x4_w2p:
+- -1587.628995154069
+- 424.6347124685943
+- 33.25890122231646
+- 156440.66777167591
+- -259.75150943048845
+- 356.96099407611894
+- -1370.071028032669
+- 48320.507770494194
+- -0.7542930219554992
+- -0.5289291674665958
+- -0.3889421201571442
+- 58.03540606222064
+
+modelInfo:
+  - classID: 1 # person
+    height: 1.7
+    radius: 0.3
+"""
+
+
 def _zip_bytes(files=None, *, symlink=None) -> bytes:
-    files = files or {"transforms.yml": "transforms: []\n", "metadata.json": "{}\n"}
+    files = files or {
+        "transforms.yml": "transforms: []\n",
+        "metadata.json": "{}\n",
+        "camInfo/camInfo_00.yml": AMC_CAMINFO,
+    }
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         for name, content in files.items():
@@ -809,11 +836,13 @@ def test_ingest_subcommand_error_log_returns_nonzero(tmp_path, templates):
 def test_render_tracker_and_app_config(templates):
     tracker = step4.render_tracker_yaml(
         (templates / step4.TRACKER_YAML_TEMPLATE_NAME).read_text(encoding="utf-8"),
-        location_id="site-42",
-        calibration_directory="calibration/site-42",
+        camera_model_files=["/m/camInfo_00.yml", "/m/camInfo_01.yml"],
     )
-    assert "nodeID: site-42" in tracker
-    assert "calibrationDirectory: calibration/site-42" in tracker
+    assert "${" not in tracker
+    parsed = step4._parse_tracker_yaml(tracker)
+    projection = parsed["ObjectModelProjection"]
+    assert projection["cameraModelFilepath"] == ["/m/camInfo_00.yml", "/m/camInfo_01.yml"]
+    assert projection["outputFootLocation"] == 1
     camera = SimpleNamespace(ip="10.0.0.8", rtsp_path="/stream")
     app_text = step4.render_app_config(
         (templates / step4.APP_CONFIG_TEMPLATE_NAME).read_text(encoding="utf-8"),
@@ -851,6 +880,54 @@ def test_render_app_config_disables_slots_without_a_camera(templates):
         calibration_dir="calibration/site-42",
     )
     assert [_source_enable(app_text, i) for i in range(8)] == ["1", "1"] + ["0"] * 6
+
+
+def test_convert_camera_model_flattens_amc_model_info():
+    converted = step4.convert_camera_model(AMC_CAMINFO)
+    data = step4.yaml.safe_load(converted)
+    assert len(data["projectionMatrix_3x4_w2p"]) == 12
+    assert data["projectionMatrix_3x4_w2p"][3] == 156440.66777167591
+    assert data["modelInfo"] == {"height": 1.7, "radius": 0.3}
+
+
+def test_convert_camera_model_rejects_a_short_matrix():
+    with pytest.raises(ValueError):
+        step4.convert_camera_model("projectionMatrix_3x4:\n- 1.0\nmodelInfo:\n  height: 1.7\n  radius: 0.3\n")
+
+
+def test_run_writes_camera_models_and_lists_them(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    model = ctx.install_dir / "deepstream" / step4.CAMERA_MODEL_DIR_NAME / "camInfo_00.yml"
+    assert step4.yaml.safe_load(model.read_text())["modelInfo"] == {"height": 1.7, "radius": 0.3}
+    tracker = step4._parse_tracker_yaml(
+        (ctx.install_dir / "deepstream" / step4.TRACKER_YAML_TEMPLATE_NAME).read_text()
+    )
+    assert tracker["ObjectModelProjection"]["cameraModelFilepath"] == [str(model)]
+    assert step.verify(ctx).status is StepStatus.COMPLETE
+
+
+def test_run_fails_when_camera_models_do_not_match_cameras(tmp_path, templates):
+    runner = Runner(archive=_zip_bytes({"transforms.yml": "transforms: []\n"}))
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    result = step4.Step4CalibOutputWiring().run(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "one per camera" in result.message
+
+
+def test_rendered_header_names_the_template_without_its_unpack_path(templates):
+    app_text = step4.render_app_config(
+        (templates / step4.APP_CONFIG_TEMPLATE_NAME).read_text(encoding="utf-8"),
+        cam_user="u",
+        cam_password="p",
+        location_id="site-42",
+        cameras=[SimpleNamespace(ip="10.0.0.8", rtsp_path="/s")],
+        template_path="/tmp/_MEIabc123/assets/deepstream/deepstream_app_config.txt",
+        calibration_dir="calibration/site-42",
+    )
+    assert "# Source template: deepstream_app_config.txt\n" in app_text
+    assert "_MEI" not in app_text
 
 
 def test_run_downloads_reid_model_once(tmp_path, templates):
@@ -924,7 +1001,14 @@ def _footage_ctx(tmp_path, templates, *, states=("INIT", "COMPLETED"), **kwargs)
         encoding="utf-8",
     )
     conf[step4.CONF_CAM_PASSWORD_KEY] = FOOTAGE_PASSWORD
-    runner = kwargs.pop("runner", None) or Runner(states=list(states))
+    enabled = [c for c in FOOTAGE_CAMERAS if c.enabled]
+    archive = _zip_bytes(
+        {
+            "transforms.yml": "transforms: []\n",
+            **{f"camInfo/camInfo_{i:02d}.yml": AMC_CAMINFO for i in range(len(enabled))},
+        }
+    )
+    runner = kwargs.pop("runner", None) or Runner(states=list(states), archive=archive)
     ctx = _ctx(tmp_path, templates, conf=conf, runner=runner, **kwargs)
     ctx.events = []
     ctx.progress = SimpleNamespace(
