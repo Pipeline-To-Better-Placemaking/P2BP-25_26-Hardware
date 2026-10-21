@@ -121,7 +121,7 @@ the camera-node `tracker.service` — journald logging, `EnvironmentFile`,
 DeepStream pipeline. The full unit is given below, so nothing depends on that
 file remaining in the tree.
 
-`ExecStart` / `ExecStop` are **rendered per instance** because
+`ExecStart` is **rendered per instance** because
 `deepstream-app` needs the project's absolute config path. The installer
 writes the template with `%i`-parameterized paths; the per-instance config is
 resolved from the registry at install time (or by the pipeline subcommand at
@@ -148,13 +148,12 @@ Requires=mosquitto.service
 [Service]
 Type=simple
 User=@USER@                             ; rendered to the invoking user (framework §9.2)
-WorkingDirectory=/opt/mv3dt/deepstream/%i
+WorkingDirectory=/opt/mv3dt/deepstream
 
 # ExecStart ports 50_start_pipeline.sh: ensure mosquitto up, source the DS env,
 # then exec deepstream-app -c <rendered per-project config>. Implemented once,
 # in the pipeline subcommand, invoked in a non-interactive service context.
 ExecStart=/opt/mv3dt/bin/mv3dt-installer pipeline --project-slug %i --service-exec
-ExecStop=/opt/mv3dt/bin/mv3dt-installer pipeline --project-slug %i --stop
 
 # 24/7 crash recovery. on-failure (not always) per the LOCKED decision, so a
 # clean --stop / systemctl stop does not trigger a restart loop.
@@ -191,13 +190,13 @@ Notes:
   validation-helper banner (those are for the operator's foreground TTY), and
   logging to journald instead. `deepstream-app -c <config>` is the DS 9.1
   entry point (see [References](#9-references)).
-- **`ExecStop` = ported `99_stop_all.sh`.** SIGTERM → wait → SIGKILL
-  ([`99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh) lines 62–78);
-  systemd's `KillSignal=SIGTERM` + `TimeoutStopSec=10` gives the same
-  graceful-then-forced behavior, so `--stop` only needs to stop the one
-  pipeline instance (it must NOT stop the shared broker — that is
-  `mosquitto.service`, left running for other instances, matching Step 5
-  §3.4's default `--stop`).
+- **No `ExecStop`; teardown is ported `99_stop_all.sh`.** SIGTERM → wait →
+  SIGKILL ([`99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh) lines
+  62–78); systemd's `KillSignal=SIGTERM` + `TimeoutStopSec=10` gives the same
+  graceful-then-forced behavior to the one pipeline instance, and never
+  touches the shared broker (`mosquitto.service`). An earlier draft set
+  `ExecStop=... pipeline --stop`, but that mode requires root and the unit
+  runs as `User=@USER@`, so it could only fail.
 - **`Requires=mosquitto.service`** guarantees the broker the pipeline
   publishes MV3DT telemetry to is up before the pipeline starts (the
   service-context equivalent of `ensure_mosquitto()`).
@@ -205,8 +204,11 @@ Notes:
   `systemd.render_unit()`'s `@USER@` marker, so `deepstream-app`, the DS
   env, and GPU access run as the same user the rest of the install used, not
   root. This is a one-time install-time substitution, independent of `%i`.
-- `WorkingDirectory=/opt/mv3dt/deepstream/%i` matches the Step 5 registry
-  layout (`<install_dir>/deepstream/<slug>/`).
+- `WorkingDirectory=/opt/mv3dt/deepstream` is where Step 4 renders its one
+  flat config set (STEP-4 §6.2), and every relative path in those configs
+  resolves from there. A per-slug `<install_dir>/deepstream/<slug>/` does
+  not exist; pointing the unit at it makes systemd exit `200/CHDIR` before
+  `ExecStart` runs (seen on the workstation with v0.4.15).
 - Hardening directives from `tracker.service` (`ProtectSystem`,
   `PrivateTmp`, etc.) are **intentionally omitted by default** because
   `deepstream-app` needs broad GPU/device/driver access; add them only after
@@ -225,7 +227,7 @@ What changes in Step 5 §3.3 ("What the exe does at runtime"):
   `ctx.run_root`). The pipeline is now a supervised service, not a child of
   the operator's shell.
 - **`--stop`:** instead of `pkill deepstream-app`, run
-  `systemctl stop mv3dt-pipeline@<slug>` (the unit's `ExecStop` does the
+  `systemctl stop mv3dt-pipeline@<slug>` (systemd's `KillSignal` does the
   graceful SIGTERM→SIGKILL). `--stop-all` still additionally stops the AMC
   stack / broker as in Step 5 §3.4.
 - **New internal `--service-exec` mode:** the actual
@@ -922,7 +924,10 @@ Idempotent post-checks (framework §8.4 `verify_pinned` / reporters);
   `systemctl start mosquitto` and `systemctl enable mv3dt-pipeline@<slug>` are
   **denied**. A positive-only check passes just as happily against a rule that
   grants everything, which is the exact failure this design exists to prevent —
-  so the negative assertions are not optional.
+  so the negative assertions are not optional. Every probe runs as
+  `systemctl --no-ask-password`: the agent is headless, and on an operator's
+  TTY systemctl would otherwise open a polkit password prompt that an admin
+  can answer, turning both denials into successes.
 - **Round-trip `status` check:** publish a `{"action":"status"}` command to
   `mv3dt/<HOST_ID>/cmd` and assert a result returns on
   `mv3dt/<HOST_ID>/cmd/result` within a timeout (the end-to-end remote-control
@@ -1026,7 +1031,7 @@ the logic Step 6 supervises/ports — **not** DeepStream docs):
 - [`laptop/scripts/50_start_pipeline.sh`](../../laptop/scripts/50_start_pipeline.sh)
   — start logic ported into the unit `ExecStart` (`--service-exec`).
 - [`laptop/scripts/99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh)
-  — SIGTERM→SIGKILL teardown mirrored by `ExecStop` /
+  — SIGTERM→SIGKILL teardown mirrored by
   `KillSignal`+`TimeoutStopSec`.
 - [`laptop/mosquitto/mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf) — the
   simple-testing broker posture (`allow_anonymous true`, `1883`+`9001`) the
