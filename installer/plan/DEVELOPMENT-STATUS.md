@@ -15,8 +15,8 @@ connected across the step modules.** A reader who finds `report.py` can
 reasonably conclude the diagnostic work is done. It is not.
 [Section 5](#5-what-remains) is the honest list.
 
-Current release: **v0.4.15**. Current version string:
-`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.15"`.
+Current release: **v0.4.16**. Current version string:
+`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.16"`.
 The release is published with a checksum-verified binary.
 
 ### Current workstation state (last verified 2026-10-20)
@@ -34,8 +34,8 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | PoE interface | `enp8s0` up at `169.254.3.134/16` (link-local) via `Wired connection 1` | 2026-10-20 | `ip -br addr`, `nmcli` |
 | Location and AMC project | `LOCATION_ID=Kevin-House`; AMC project `Living-Room` (`20261019_151133_2885`). `Valencia-West` is no longer used | 2026-10-20 | `installer.conf`; `GET /v1/get_project_info` |
 | Calibration | **First successful calibration**: `Living-Room` is `COMPLETED` from two simultaneous 10-minute clips (1920x1080, recorded outside the installer and uploaded in the AMC UI). Step 4 ingested it as `Living-Room@20261020T170847Z`, installed the four DeepStream configs, deleted the footage folder, and enabled `mv3dt-ingest-living-room.timer` | 2026-10-20 | Step 4 transcript; AMC API |
-| Installer version on the workstation | not recorded | — | `./mv3dt-installer --version` |
-| Step completion | Steps 1–4 complete on v0.4.11 (Step 4's `static` false alarm fixed by #31). Step 5 created `pipeline-living-room`, whose first start failed on v0.4.11's 9.0-era pipeline templates | 2026-10-20 | v0.4.11 transcript |
+| Installer version on the workstation | 0.4.15 (`v0.4.15`, commit `5f9585d`) | 2026-10-20 | `./mv3dt-installer --version` |
+| Step completion | Steps 1–5 complete on v0.4.15: Step 4 converted AMC's `camInfo` into `camera_models/camInfo_00.yml` and `camInfo_01.yml` and listed both in the tracker config. Step 6 failed: the pipeline unit's `WorkingDirectory` pointed at a per-slug folder that does not exist (`200/CHDIR`), and the polkit check ran on the operator's TTY, where a password prompt let both negative probes succeed. With a hand drop-in setting `WorkingDirectory=/opt/mv3dt/deepstream`, `mv3dt-pipeline@living-room` ran as `p2bp-admin` at 22 FPS on both sources and published ~300-byte protobuf frames. v0.4.16 fixes both | 2026-10-20 | v0.4.15 transcript; `journalctl -u mv3dt-pipeline@living-room` |
 | Pipeline | With the v0.4.12 changes applied by hand to the installed configs: MQTT sink connects, ReID engine builds, PeopleNet detects, both cameras run at 22 FPS under `deepstream-test5-app`, which builds one message per tracked person. JSON messages observed on `mv3dt/Kevin-House/sv3d` (2D only). Single-view 3D then ran by hand with NVIDIA's reference 3D tracker config: per-frame protobuf messages carry each person's world foot position and 3D box (e.g. x 77.36, y -40.86, height 1.7). v0.4.15 encodes that setup. World units and origin are AMC's and still to be checked against `map.png`. Multi-camera MV3DT fusion is not configured (see section 5) | 2026-10-20 | live runs; `deepstream-test5-app` log |
 | AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib`; `HOST_IP=192.168.4.106` (home network, baked into the AMC UI at container start) | 2026-10-20 | `docker ps`; `installer.conf`; `compose/.env` |
 | Automatic re-ingest | `mv3dt-ingest-living-room.timer` fires every 60 s, but every `ingest` run stopped at "configuration incomplete: CAM_USER, CAM_PASSWORD": subcommands never loaded `secrets/camera.env` (broken since v0.4.7 moved the credentials there; fixed in v0.4.13). It then failed earlier still, on "Could not resolve a non-root invoking user": the root service had no `SUDO_USER`, so the timer had never ingested anything. v0.4.14 sets `Environment=SUDO_USER=<invoking user>` in the unit | 2026-10-20 | `mv3dt-installer ingest` run by hand |
@@ -448,8 +448,8 @@ For the current state to be what this document claims:
 - [ ] Every step declares `phases` and calls exactly `phase(1)` through
       `phase(len(phases))` — pinned by
       `tests/test_steps_protocol.py::test_every_step_declares_phases_that_match_the_indices_it_uses`.
-- [x] `__version__` equals the most recent `v*` tag (`v0.4.15`).
-- [x] `gh pr list --state open` is empty at the v0.4.15 release cut.
+- [x] `__version__` equals the most recent `v*` tag (`v0.4.16`).
+- [x] `gh pr list --state open` is empty at the v0.4.16 release cut.
 
 ---
 
@@ -474,7 +474,7 @@ Settled exclusions, carried from [`08` §11](08-PROGRESS-AND-OBSERVABILITY.md#11
 ## References
 
 Facts in this document are drawn from the repository through release
-`v0.4.15`, the operator's supplied **v0.4.6**, **v0.4.7**, and **v0.4.8**
+`v0.4.16`, the operator's supplied **v0.4.6**, **v0.4.7**, and **v0.4.8**
 workstation runs, and earlier workstation runs of `mv3dt-installer` 0.1.2 through
 0.1.9, which are the source of the observed-failure inventory in
 [`08` §2](08-PROGRESS-AND-OBSERVABILITY.md#2-observed-failures-this-doc-exists-to-fix).
