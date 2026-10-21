@@ -222,6 +222,24 @@ def test_polkit_rule_defaults_to_not_handled():
     assert rule.count("polkit.Result.NOT_HANDLED") >= 2
 
 
+def test_pipeline_unit_runs_from_the_directory_step4_renders_into():
+    """systemd exits 200/CHDIR before ExecStart if WorkingDirectory is
+    missing; Step 4 renders a flat config set, never a per-slug folder."""
+    unit = step6.render_pipeline_unit("alice")
+    working_dirs = [l for l in unit.splitlines() if l.startswith("WorkingDirectory=")]
+    assert working_dirs == [
+        "WorkingDirectory=/opt/mv3dt/deepstream"
+    ]
+    assert "%i" not in working_dirs[0]
+
+
+def test_pipeline_unit_has_no_root_only_exec_stop():
+    """`pipeline --stop` requires root and the unit runs as User=@USER@."""
+    unit = step6.render_pipeline_unit("alice")
+    assert "User=alice" in unit
+    assert not any(l.startswith("ExecStop=") for l in unit.splitlines())
+
+
 def test_polkit_rule_checks_the_manage_units_action_id():
     rule = step6.render_polkit_rule("alice")
     assert '"org.freedesktop.systemd1.manage-units"' in rule
@@ -234,9 +252,15 @@ def test_polkit_rule_checks_the_manage_units_action_id():
 
 def test_check_polkit_authorization_all_pass_when_scoped_correctly():
     runner = ScriptedRunner()
-    runner.when(_prefix("systemctl", "start", "mv3dt-pipeline@north-lobby-2.service"), returncode=0)
-    runner.when(_prefix("systemctl", "start", "mosquitto"), returncode=1)
-    runner.when(_prefix("systemctl", "enable", "mv3dt-pipeline@north-lobby-2.service"), returncode=1)
+    runner.when(
+        _prefix("systemctl", "--no-ask-password", "start", "mv3dt-pipeline@north-lobby-2.service"),
+        returncode=0,
+    )
+    runner.when(_prefix("systemctl", "--no-ask-password", "start", "mosquitto"), returncode=1)
+    runner.when(
+        _prefix("systemctl", "--no-ask-password", "enable", "mv3dt-pipeline@north-lobby-2.service"),
+        returncode=1,
+    )
 
     result = step6.check_polkit_authorization(run_as_agent_user=runner, slug="north-lobby-2")
     assert result == {
@@ -244,6 +268,15 @@ def test_check_polkit_authorization_all_pass_when_scoped_correctly():
         "start_mosquitto_denied": True,
         "enable_pipeline_denied": True,
     }
+
+
+def test_check_polkit_authorization_never_prompts_for_a_password():
+    """An admin answering a polkit TTY prompt would make both negative
+    probes pass; every probe must run non-interactively."""
+    runner = ScriptedRunner()
+    step6.check_polkit_authorization(run_as_agent_user=runner, slug="north-lobby-2")
+    assert len(runner.calls) == 3
+    assert all(list(argv[:2]) == ["systemctl", "--no-ask-password"] for argv in runner.calls)
 
 
 def test_check_polkit_authorization_catches_an_overly_broad_rule():

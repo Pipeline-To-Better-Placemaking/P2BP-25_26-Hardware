@@ -904,9 +904,14 @@ def check_polkit_authorization(*, run_as_agent_user: Runner, slug: str) -> dict[
         section B.1.1's "boot-enablement stays the installer's job").
     """
     unit = PIPELINE_UNIT_NAME(slug)
-    start_pipeline = _run(run_as_agent_user, "systemctl", "start", unit)
-    start_mosquitto = _run(run_as_agent_user, "systemctl", "start", "mosquitto")
-    enable_pipeline = _run(run_as_agent_user, "systemctl", "enable", unit)
+    # --no-ask-password: the agent runs headless, so the check must too. On
+    # an operator's TTY systemctl would otherwise spawn a polkit password
+    # prompt, and an admin typing their password turns both negative probes
+    # into successes.
+    systemctl = ("systemctl", "--no-ask-password")
+    start_pipeline = _run(run_as_agent_user, *systemctl, "start", unit)
+    start_mosquitto = _run(run_as_agent_user, *systemctl, "start", "mosquitto")
+    enable_pipeline = _run(run_as_agent_user, *systemctl, "enable", unit)
     return {
         "start_pipeline_permitted": _returncode(start_pipeline) == 0,
         "start_mosquitto_denied": _returncode(start_mosquitto) != 0,

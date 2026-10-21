@@ -21,7 +21,9 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=@USER@
-WorkingDirectory=/opt/mv3dt/deepstream/%i
+# Step 4 renders one flat config set into /opt/mv3dt/deepstream (no per-slug
+# subdirectory), and every relative path in it resolves from there.
+WorkingDirectory=/opt/mv3dt/deepstream
 
 # ExecStart ports 50_start_pipeline.sh: ensure mosquitto up, source the DS
 # env, then exec deepstream-app -c <rendered per-project config>. Implemented
@@ -29,7 +31,6 @@ WorkingDirectory=/opt/mv3dt/deepstream/%i
 # non-interactive service context (no ping-sweep gating, no validation-helper
 # banner -- those are for the operator's foreground TTY).
 ExecStart=/opt/mv3dt/bin/mv3dt-installer pipeline --project-slug %i --service-exec
-ExecStop=/opt/mv3dt/bin/mv3dt-installer pipeline --project-slug %i --stop
 
 # 24/7 crash recovery. on-failure (not always) per the LOCKED decision, so a
 # clean --stop / systemctl stop does not trigger a restart loop.
@@ -37,6 +38,8 @@ Restart=on-failure
 RestartSec=5
 
 # Graceful teardown mirrors 99_stop_all.sh: SIGTERM, then SIGKILL after grace.
+# No ExecStop=: `pipeline --stop` needs root and this unit runs as @USER@, so
+# systemd's own KillSignal/TimeoutStopSec does the teardown.
 KillSignal=SIGTERM
 TimeoutStopSec=10
 
