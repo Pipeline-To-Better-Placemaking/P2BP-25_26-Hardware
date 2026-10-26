@@ -26,8 +26,8 @@ it. The workstation is the database: nothing is copied to the web app's
 storage.
 
 Step 8 is the first installer step that **listens on a network port**. That
-amends the "nothing listens" rule of
-[`STEP-6`](STEP-6-REMOTE-SUPERVISION.md) and
+amends the "no inbound-to-desktop API" rule of
+[`STEP-6`](STEP-6-REMOTE-SUPERVISION.md) and the "nothing listens" rule of
 [`STEP-7`](STEP-7-WEBAPP-INTEGRATION.md) for this one service, under the
 controls in [section 3](#3-network-exposure-locked). The field mapping in
 [section 5](#5-decoding-nvframe) is taken from DeepStream's
@@ -281,9 +281,15 @@ units, verified live as metres: recorded positions fall inside the
 7.41 x 5.02 m floor plan at 100 px per metre. `dist` in
 [section 7](#7-stitching) is therefore in metres.
 
-The decode test fixture is one real payload captured from the workstation's
-broker, with its `protoc --decode=nv.Frame` output kept beside it as the
-expected values.
+The decode test fixture, `installer/tests/tracking/fixtures/frame_camera1.hex`,
+is one real payload captured from the workstation's broker. Its expected
+values were produced **once**, by running `protoc --decode=nv.Frame` on the
+live output, and are committed as static files beside it. Neither the build
+nor the tests run or require `protoc` or a protobuf library.
+
+The recorder does not write to SQLite itself: it calls an injected
+`sink(rows)` callable with plain `dict` rows and never imports `store.py`.
+`cli.py serve` ([section 10](#10-cli)) wires the recorder to the store.
 
 ---
 
@@ -470,7 +476,9 @@ Implements the `Step` protocol
 `COMPLETE` only when all pass:
 
 - [ ] `mv3dt-tracking.service` is enabled and active.
-- [ ] `secrets/tracking.env` exists with mode `600` and all three keys set.
+- [ ] `secrets/tracking.env` exists with mode `600` and the three required
+      keys set: `WORKSTATION_TICKET_SECRET`, `TRACKING_PROJECT_ID`,
+      `ALLOWED_ORIGINS`. `TICKET_ISSUER` is optional.
 - [ ] `GET http://127.0.0.1:8090/health` returns `200`.
 - [ ] The detection row count increases between two reads while the
       pipeline is publishing.
@@ -506,10 +514,10 @@ recorded in place as **RESOLVED**.
 
 | Unit | Branch | Files touched | Depends on | Wave |
 |---|---|---|---|---|
-| H1 Spec | `feat/installer-step8-spec` | `installer/plan/STEP-8-TRACKING-HISTORY.md`, `installer/plan/STEP-7-WEBAPP-INTEGRATION.md`, `installer/plan/DEVELOPMENT-STATUS.md` | none | 1 |
-| H2 Store + stitch | `feat/installer-tracking-store` | `assets/tracking/mv3dt_tracking/__init__.py`, `store.py`, `stitch.py`, `tests/tracking/test_store.py`, `test_stitch.py` | none | 1 |
-| H3 Decode + recorder | `feat/installer-tracking-recorder` | `assets/tracking/mv3dt_tracking/decode.py`, `recorder.py`, `tests/tracking/test_decode.py`, fixture | none | 1 |
-| H4 Auth + lock + API + CLI | `feat/installer-tracking-api` | `assets/tracking/mv3dt_tracking/auth.py`, `lock.py`, `api.py`, `cli.py`, `assets/tracking/requirements.txt`, `tests/tracking/test_api.py`, `test_auth.py`, `test_lock.py` | H2 | 2 |
+| H1 Spec | `feat/installer-step8-spec` | `installer/plan/STEP-8-TRACKING-HISTORY.md`, `installer/plan/STEP-7-WEBAPP-INTEGRATION.md`, `installer/plan/STEP-6-REMOTE-SUPERVISION.md`, `installer/plan/DEVELOPMENT-STATUS.md` | none | 1 |
+| H2 Store + stitch | `feat/installer-tracking-store` | `assets/tracking/mv3dt_tracking/__init__.py`, `store.py`, `stitch.py`, `tests/tracking/test_store.py`, `tests/tracking/test_stitch.py` | none | 1 |
+| H3 Decode + recorder | `feat/installer-tracking-recorder` | `assets/tracking/mv3dt_tracking/decode.py`, `recorder.py`, `tests/tracking/test_decode.py`, `tests/tracking/test_recorder.py`, `tests/tracking/fixtures/frame_camera1.hex` | none | 1 |
+| H4 Auth + lock + API + CLI | `feat/installer-tracking-api` | `assets/tracking/mv3dt_tracking/auth.py`, `lock.py`, `api.py`, `cli.py`, `assets/tracking/requirements.txt`, `tests/tracking/test_api.py`, `tests/tracking/test_auth.py`, `tests/tracking/test_lock.py` | H2, H3 | 2 |
 | H5 STEP-8 step | `feat/installer-step8-tracking` | `steps/step8_tracking_history.py`, `__main__.py`, `config.py`, `app.py`, `assets/systemd/mv3dt-tracking.service.in`, `installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`, `tests/test_step8.py` | H1, H3, H4 | 3 |
 
 Package paths are relative to `installer/mv3dt_installer/`; test paths are
@@ -519,13 +527,19 @@ Serialization points:
 
 - H2 and H3 both add files under `assets/tracking/mv3dt_tracking/` but share
   none; `__init__.py` belongs to H2 alone, so H3 must not create it.
-- H4 imports `store` and `stitch`, so it branches from H2 once H2 merges.
+- H3 is independent of H2: `recorder.py` only calls an injected
+  `sink(rows)` callable with plain `dict` rows and never imports
+  `store.py` ([section 5](#5-decoding-nvframe)).
+- H4 imports `store` and `stitch`, and its `cli.py serve` wires
+  `recorder.py` into `store.py`, so it depends on both H2 and H3 and
+  branches once both merge.
 - H5 implements this spec, bundles the whole package, registers the step
   in `__main__.py`, and owns the gate plumbing (`config.py`, the `app.py`
   flag, the `00` gate table), so it lands last. It edits
   `00-FRAMEWORK-AND-BOOTSTRAP.md`, which H1 does not touch. The reported
-  version comes from `mv3dt_tracking.__version__`, which H2 defines. `installer.spec` already bundles all of
-  `assets/` recursively, so no row touches it.
+  version comes from `mv3dt_tracking.__version__`, which H2 defines.
+  `installer.spec` already bundles all of `assets/` recursively, so no row
+  touches it.
 - Recommended merge order: H1, H2, H3, H4, H5, then a release.
 
 ---
