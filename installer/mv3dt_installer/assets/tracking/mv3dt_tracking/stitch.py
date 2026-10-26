@@ -13,7 +13,7 @@ from collections import defaultdict
 from math import hypot
 from typing import Callable, Iterable
 
-from .store import Detection
+from .store import Detection, bucket_ms
 
 
 def _ordered(rows: Iterable[Detection]) -> list[Detection]:
@@ -41,16 +41,14 @@ def stitch(rows: list[Detection], gap_s: float = 3.0, dist_m: float = 1.2) -> di
 
 
 def _series(rows: Iterable[Detection], key: Callable[[Detection], int], hz: float) -> list[dict]:
-    if not hz > 0:
-        raise ValueError(f"hz must be > 0, got {hz}")
-    bucket_ms = 1000.0 / hz
-    # id -> bucket -> [sum_x, sum_y, n]
+    width = bucket_ms(hz)
+    # id -> bucket start -> [sum_x, sum_y, n]
     acc: dict[int, dict[int, list[float]]] = defaultdict(dict)
     tracks: dict[int, set[int]] = defaultdict(set)
     first: dict[int, int] = {}
     for r in _ordered(rows):
         k = key(r)
-        b = int(r.ts_ms // bucket_ms)
+        b = r.ts_ms - r.ts_ms % width  # floor, same edges as the store
         cell = acc[k].setdefault(b, [0.0, 0.0, 0])
         cell[0] += r.x
         cell[1] += r.y
@@ -64,7 +62,7 @@ def _series(rows: Iterable[Detection], key: Callable[[Detection], int], hz: floa
         out.append({
             "id": k,
             "trackIds": sorted(tracks[k]),
-            "t": [int(b * bucket_ms) for b, _ in buckets],
+            "t": [b for b, _ in buckets],
             "x": [sx / n for _, (sx, _, n) in buckets],
             "y": [sy / n for _, (_, sy, n) in buckets],
         })
@@ -72,9 +70,9 @@ def _series(rows: Iterable[Detection], key: Callable[[Detection], int], hz: floa
 
 
 def people_series(rows: list[Detection], mapping: dict[int, int], hz: float) -> list[dict]:
-    """Per stitched person, samples averaged per 1/hz s bucket across cameras
-    and track ids, sorted by first appearance. Rows whose track_id is not in
-    `mapping` are skipped."""
+    """Per stitched person, samples averaged per bucket of `bucket_ms(hz)` ms
+    across cameras and track ids, sorted by first appearance. Rows whose
+    track_id is not in `mapping` are skipped."""
     return _series((r for r in rows if r.track_id in mapping), lambda r: mapping[r.track_id], hz)
 
 

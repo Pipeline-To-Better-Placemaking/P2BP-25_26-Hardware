@@ -104,3 +104,10 @@ def test_raw_series_is_keyed_by_track_id():
 def test_series_rejects_non_positive_hz():
     with pytest.raises(ValueError):
         raw_series([], hz=0)
+
+
+def test_negative_timestamps_bucket_by_floor_like_the_store():
+    rows = [Detection(-150, "cam1", 1, 1.0, 0.0), Detection(50, "cam1", 1, 3.0, 0.0)]
+    (series,) = raw_series(rows, hz=5)
+    assert series["t"] == [-200, 0]
+    assert series["x"] == [1.0, 3.0]
