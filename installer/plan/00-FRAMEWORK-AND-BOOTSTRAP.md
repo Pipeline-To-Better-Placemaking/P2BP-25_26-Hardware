@@ -224,6 +224,7 @@ matching CLI flag (§3.3):
 |---|---|---|---|
 | `MV3DT_REMOTE_SUPERVISION` | `off` \| `local` \| `remote` | `--remote-supervision` | [`STEP-6` §E.2](STEP-6-REMOTE-SUPERVISION.md#e2-gating-opt-in) |
 | `MV3DT_WEBAPP_INTEGRATION` | `off` \| `on` | `--webapp-integration` | [`STEP-7` §H.2](STEP-7-WEBAPP-INTEGRATION.md#h2-gating-opt-in) |
+| `MV3DT_TRACKING_HISTORY` | `off` \| `on` | `--tracking-history` | [`STEP-8` section 4.1](STEP-8-TRACKING-HISTORY.md#41-gate) |
 
 When a gate is `off` the dispatch loop treats that step as auto-`COMPLETE`
 (skipped) with a one-line log, using the same skip discipline as a genuinely
@@ -359,8 +360,9 @@ def asset_path(*parts: str) -> pathlib.Path:
 - **Transcript capture (REQUIRED).** The command line and both output streams
   are logged through `logs.log`, satisfying §8.2's requirement that
   shelled-out stdout/stderr reach the transcript. Redaction is applied to any
-  `KEY=value` occurrence of `NGC_API_KEY`, `API_KEY`, `CAM_PASSWORD`, or
-  `MQTT_PASSWORD`, which print as `<redacted>` (§10.1, §14.4).
+  `KEY=value` occurrence of `NGC_API_KEY`, `API_KEY`, `CAM_PASSWORD`,
+  `MQTT_PASSWORD`, or `WORKSTATION_TICKET_SECRET` (the Step 8 ticket secret),
+  which print as `<redacted>` (§10.1, §14.4).
 - **`cleanup=True` removes the staging dir in a `finally`.** `cleanup=False`
   preserves it for debugging and is what tests use. Never execute directly
   from `sys._MEIPASS` — stage first, always.

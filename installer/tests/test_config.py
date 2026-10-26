@@ -39,6 +39,14 @@ def _reset_transcript_state():
     logs._transcript_path = None
 
 
+@pytest.fixture(autouse=True)
+def _seed_tracking_gate_off(monkeypatch):
+    """Most tests here script the Step 6 and 7 gate prompts only. Seeding
+    the Step 8 gate through its env var (tier 2) keeps it out of their
+    prompt sequences; the tracking-gate tests below remove it again."""
+    monkeypatch.setenv(config.GATE_TRACKING_HISTORY, "off")
+
+
 def _state(tmp_path: Path) -> StateMachine:
     """A StateMachine pointed at an isolated state.json under tmp_path."""
     return StateMachine(path=tmp_path / "var" / "state.json")
@@ -662,6 +670,51 @@ def test_gate_prompt_not_reached_for_an_already_persisted_gate(
 
     assert second.remote_supervision == "local"
     assert second.webapp_integration == "on"
+
+
+def test_tracking_gate_defaults_off_under_non_interactive(tmp_path, monkeypatch):
+    """STEP-8 section 4.1: an unattended run never opens a listener the
+    operator did not ask for."""
+    monkeypatch.delenv(config.GATE_TRACKING_HISTORY, raising=False)
+
+    cfg = config.load(
+        str(tmp_path / "install"), _state(tmp_path), non_interactive=True,
+        prompt=_refuse_prompt,
+    )
+
+    assert cfg.tracking_history == "off"
+    assert cfg.values[config.GATE_TRACKING_HISTORY] == "off"
+
+
+def test_tracking_gate_flag_seeds_and_overrides(tmp_path, monkeypatch):
+    monkeypatch.delenv(config.GATE_TRACKING_HISTORY, raising=False)
+    sm = _state(tmp_path)
+    install_dir = tmp_path / "install"
+
+    first = config.load(str(install_dir), sm, non_interactive=True)
+    assert first.tracking_history == "off"
+
+    second = config.load(
+        None, sm, non_interactive=True,
+        gate_overrides={config.GATE_TRACKING_HISTORY: "on"},
+    )
+    assert second.tracking_history == "on"
+    conf_text = (install_dir / config.CONF_FILENAME).read_text(encoding="utf-8")
+    assert "MV3DT_TRACKING_HISTORY=on" in conf_text
+
+
+def test_tracking_gate_is_prompted_last_with_off_prefilled(tmp_path, monkeypatch):
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    prompt = _scripted_prompt("", "", "on")
+
+    cfg = config.load(
+        str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
+        prompt=prompt,
+    )
+
+    assert cfg.tracking_history == "on"
+    assert prompt.asked[-1] == "MV3DT_TRACKING_HISTORY (off/on) [off]: "
 
 
 # ---------------------------------------------------------------------------

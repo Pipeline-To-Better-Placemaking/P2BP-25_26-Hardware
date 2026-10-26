@@ -219,6 +219,14 @@ def build_parser() -> argparse.ArgumentParser:
         "Overrides an already-persisted value.",
     )
     parser.add_argument(
+        "--tracking-history",
+        choices=config_mod.GATE_CHOICES[config_mod.GATE_TRACKING_HISTORY],
+        default=None,
+        help="Set the Step 8 tracking-history gate "
+        "(MV3DT_TRACKING_HISTORY in installer.conf, doc 00 §3.4). "
+        "Overrides an already-persisted value.",
+    )
+    parser.add_argument(
         "--scan-cameras",
         action="store_true",
         help="Discover the camera fleet by MAC OUI, probe RTSP, run the "
@@ -857,6 +865,10 @@ def _read_only_subcommand_config(
             config_mod.GATE_WEBAPP_INTEGRATION,
             config_mod.GATE_DEFAULTS[config_mod.GATE_WEBAPP_INTEGRATION],
         ),
+        tracking_history=values.get(
+            config_mod.GATE_TRACKING_HISTORY,
+            config_mod.GATE_DEFAULTS[config_mod.GATE_TRACKING_HISTORY],
+        ),
         values=values,
     )
 
@@ -983,6 +995,7 @@ def _bootstrap_subcommand_context(
 _GATE_ORDER_TO_CONF_ATTR: dict[int, str] = {
     6: "remote_supervision",
     7: "webapp_integration",
+    8: "tracking_history",
 }
 
 # Maps each installer.conf gate key to the argparse destination its
@@ -992,6 +1005,7 @@ _GATE_ORDER_TO_CONF_ATTR: dict[int, str] = {
 _GATE_KEY_TO_ARG_DEST: dict[str, str] = {
     config_mod.GATE_REMOTE_SUPERVISION: "remote_supervision",
     config_mod.GATE_WEBAPP_INTEGRATION: "webapp_integration",
+    config_mod.GATE_TRACKING_HISTORY: "tracking_history",
 }
 
 
@@ -1021,7 +1035,7 @@ def _gate_value_for_step(step: Step, cfg: config_mod.Config) -> Optional[str]:
 
 
 def _gate_is_off(gate_value: Optional[str]) -> bool:
-    """Whether a *gated* step (order 6 or 7) should be auto-skipped.
+    """Whether a *gated* step (order 6, 7 or 8) should be auto-skipped.
 
     "off" is the uniform skip-indicator across both gates (doc 00 §3.4's
     table), regardless of how many non-off states a given gate has: Step
@@ -1098,7 +1112,7 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     Iterates `STEP_REGISTRY` (kept sorted by `.order` by `steps.register()`)
     in order. For each step:
 
-    - If its gate (steps 6/7 only, doc 00 §3.4) is off, auto-`COMPLETE` it
+    - If its gate (steps 6-8 only, doc 00 §3.4) is off, auto-`COMPLETE` it
       with a one-line log -- "the same skip discipline as a genuinely
       completed step".
     - Else if already `COMPLETE`, skip with the "already complete" log line.

@@ -21,14 +21,16 @@ interactive (`non_interactive=False`), `load()` prompts once with that
 default prefilled (doc 00 §11.1's "TUI prompts ... with /opt/mv3dt
 prefilled"); `--non-interactive` uses the default silently.
 
-`installer.conf` also carries the two §3.4 opt-in step-gate keys
-(`MV3DT_REMOTE_SUPERVISION`, `MV3DT_WEBAPP_INTEGRATION`). The *first* time
+`installer.conf` also carries the three §3.4 opt-in step-gate keys
+(`MV3DT_REMOTE_SUPERVISION`, `MV3DT_WEBAPP_INTEGRATION`,
+`MV3DT_TRACKING_HISTORY`). The *first* time
 `load()` ever writes a fresh `installer.conf` (i.e. the key is not already
 present in the file), each gate is seeded through four tiers, in order:
 
     1. `gate_overrides[key]`  -- the matching CLI flag doc 00 §3.4's own
        table promises for every gate (`--remote-supervision`,
-       `--webapp-integration`, parsed by `app.build_parser()` with
+       `--webapp-integration`, `--tracking-history`, parsed by
+       `app.build_parser()` with
        `default=None` so "not passed" stays distinguishable from an
        explicit `off`).
     2. `os.environ.get(key)`  -- the like-named environment variable, so
@@ -52,8 +54,8 @@ otherwise there would be no way to turn a gate on after the first run
 except by hand-editing `installer.conf`, which is exactly the "the
 operator types a thing" failure mode the design rules out.
 
-`load()` parses both gates into the returned `Config` so a later module
-(`app.py`) can gate Steps 6/7 without re-implementing KEY=VALUE parsing.
+`load()` parses every gate into the returned `Config` so a later module
+(`app.py`) can gate Steps 6/7/8 without re-implementing KEY=VALUE parsing.
 
 Only `install_dir` itself is created by this module. The subdirectories
 under it (`secrets/`, `bin/`, `deepstream/`, `projects/`, `agent/`,
@@ -62,9 +64,10 @@ under it (`secrets/`, `bin/`, `deepstream/`, `projects/`, `agent/`,
 
 Public API:
     CONF_FILENAME       -- "installer.conf".
-    GATE_REMOTE_SUPERVISION / GATE_WEBAPP_INTEGRATION -- the §3.4 key names.
-    GATE_KEYS            -- both key names, in table order.
-    GATE_DEFAULTS         -- {key: "off"} for both.
+    GATE_REMOTE_SUPERVISION / GATE_WEBAPP_INTEGRATION / GATE_TRACKING_HISTORY
+        -- the §3.4 key names.
+    GATE_KEYS            -- every key name, in table order.
+    GATE_DEFAULTS         -- {key: "off"} for each.
     GATE_CHOICES          -- {key: allowed values}, in doc 00 §3.4's table
         order. `app.build_parser()` reads these straight into its argparse
         `choices=`, so the flag and the prompt can never disagree about
@@ -73,7 +76,8 @@ Public API:
         only to name the source in the "flag overrode a persisted value"
         log line.
     Config                -- dataclass: install_dir, remote_supervision,
-        webapp_integration, values (full parsed KEY=VALUE dict).
+        webapp_integration, tracking_history, values (full parsed KEY=VALUE
+        dict).
     load(install_dir_override, state, non_interactive, ...,
         gate_overrides=None) -> Config
 """
@@ -92,6 +96,7 @@ __all__ = [
     "CONF_FILENAME",
     "GATE_REMOTE_SUPERVISION",
     "GATE_WEBAPP_INTEGRATION",
+    "GATE_TRACKING_HISTORY",
     "GATE_KEYS",
     "GATE_DEFAULTS",
     "GATE_CHOICES",
@@ -120,15 +125,21 @@ CAMERA_SCAN_IFACE_KEY = "CAMERA_SCAN_IFACE"
 # exactly (bash-fragment-safe, uppercase, no lowercase/mixed variants).
 GATE_REMOTE_SUPERVISION = "MV3DT_REMOTE_SUPERVISION"
 GATE_WEBAPP_INTEGRATION = "MV3DT_WEBAPP_INTEGRATION"
-GATE_KEYS: tuple[str, ...] = (GATE_REMOTE_SUPERVISION, GATE_WEBAPP_INTEGRATION)
+GATE_TRACKING_HISTORY = "MV3DT_TRACKING_HISTORY"
+GATE_KEYS: tuple[str, ...] = (
+    GATE_REMOTE_SUPERVISION,
+    GATE_WEBAPP_INTEGRATION,
+    GATE_TRACKING_HISTORY,
+)
 GATE_DEFAULTS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "off",
     GATE_WEBAPP_INTEGRATION: "off",
+    GATE_TRACKING_HISTORY: "off",
 }
 
 # Allowed values per gate, in doc 00 §3.4's table order. Step 6's remote
-# supervision is three-valued; Step 7's web-app integration is binary. Note
-# that "off" is the uniform skip indicator across both, which is why
+# supervision is three-valued; Steps 7 and 8 are binary. Note
+# that "off" is the uniform skip indicator across all three, which is why
 # `app._gate_is_off()` tests for it by name rather than for "not on".
 # `app.build_parser()` feeds these tuples straight into argparse's
 # `choices=`, and `_prompt_for_gate()` below lists them in its prompt, so
@@ -136,6 +147,7 @@ GATE_DEFAULTS: dict[str, str] = {
 GATE_CHOICES: dict[str, tuple[str, ...]] = {
     GATE_REMOTE_SUPERVISION: ("off", "local", "remote"),
     GATE_WEBAPP_INTEGRATION: ("off", "on"),
+    GATE_TRACKING_HISTORY: ("off", "on"),
 }
 
 # The CLI flag that overrides each gate (doc 00 §3.4: "a matching CLI
@@ -144,6 +156,7 @@ GATE_CHOICES: dict[str, tuple[str, ...]] = {
 GATE_FLAGS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "--remote-supervision",
     GATE_WEBAPP_INTEGRATION: "--webapp-integration",
+    GATE_TRACKING_HISTORY: "--tracking-history",
 }
 
 # installer.conf also records the resolved install_dir under this key
@@ -161,6 +174,7 @@ class Config:
     install_dir: pathlib.Path
     remote_supervision: str = GATE_DEFAULTS[GATE_REMOTE_SUPERVISION]
     webapp_integration: str = GATE_DEFAULTS[GATE_WEBAPP_INTEGRATION]
+    tracking_history: str = GATE_DEFAULTS[GATE_TRACKING_HISTORY]
     # Full parsed installer.conf KEY=VALUE map, including the two gate keys
     # and INSTALL_DIR, plus anything else already present in the file (other
     # modules, e.g. ngc.py/webapp.py, may add their own shared vars here
@@ -331,7 +345,7 @@ def _resolve_gates(
     non_interactive: bool,
     prompt: Callable[[str], str],
 ) -> None:
-    """Fill in / update the two §3.4 gate keys of an already-parsed
+    """Fill in / update the §3.4 gate keys of an already-parsed
     `installer.conf` map, in place.
 
     A key absent from the file is being written for the first time and goes
@@ -435,5 +449,6 @@ def load(
         install_dir=resolved,
         remote_supervision=values[GATE_REMOTE_SUPERVISION],
         webapp_integration=values[GATE_WEBAPP_INTEGRATION],
+        tracking_history=values[GATE_TRACKING_HISTORY],
         values=values,
     )
