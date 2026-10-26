@@ -32,6 +32,11 @@ Scope, from the product owner (LOCKED):
 1. Transport is **HTTP** with `Authorization: Bearer <API_KEY>`, using the
    credential contract in [`00` §14](00-FRAMEWORK-AND-BOOTSTRAP.md#14-web-app-connection-contract).
    All connections are **outbound**; nothing listens.
+
+   > **Exception:** [`STEP-8`](STEP-8-TRACKING-HISTORY.md#3-network-exposure-locked)
+   > adds one tailnet-only, read-only listener for tracking history,
+   > bound to localhost and exposed only through `tailscale serve`. Step 7's
+   > own units stay outbound-only.
 2. File transfer uses a **three-phase signed-URL flow** — ask the backend for a
    pre-signed URL, `PUT` the bytes directly to storage, then confirm. Bytes
    never transit the API server.

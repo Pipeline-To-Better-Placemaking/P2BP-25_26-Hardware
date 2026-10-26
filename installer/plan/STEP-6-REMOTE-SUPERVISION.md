@@ -31,6 +31,11 @@ Scope, from the product owner (LOCKED):
    `mv3dt/#`). The desktop makes an **outbound** connection to the broker,
    **subscribes** to command topics, and **publishes** status back. There is
    **no inbound-to-desktop API** (firewall-friendly for on-prem).
+
+   > **Exception:** [`STEP-8`](STEP-8-TRACKING-HISTORY.md#3-network-exposure-locked)
+   > adds one tailnet-only, read-only listener for tracking history,
+   > bound to localhost and exposed only through `tailscale serve`. Step 6's
+   > own units stay outbound-only.
 4. Supervision = **systemd**, mirroring the P2BP camera-node `services/`
    pattern (`Restart=on-failure`, `WantedBy=multi-user.target`, journald
    logging). Those units are being removed from this fork
