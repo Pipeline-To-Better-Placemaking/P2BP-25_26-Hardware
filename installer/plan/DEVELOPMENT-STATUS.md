@@ -138,6 +138,7 @@ the binary and attaches it plus a `.sha256` to the release. The version in
 | Authenticated NGC Catalog API download for PeopleNet | Implemented and wired | Step 2 |
 | Failure context block, refusal evidence | Implemented, **call sites not retrofitted** | `report.py` |
 | Docker pull progress | Not started, open decision | — |
+| Step 8 tracking history (recorder + read-only tailnet API) | Specified, **not implemented, not run on the workstation** | [`STEP-8`](STEP-8-TRACKING-HISTORY.md) |
 
 "Implemented" means the code exists, has tests, and is merged to `main`.
 "Wired" means a step actually calls it during a real install. The gap between
