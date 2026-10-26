@@ -646,6 +646,20 @@ def test_redact_leaves_a_longer_key_intact(tmp_path):
     )
 
 
+def test_redact_covers_the_tracking_ticket_secret(tmp_path):
+    """STEP-8 section 4.3: the ticket secret is redacted by key and by
+    value, while the non-secret TICKET_ISSUER stays readable."""
+    assert (
+        shellout._redact("WORKSTATION_TICKET_SECRET=s3cr3t value")
+        == f"WORKSTATION_TICKET_SECRET={shellout._REDACTED}"
+    )
+    assert shellout._redact("TICKET_ISSUER=p2bp") == "TICKET_ISSUER=p2bp"
+    secrets = shellout._secret_values({"WORKSTATION_TICKET_SECRET": "tok-123"})
+    assert shellout._scrub("bearer tok-123 sent", secrets) == (
+        f"bearer {shellout._REDACTED} sent"
+    )
+
+
 # ---------------------------------------------------------------------------
 # run_streamed -- the tee runner (doc 08 §4.2)
 # ---------------------------------------------------------------------------

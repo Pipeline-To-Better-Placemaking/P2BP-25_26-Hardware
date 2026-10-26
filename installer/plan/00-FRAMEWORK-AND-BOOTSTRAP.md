@@ -360,8 +360,9 @@ def asset_path(*parts: str) -> pathlib.Path:
 - **Transcript capture (REQUIRED).** The command line and both output streams
   are logged through `logs.log`, satisfying §8.2's requirement that
   shelled-out stdout/stderr reach the transcript. Redaction is applied to any
-  `KEY=value` occurrence of `NGC_API_KEY`, `API_KEY`, `CAM_PASSWORD`, or
-  `MQTT_PASSWORD`, which print as `<redacted>` (§10.1, §14.4).
+  `KEY=value` occurrence of `NGC_API_KEY`, `API_KEY`, `CAM_PASSWORD`,
+  `MQTT_PASSWORD`, or `WORKSTATION_TICKET_SECRET` (the Step 8 ticket secret),
+  which print as `<redacted>` (§10.1, §14.4).
 - **`cleanup=True` removes the staging dir in a `finally`.** `cleanup=False`
   preserves it for debugging and is what tests use. Never execute directly
   from `sys._MEIPASS` — stage first, always.

@@ -112,7 +112,13 @@ ASSET_ROOT_ENV = "MV3DT_ASSET_ROOT"
 # Environment keys whose values must never reach the transcript (§8.2).
 # Longest-first alternation below so `NGC_API_KEY` is matched as a whole and
 # not as a bare `API_KEY` suffix.
-_REDACT_KEYS = ("NGC_API_KEY", "API_KEY", "CAM_PASSWORD", "MQTT_PASSWORD")
+_REDACT_KEYS = (
+    "NGC_API_KEY",
+    "API_KEY",
+    "CAM_PASSWORD",
+    "MQTT_PASSWORD",
+    "WORKSTATION_TICKET_SECRET",
+)
 _REDACTED = "<redacted>"
 
 # `KEY=` blanks the remainder of the line, not just the next whitespace-free
