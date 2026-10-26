@@ -166,3 +166,16 @@ def test_msgconv_defines_every_camera_index():
     for group in ("sensor", "place", "analytics"):
         for index in range(0, 9):
             assert f"[{group}{index}]" in text, f"{group}{index}"
+
+
+def test_camera_credentials_appear_only_in_source_uris():
+    """The renderer substitutes the credential placeholders everywhere, so one
+    in a comment would put the camera password in plain text."""
+    offenders = [
+        f"{path.name}: {line.strip()}"
+        for path in TEMPLATE_FILES
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if ("${CAM_USER}" in line or "${CAM_PASSWORD}" in line)
+        and not line.startswith("uri=")
+    ]
+    assert offenders == []

@@ -7,8 +7,9 @@
 # with an MQTT sink publishing SV3DT + fused MV3DT tracks to localhost.
 #
 # 40_export_watcher.sh renders this file in place after AMC produces a
-# calibration export (substituting the ${CAM_USER}/${CAM_PASSWORD} and the
-# per-camera RTSP URIs from laptop/config/cameras.yml). You can also run
+# calibration export (substituting the camera user and password from
+# secrets/camera.env and the per-camera RTSP URIs from
+# laptop/config/cameras.yml). You can also run
 # deepstream-app against the committed copy as a syntax/sanity check with
 # placeholder credentials.
 #
