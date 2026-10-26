@@ -90,8 +90,50 @@ def test_tracker_configures_single_view_3d_the_way_deepstream_reads_it():
     projection = sections["ObjectModelProjection"]
     assert "- ${CAMERA_MODEL_FILEPATH}" in projection
     assert any(line.startswith("outputFootLocation: 1") for line in projection)
+
+
+def test_tracker_baseline_matches_the_live_tuned_workstation():
+    """The template baseline is the tuned config running on the live
+    workstation: BodyPose3DNet pose estimation and MQTT multi-view fusion."""
+    sections = _sections(TEMPLATES / "config_tracker_NvMOT.yml")
+    # useBatchNumForFrameId 1 deadlocked MV3DT startup on live RTSP starts.
+    assert "useBatchNumForFrameId: 0" in sections["BaseConfig"]
+    projection = sections["ObjectModelProjection"]
+    assert "minPoseConfidence: 0.5" in projection
     pose = sections["PoseEstimator"]
-    assert any(line.startswith("poseEstimatorType: 0") for line in pose)
+    assert any(line.startswith("poseEstimatorType: 1") for line in pose)
+    assert any(line.startswith("poseInferenceInterval: 5") for line in pose)
+    bodypose = "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"
+    assert any(line.startswith(f'onnxFile: "{bodypose}"') for line in pose)
+    engine = f'modelEngineFile: "{bodypose}_b1_gpu0_fp16.engine"'
+    assert any(line.startswith(engine) for line in pose)
+    associator = sections["MultiViewAssociator"]
+    for setting in (
+        "multiViewAssociatorType: 1",
+        "enableLatePeerReAssoc: 1",
+        "enableIDCorrection: 1",
+        "enableMsgSync: 0",
+        "communicatorInitSleepTime: 0",
+    ):
+        assert setting in associator, setting
+    communicator = sections["Communicator"]
+    assert any(line.startswith("communicatorType: 2") for line in communicator)
+    assert (
+        "pubSubInfoConfigPath: /opt/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml"
+        in communicator
+    )
+    assert (
+        "mqttProtoAdaptorConfigPath: /opt/mv3dt/deepstream/mv3dt/config_mqtt.txt"
+        in communicator
+    )
+
+
+def test_detector_and_app_baseline_match_the_live_tuned_workstation():
+    infer = _setting_lines(TEMPLATES / "config_infer_primary.txt")
+    assert "pre-cluster-threshold=0.4" in infer
+    app = (TEMPLATES / "deepstream_app_config.txt").read_text(encoding="utf-8")
+    tracker = re.search(r"(?ms)^\[tracker\]\n.*?(?=^\[|\Z)", app).group(0)
+    assert re.search(r"(?m)^display-tracking-id=1$", tracker)
 
 
 def test_tracker_size_is_a_multiple_of_32():

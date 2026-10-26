@@ -122,6 +122,7 @@ batch-size=8
 config-file=config_infer_primary.txt
 
 [tracker]
+display-tracking-id=1
 enable=1
 tracker-width=1920
 tracker-height=1088

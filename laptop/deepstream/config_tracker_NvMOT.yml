@@ -28,13 +28,17 @@
 #     source order, converted from AMC's export (STEP-4 section 6.4).
 #   - ReID model paths are relative to <install_dir>/deepstream; Step 4
 #     downloads the model (STEP-4 section 6.3).
-#   - poseEstimatorType 0: fixed-height person model, no BodyPose3DNet.
 #   - outputTerminatedTracks 0: no track dump files.
+# The tuned values below (detector, target management, pose estimation,
+# multi-view fusion) are the ones running on the live workstation.
 # DeepStream silently ignores unknown top-level sections; there is no
-# SV3DT: or MV3DT: section. Multi-view fusion (MV3DT) needs a Communicator
-# section and is not configured yet.
+# SV3DT: or MV3DT: section. Multi-view fusion is MultiViewAssociator plus
+# Communicator, which exchanges peer tracklets over MQTT.
 
 BaseConfig:
+  # 1 deadlocked MV3DT startup on ~40% of live RTSP starts, in
+  # MultiViewAssociator::processReceivedMessagesToCurrentFrame.
+  useBatchNumForFrameId: 0
   minDetectorConfidence: 0.1894    # If the confidence of a detector bbox is lower than this, then it won't be considered for tracking
 
 TargetManagement:
@@ -43,10 +47,10 @@ TargetManagement:
   maxTargetsPerStream: 150    # Max number of targets to track per stream. Recommended to set >10. Note: this value should account for the targets being tracked in shadow mode as well. Max value depends on the GPU memory capacity
 
   # [Creation & Termination Policy]
-  minIouDiff4NewTarget: 0.3686    # If the IOU between the newly detected object and any of the existing targets is higher than this threshold, this newly detected object will be discarded.
+  minIouDiff4NewTarget: 0.2    # If the IOU between the newly detected object and any of the existing targets is higher than this threshold, this newly detected object will be discarded.
   minTrackerConfidence: 0.1513    # If the confidence of an object tracker is lower than this on the fly, then it will be tracked in shadow mode. Valid Range: [0.0, 1.0]
   probationAge: 2    # If the target's age exceeds this, the target will be considered to be valid.
-  maxShadowTrackingAge: 42    # Max length of shadow tracking. If the shadowTrackingAge exceeds this limit, the tracker will be terminated.
+  maxShadowTrackingAge: 75    # Max length of shadow tracking. If the shadowTrackingAge exceeds this limit, the tracker will be terminated.
   earlyTerminationAge: 1    # If the shadowTrackingAge reaches this threshold while in TENTATIVE period, the target will be terminated prematurely.
 
   # dump tracklets in txt file
@@ -111,7 +115,7 @@ StateEstimator:
   measurementNoiseVar4Tracker: 293.3238    # Measurement noise variance for tracker's localization
 
 ObjectModelProjection:
-  minPoseConfidence: 0.925
+  minPoseConfidence: 0.5
   cameraModelFilepath: # one per camera, in source order; rendered by Step 4
   - ${CAMERA_MODEL_FILEPATH}
   outputVisibility: 1 # output visibility by occlusion
@@ -162,7 +166,7 @@ ReID:
   modelEngineFile: "models/reid/resnet50_market1501.etlt_b100_gpu0_fp16.engine" # Engine file path
 
 PoseEstimator:
-  poseEstimatorType: 0  # Type of pose estimator used
+  poseEstimatorType: 1  # Type of pose estimator used
   useVPICropScaler: 1  # Use VPI backend for cropping and scaling
   batchSize: 1  # Batch size for pose estimation
   workspaceSize: 1000  # Workspace size in MB for the pose estimator engine
@@ -172,6 +176,27 @@ PoseEstimator:
   colorFormat: 0  # Input color format (RGB=0, BGR=1)
   offsets: [123.6750, 116.2800, 103.5300]  # Channel-wise mean subtraction values
   netScaleFactor: 0.00392156  # Scaling factor for input normalization
-  onnxFile: "/opt/nvidia/deepstream/deepstream/samples/models/Tracker/bodypose3dnet_accuracy.onnx"  # Path to the ONNX model file
-  modelEngineFile: "/opt/nvidia/deepstream/deepstream/samples/models/Tracker/bodypose3dnet_accuracy.onnx_b1_gpu0_fp16.engine"  # Path to the engine file
-  poseInferenceInterval: -1  #  Pose inference frame interval. -1 means only for the first frame of each target and use it to determine the target height.
+  onnxFile: "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"  # Path to the ONNX model file
+  modelEngineFile: "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx_b1_gpu0_fp16.engine"  # Path to the engine file
+  poseInferenceInterval: 5  #  Pose inference frame interval. -1 means only for the first frame of each target and use it to determine the target height.
+
+MultiViewAssociator:
+  multiViewAssociatorType: 1
+  enableLatePeerReAssoc: 1
+  enableIDCorrection: 1
+  enableSeeThrough: 1
+  enableMsgSync: 0
+  maxPeerTrackletSize: 50
+  recentlyActiveAge: 178
+  minCommonFrames4MatchScore: 2
+  maxPeerToPredDistance4Fusion: 2.0
+  minPeerVisibility4Fusion: 0.15
+  minPeerTrackletMatchScore: 0.35
+  maxTrackletMatchingTimeSearchRange: 1
+  maxPeerFrameDiff4NoDet: 2
+  communicatorInitSleepTime: 0
+
+Communicator:
+  communicatorType: 2  # MQTT
+  pubSubInfoConfigPath: /opt/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml
+  mqttProtoAdaptorConfigPath: /opt/mv3dt/deepstream/mv3dt/config_mqtt.txt

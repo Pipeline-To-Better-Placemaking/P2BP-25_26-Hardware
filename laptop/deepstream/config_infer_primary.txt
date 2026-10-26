@@ -61,6 +61,6 @@ cluster-mode=2
 maintain-aspect-ratio=1
 
 [class-attrs-all]
-pre-cluster-threshold=0.2
+pre-cluster-threshold=0.4
 nms-iou-threshold=0.5
 topk=20
