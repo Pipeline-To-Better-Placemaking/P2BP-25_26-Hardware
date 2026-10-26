@@ -38,6 +38,7 @@ import secrets
 import shutil
 import sqlite3
 import stat as stat_mod
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -77,6 +78,7 @@ TAILSCALE_SERVE_ARGV = (
     LISTEN_URL,
 )
 TAILSCALE_SERVE_COMMAND = " ".join(("sudo",) + TAILSCALE_SERVE_ARGV)
+TAILSCALE_TIMEOUT_S = 30.0
 
 DATA_DIR = pathlib.Path("/var/lib/mv3dt-tracking")
 DATA_DIR_MODE = 0o750
@@ -462,7 +464,13 @@ def tailscale_state(ctx: Any) -> tuple:
         return False, False, None
     try:
         result = ctx.run_root(
-            "tailscale", "status", "--json", capture_output=True, text=True, stream=False
+            "tailscale",
+            "status",
+            "--json",
+            capture_output=True,
+            text=True,
+            stream=False,
+            timeout=TAILSCALE_TIMEOUT_S,
         )
     except Exception:  # noqa: BLE001 -- a probe, never fatal
         return True, False, None
@@ -486,10 +494,21 @@ def _expose(ctx: Any) -> bool:
             f"machine. After `sudo tailscale up`, run: {TAILSCALE_SERVE_COMMAND}"
         )
         return False
-    result = ctx.run_root(*TAILSCALE_SERVE_ARGV, capture_output=True, text=True)
-    if getattr(result, "returncode", 1) != 0:
+    try:
+        result = ctx.run_root(
+            *TAILSCALE_SERVE_ARGV,
+            capture_output=True,
+            text=True,
+            timeout=TAILSCALE_TIMEOUT_S,
+        )
+        failure = None if getattr(result, "returncode", 1) == 0 else _tail(result, 300)
+    except subprocess.TimeoutExpired:
+        failure = f"timed out after {TAILSCALE_TIMEOUT_S:.0f}s"
+    except Exception as exc:  # noqa: BLE001 -- exposure is never fatal
+        failure = str(exc)
+    if failure is not None:
         log.warn(
-            f"tailscale serve failed ({_tail(result, 300)}); run it by hand: "
+            f"tailscale serve failed ({failure}); run it by hand: "
             f"{TAILSCALE_SERVE_COMMAND}"
         )
         return False
@@ -869,6 +888,12 @@ def _handle_tracking(argv: list, ctx: Any) -> int:
     wipe_args = ["wipe", "--yes"] + (["--before", args.before] if args.before else [])
     runner = _runner_from_ctx(ctx)
     runner(["systemctl", "stop", UNIT_NAME], check=False)
+    # A missing unit is not active either, so a wipe without the service
+    # still works; a unit that refused to stop must not have its files
+    # deleted underneath it.
+    if systemd.is_active(UNIT_NAME, runner=runner):
+        log.error(f"{UNIT_NAME} is still active after stop; refusing to wipe")
+        return 1
     try:
         result = ctx.run_as_user(*_package_argv(ctx, *wipe_args))
     finally:

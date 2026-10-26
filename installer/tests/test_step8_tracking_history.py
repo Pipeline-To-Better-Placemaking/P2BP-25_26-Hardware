@@ -36,6 +36,7 @@ class Runner:
         self.python_version = python_version
         self.tailscale_status = tailscale_status
         self.fail = set(fail)
+        self.active = None  # None: is-active succeeds except in wipe tests
 
     def __call__(self, *argv, **kwargs):
         argv = tuple(str(a) for a in argv)
@@ -56,6 +57,8 @@ class Runner:
                 out = json.dumps(self.tailscale_status)
         elif argv[:2] == ("systemctl", "is-enabled"):
             out = "enabled\n"
+        elif argv[:2] == ("systemctl", "is-active") and self.active is not None:
+            code = 0 if self.active else 3
         for needle in self.fail:
             if needle in argv:
                 code = 1
@@ -467,6 +470,25 @@ def test_run_without_tailscale_warns_with_manual_command(tmp_path, env_values, m
     assert "sudo tailscale serve --bg --https=8443 http://127.0.0.1:8090" in err
 
 
+def test_tailscale_serve_timeout_falls_back_to_manual_command(
+    tmp_path, env_values, capsys
+):
+    runner = Runner(tailscale_status=_logged_in())
+
+    def run(*argv, **kwargs):
+        if argv[:2] == ("tailscale", "serve"):
+            assert kwargs["timeout"] == s8.TAILSCALE_TIMEOUT_S
+            raise s8.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return runner(*argv, **kwargs)
+
+    ctx = Context(tmp_path, runner=run)
+
+    assert s8.Step8TrackingHistory().run(ctx).status is StepStatus.COMPLETE
+    err = capsys.readouterr().err
+    assert "tailscale serve failed (timed out after 30s)" in err
+    assert s8.TAILSCALE_SERVE_COMMAND in err
+
+
 def test_run_never_logs_the_secret(tmp_path, env_values, capsys):
     ctx = Context(tmp_path, runner=Runner(tailscale_status=_logged_in()))
     step = s8.Step8TrackingHistory()
@@ -561,6 +583,7 @@ def _with_venv(tmp_path):
     python = ctx.install_dir / "tracking" / "venv" / "bin" / "python3"
     python.parent.mkdir(parents=True)
     python.write_text("", encoding="utf-8")
+    ctx.runner.active = False  # the unit stops cleanly unless a test says otherwise
     return ctx, python
 
 
@@ -578,8 +601,9 @@ def test_wipe_stops_runs_package_then_starts(tmp_path):
     )
 
     assert rc == 0
-    stop, wipe, start = ctx.runner.calls
+    stop, check, wipe, start = ctx.runner.calls
     assert stop == ("systemctl", "stop", s8.UNIT_NAME)
+    assert check == ("systemctl", "is-active", "--quiet", s8.UNIT_NAME)
     assert start == ("systemctl", "start", s8.UNIT_NAME)
     assert wipe[0] == "env"
     assert f"DATA_DIR={s8.DATA_DIR}" in wipe
@@ -587,6 +611,27 @@ def test_wipe_stops_runs_package_then_starts(tmp_path):
         str(python), "-m", "mv3dt_tracking", "wipe", "--yes", "--before", "2026-10-01",
     )
     assert not any(s8.KEY_SECRET in arg for arg in wipe)
+
+
+def test_wipe_refuses_when_unit_stays_active(tmp_path, capsys):
+    ctx, _ = _with_venv(tmp_path)
+    ctx.runner.active = True
+
+    assert s8._handle_tracking(["wipe", "--yes"], ctx) == 1
+    assert ctx.runner.calls == [
+        ("systemctl", "stop", s8.UNIT_NAME),
+        ("systemctl", "is-active", "--quiet", s8.UNIT_NAME),
+    ]
+    assert "refusing to wipe" in capsys.readouterr().err
+
+
+def test_wipe_runs_when_unit_does_not_exist(tmp_path):
+    ctx, python = _with_venv(tmp_path)
+    ctx.runner.fail = {"stop", "start"}
+
+    s8._handle_tracking(["wipe", "--yes"], ctx)
+
+    assert any(str(python) in call and "wipe" in call for call in ctx.runner.calls)
 
 
 def test_wipe_restarts_unit_even_when_wipe_fails(tmp_path):

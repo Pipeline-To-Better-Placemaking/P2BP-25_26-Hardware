@@ -428,7 +428,9 @@ mv3dt-installer tracking wipe --yes [--before DATE]
 **RESOLVED — wipe sequence.** `wipe --yes` stops `mv3dt-tracking`, deletes
 the day files (all of them, or only days before `DATE`), and starts the
 service again, so recording resumes on a clean state. Without `--yes` it
-refuses.
+refuses. If the unit is still active after the stop, it refuses and leaves
+the files and the service alone; a workstation without the unit can still
+be wiped.
 Wipe is local only ([section 3.1](#31-security-controls-required)).
 
 ---
@@ -447,6 +449,12 @@ Implements the `Step` protocol
   not logged in, the step still installs the service; the expose sub-phase
   of `run` is reported as a warning that prints the manual
   `tailscale serve` command. `tailscale funnel` is never used.
+- **RESOLVED — missing calibration output is a warning.** Recording needs
+  only `LOCATION_ID` and the broker, so a missing `map.png`,
+  `transforms.yml` or camera model is logged as a warning and the step
+  continues. Only `GET /tracking/meta` and `GET /tracking/floorplan.png`
+  are affected: they return no floor plan or camera positions until Step 4
+  output exists. A missing `LOCATION_ID` still stops the step.
 
 ### 11.2 `run(ctx)`
 
@@ -490,6 +498,12 @@ row count, the `journalctl -u mv3dt-tracking` command, and the instruction
 to read the ticket secret once with `sudo cat` and copy it into the web app
 ([section 4.3](#43-trackingenv)). Never prints the secret itself.
 
+**RESOLVED — the report names the tailnet URL.** It also prints the value
+for the web app's `WORKSTATION_TRACKING_URL`, built from the machine's
+Tailscale DNS name as `https://<name>:8443`, or with a placeholder for the
+name when Tailscale is not logged in. That is the one other setting the
+operator copies into the web app's environment.
+
 ---
 
 ## 12. Out of scope
@@ -518,7 +532,7 @@ recorded in place as **RESOLVED**.
 | H2 Store + stitch | `feat/installer-tracking-store` | `assets/tracking/mv3dt_tracking/__init__.py`, `store.py`, `stitch.py`, `tests/tracking/test_store.py`, `tests/tracking/test_stitch.py` | none | 1 |
 | H3 Decode + recorder | `feat/installer-tracking-recorder` | `assets/tracking/mv3dt_tracking/decode.py`, `recorder.py`, `tests/tracking/test_decode.py`, `tests/tracking/test_recorder.py`, `tests/tracking/fixtures/frame_camera1.hex` | none | 1 |
 | H4 Auth + lock + API + CLI | `feat/installer-tracking-api` | `assets/tracking/mv3dt_tracking/auth.py`, `lock.py`, `api.py`, `cli.py`, `assets/tracking/requirements.txt`, `tests/tracking/test_api.py`, `tests/tracking/test_auth.py`, `tests/tracking/test_lock.py` | H2, H3 | 2 |
-| H5 STEP-8 step | `feat/installer-step8-tracking` | `steps/step8_tracking_history.py`, `__main__.py`, `config.py`, `app.py`, `assets/systemd/mv3dt-tracking.service.in`, `installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`, `tests/test_step8.py` | H1, H3, H4 | 3 |
+| H5 STEP-8 step | `feat/installer-step8-tracking` | `steps/step8_tracking_history.py`, `__main__.py`, `config.py`, `app.py`, `assets/systemd/mv3dt-tracking.service.in`, `state.py`, `shellout.py`, `installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`, `tests/test_step8_tracking_history.py`, `tests/test_main.py`, `tests/test_config.py`, `tests/test_shellout.py` | H1, H3, H4 | 3 |
 
 Package paths are relative to `installer/mv3dt_installer/`; test paths are
 relative to `installer/`.
