@@ -177,3 +177,26 @@ def test_stop_without_start_is_safe():
     rec = Recorder(CollectingSink(), "t")
     rec.stop()
     assert rec.stats()["messages"] == 0
+
+
+def test_failed_start_is_cleaned_up_and_can_be_retried():
+    class FailingClient(FakeClient):
+        def connect_async(self, host, port, keepalive=60):
+            raise OSError("no route")
+
+    attempts = [FailingClient(), FakeClient()]
+    sink = CollectingSink()
+    rec = Recorder(sink, "mv3dt/test/sv3d", client_factory=lambda: attempts.pop(0), flush_interval_s=0.05)
+    before = {t.name for t in threading.enumerate()}
+    with pytest.raises(OSError):
+        rec.start()
+    assert "mv3dt-recorder-flush" not in {t.name for t in threading.enumerate()} - before
+    assert rec._client is None and rec._flusher is None
+
+    rec.start()
+    try:
+        assert rec._client.loop_running
+        rec._client.deliver(PAYLOAD)
+        assert sink.event.wait(2.0)
+    finally:
+        rec.stop()

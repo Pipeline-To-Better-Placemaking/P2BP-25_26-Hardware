@@ -15,11 +15,15 @@ else. Field numbers follow DeepStream's ``nvmsgconv_mega`` ``schema.proto``:
 
 Row mapping: ``x``/``y`` come from ``info["footLocation3D"]`` ("x,y" in
 metres), falling back to bbox3d x/y; ``z``/``w``/``l``/``h`` come from bbox3d
-coordinates 2..5 when present. Objects whose id is not numeric are skipped.
+coordinates 2..5 when present. Objects whose id is not a plain ASCII-digit
+string are skipped. A missing or all-zero timestamp falls back to the
+caller's receive time.
 """
 
 from __future__ import annotations
 
+import math
+import re
 import struct
 
 __all__ = ["DecodeError", "decode_frame"]
@@ -29,6 +33,8 @@ _VARINT = 0
 _I64 = 1
 _LEN = 2
 _I32 = 5
+
+_TRACK_ID = re.compile(r"[0-9]+")
 
 
 class DecodeError(ValueError):
@@ -142,9 +148,12 @@ def _foot_xy(text: str) -> tuple[float, float] | None:
     if len(parts) < 2:
         return None
     try:
-        return float(parts[0]), float(parts[1])
+        x, y = float(parts[0]), float(parts[1])
     except ValueError:
         return None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
 
 
 def _object_row(buf: bytes, span: tuple[int, int]) -> dict | None:
@@ -163,10 +172,10 @@ def _object_row(buf: bytes, span: tuple[int, int]) -> dict | None:
         elif field == 14 and wire == _LEN:
             coords = _bbox3d_coords(buf, value)
 
-    try:
-        track_id = int(obj_id)
-    except ValueError:
+    # int() alone would also accept "1_0", " 12 ", "-5" and non-ASCII digits.
+    if not _TRACK_ID.fullmatch(obj_id):
         return None
+    track_id = int(obj_id)
 
     xy = _foot_xy(info.get("footLocation3D", ""))
     if xy is None and len(coords) >= 2:
@@ -193,7 +202,7 @@ def decode_frame(payload: bytes, recv_ms: int | None = None) -> list[dict]:
 
     Each row has keys ``ts_ms, sensor, track_id, x, y, z, w, l, h, conf``.
     ``ts_ms`` is the frame timestamp, or ``recv_ms`` when the frame carries
-    none. Raises :class:`DecodeError` on malformed input.
+    none or an all-zero one. Raises :class:`DecodeError` on malformed input.
     """
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         raise DecodeError("payload must be bytes")
@@ -211,6 +220,6 @@ def decode_frame(payload: bytes, recv_ms: int | None = None) -> list[dict]:
             if row is not None:
                 objects.append(row)
 
-    if ts_ms is None:
+    if not ts_ms and recv_ms is not None:
         ts_ms = recv_ms
     return [{"ts_ms": ts_ms, "sensor": sensor, **row} for row in objects]

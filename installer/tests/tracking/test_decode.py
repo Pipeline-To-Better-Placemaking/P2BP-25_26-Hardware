@@ -94,13 +94,30 @@ def test_synthetic_frame_timestamp_and_sensor():
     assert rows[0]["z"] is None and rows[0]["h"] is None
 
 
+@pytest.mark.parametrize("foot", ["nan,1", "1,inf", "-inf,-inf"])
+def test_non_finite_foot_location_falls_back_to_bbox3d(foot):
+    rows = decode_frame(_frame(_object("3", foot=foot, coords=[4.0, -5.0])))
+    assert (rows[0]["x"], rows[0]["y"]) == (4.0, -5.0)
+
+
+def test_zero_timestamp_falls_back_to_recv_ms():
+    rows = decode_frame(_frame(_object("7", foot="0,0"), seconds=0, nanos=0), recv_ms=42)
+    assert rows[0]["ts_ms"] == 42
+
+
+def test_empty_timestamp_message_falls_back_to_recv_ms():
+    body = _str(1, "4.0") + _len(3, b"") + _str(4, "camera2") + _object("7", foot="0,0")
+    assert decode_frame(body, recv_ms=42)[0]["ts_ms"] == 42
+
+
 def test_missing_timestamp_falls_back_to_recv_ms():
     rows = decode_frame(_frame(_object("7", foot="0,0"), seconds=None), recv_ms=123456)
     assert rows[0]["ts_ms"] == 123456
 
 
-def test_non_numeric_object_id_is_skipped():
-    rows = decode_frame(_frame(_object("abc", foot="1,1"), _object("9", foot="2,2")))
+@pytest.mark.parametrize("bad_id", ["abc", "", "1_0", " 12 ", "-5", "+5", "\u0661\u0662", "1.0"])
+def test_non_numeric_object_id_is_skipped(bad_id):
+    rows = decode_frame(_frame(_object(bad_id, foot="1,1"), _object("9", foot="2,2")))
     assert [r["track_id"] for r in rows] == [9]
 
 
