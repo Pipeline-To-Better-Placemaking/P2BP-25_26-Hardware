@@ -44,12 +44,14 @@ submodule.
 
 | Value | Pin |
 |---|---|
-| Repository | `https://github.com/NVIDIA-AI-IOT/auto-magic-calib.git` |
-| AMC release | `3.2.1` |
-| Commit | `0cfd2b790fd77598b0543340a65c2a0e1d192327` |
+| Repository | `https://github.com/NVIDIA/DeepStream.git` |
+| Tag | `v9.2.0` |
+| Sparse path | `tools/auto-magic-calib` |
+| AMC release | `3.3.0` |
+| Commit | `bbcd9ad3eca558a394318f8a6274e180a1f7bd60` |
 | Compose file | `<AMC_ROOT>/compose/compose.yml` |
-| MS image | `nvcr.io/nvidia/auto-magic-calib:3.2.1` |
-| UI image | `nvcr.io/nvidia/auto-magic-calib-ui:3.2.1` |
+| MS image | `nvcr.io/nvidia/vss-core/vss-auto-calibration:3.3.0` |
+| UI image | `nvcr.io/nvidia/vss-core/vss-auto-calibration-ui:3.3.0` |
 
 Every Git command checks its exit status and includes bounded stderr/stdout in
 the failure. An existing checkout is accepted only when its `origin` matches
