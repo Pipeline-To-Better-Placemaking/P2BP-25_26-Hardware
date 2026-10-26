@@ -347,12 +347,12 @@ password = password
 set-threaded = 0
 ```
 
-`username = user` and `password = password` are the fixed placeholders from
-NVIDIA's MV3DT sample, not credentials: the broker allows anonymous access,
-and the live pipeline log confirms it connects with exactly these values.
-They are never replaced with a real credential. The golden render of
-[section 7](#7-verification) compares `username`, `password` and
-`set-threaded` exactly.
+`username = user` and `password = password` are the fixed non-secret
+placeholders from NVIDIA's MV3DT sample, not credentials: the local broker
+allows anonymous access. They are never replaced with a real credential. The
+golden render of [section 7](#7-verification) compares `username` and
+`set-threaded` exactly and only checks that a `password` line is present,
+because the live value was redacted in the snapshot.
 
 ### 5.2 Dewarpers
 
@@ -539,7 +539,11 @@ The second command must print `disabled`.
    ```
 
    Any difference beyond comments is a finding: stop and diagnose before
-   accepting.
+   accepting. One expected exception: `configs diff` shows the live
+   `password` line of `mv3dt/config_mqtt.txt`, and accepting replaces it with
+   the `password = password` placeholder of
+   [section 5.1](#51-fusion-pubsub-and-mqtt-adaptor). That is fine because
+   the broker is anonymous.
 5. **Remove the hand-made pieces** and restart:
 
    ```bash
