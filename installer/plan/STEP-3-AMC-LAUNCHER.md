@@ -3,7 +3,8 @@
 Status: Step specification; depends on [`00` §8](00-FRAMEWORK-AND-BOOTSTRAP.md#8-verbose-logging--reporting-contract) and [`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-user-action-display--privilegesudo-contract), and does **not** restate those shared logging or privilege contracts.
 
 This step installs and launches NVIDIA AutoMagicCalib (AMC) from the
-**standalone, equality-pinned AMC 3.2.1 checkout**. It replaces
+**equality-pinned AMC 3.3.0 sparse checkout** of the NVIDIA DeepStream
+repository. It replaces
 `laptop/scripts/30_start_amc.sh` with one resumable path shared by the installer
 and `<install_dir>/bin/amc`.
 
@@ -38,9 +39,25 @@ immediate launch still completes the durable launcher installation.
 
 ## 2. Upstream pin
 
-**LOCKED:** use the active standalone repository, not a sparse checkout of the
-DeepStream monorepo. The DeepStream repository records the same AMC commit as a
-submodule.
+**LOCKED:** use a sparse checkout of `tools/auto-magic-calib` from the NVIDIA
+DeepStream repository at tag `v9.2.0` (AMC 3.3.0). The standalone AMC 3.2.1
+repository is superseded, and the live workstation calibrates with 3.3.0,
+which adds rectification. The clone is blobless, limited to the sparse path,
+and detached at the pinned commit. The tag is lightweight, so the commit below
+is the tag target itself.
+
+```bash
+git clone --progress --filter=blob:none --no-checkout --sparse --depth 1 \
+  --branch v9.2.0 https://github.com/NVIDIA/DeepStream.git "$HOME/amc-3.3.0"
+git -C "$HOME/amc-3.3.0" sparse-checkout set tools/auto-magic-calib
+git -C "$HOME/amc-3.3.0" checkout --detach bbcd9ad3eca558a394318f8a6274e180a1f7bd60
+```
+
+An existing `AMC_ROOT` in `installer.conf` that is not shaped
+`<clone>/tools/auto-magic-calib` (the pre-3.3.0 standalone checkout) is never
+rewritten. Step 3 reports it as a warning with the migration hint to set
+`AMC_ROOT` and `AMC_PROJECT_ID` to the 3.3.0 values, `verify()` skips the
+commit pin for it, and a launch from it is refused.
 
 | Value | Pin |
 |---|---|
@@ -58,7 +75,7 @@ the failure. An existing checkout is accepted only when its `origin` matches
 the pinned repository. A clean checkout at another revision is fetched and
 detached at the pin. Tracked source changes remain fatal, while untracked data
 created by AMC under `projects/` and `models/` and the installer-managed
-`compose/.env` are accepted on rerun. An unrelated directory, invalid origin,
+`compose/.env` (all under the sparse path) are accepted on rerun. An unrelated directory, invalid origin,
 or partial clone fails without deleting or overwriting operator data; failures
 name the unexpected paths.
 
@@ -108,7 +125,7 @@ fatal. The transcript carries command evidence without secrets.
 
 | Key | Default or source | Consumer |
 |---|---|---|
-| `AMC_ROOT` | `$HOME/auto-magic-calib` | Step 3 clone and Step 4 result context |
+| `AMC_ROOT` | `$HOME/amc-3.3.0/tools/auto-magic-calib` | Step 3 clone and Step 4 result context |
 | `HOST_IP` | detected primary IPv4, fallback `127.0.0.1` | AMC UI API URL |
 | `AUTO_MAGIC_CALIB_UI_PORT` | first free port from `5000` through `5099` | browser/UI |
 | `AUTO_MAGIC_CALIB_MS_PORT` | first free port from `8000` through `8099` | REST API |
@@ -133,17 +150,18 @@ runs ask only for missing values. Non-interactive runs require a persisted
 The generated `<AMC_ROOT>/compose/.env` contains the pinned upstream keys:
 
 ```dotenv
-HOST_IP=127.0.0.1
 AUTO_MAGIC_CALIB_MS_PORT=8000
 AUTO_MAGIC_CALIB_UI_PORT=5000
-PROJECT_DIR=/home/operator/auto-magic-calib/projects
-MODEL_DIR=/home/operator/auto-magic-calib/models
+PROJECT_DIR=/home/operator/amc-3.3.0/tools/auto-magic-calib/projects
+MODEL_DIR=/home/operator/amc-3.3.0/tools/auto-magic-calib/models
+HOST_IP=127.0.0.1
 ```
 
 `AUTO_MAGIC_CALIB_MS_API_URL` is appended only when configured. The file is
 written atomically and only when content changes. `PROJECT_NAME` and
 `NVIDIA_VISIBLE_DEVICES` are not injected into the Compose environment because
-AMC 3.2.1 does not consume them there.
+AMC 3.3.0 does not consume them there. The upstream optional `VIOS_BASE_URL`
+(RTSP input) and `VGGT_MODEL_PATH` keys are left at their Compose defaults.
 
 ---
 
@@ -220,9 +238,9 @@ report both failures.
 ### 6.2 AMC project contract
 
 **RESOLVED:** Step 3 resolves a project only by its persisted ID and never
-searches by name. AMC 3.2.1 does serve `GET /v1/list_projects` (confirmed
-against the running API's own `/openapi.yaml`, 2026-10-20), but nothing in its
-contract makes project names unique, so a name match could select the wrong
+searches by name. AMC serves `GET /v1/list_projects` (confirmed against the
+running 3.2.1 API's own `/openapi.yaml`, 2026-10-20; AMC 3.3.0 keeps the same
+`/v1` API), but nothing in its contract makes project names unique, so a name match could select the wrong
 project.
 
 1. **Reuse persisted identity**: when `AMC_PROJECT_ID` exists, call
@@ -354,13 +372,14 @@ Step 4 must merge after this unit because its result API consumes the persisted
 
 ## References
 
-NVIDIA's AMC 3.2.1 repository and official runtime documentation are the
+NVIDIA's AMC 3.3.0 sources in the DeepStream repository and official runtime
+documentation are the
 authority for the repository pin, Compose layout, image authentication,
 readiness response, and project/result API endpoints.
 
-- [AutoMagicCalib 3.2.1 repository](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/tree/0cfd2b790fd77598b0543340a65c2a0e1d192327) — pinned source and Compose files.
-- [AMC setup skill](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/skills/amc-setup-calibration-stack/SKILL.md) — Compose, NGC, and HTTP checks; its 120-second readiness budget is extended for first launch in §6.1.
-- [AMC video-calibration skill](https://github.com/NVIDIA-AI-IOT/auto-magic-calib/blob/0cfd2b790fd77598b0543340a65c2a0e1d192327/skills/amc-run-video-calibration/SKILL.md) — project creation, project lookup, and MV3DT result endpoint.
+- [AutoMagicCalib 3.3.0 in DeepStream v9.2.0](https://github.com/NVIDIA/DeepStream/tree/bbcd9ad3eca558a394318f8a6274e180a1f7bd60/tools/auto-magic-calib) — pinned source and Compose files.
+- [AMC setup skill](https://github.com/NVIDIA/DeepStream/blob/bbcd9ad3eca558a394318f8a6274e180a1f7bd60/skills/amc-setup-calibration-stack/SKILL.md) — Compose, NGC, and HTTP checks; its 120-second readiness budget is extended for first launch in §6.1.
+- [AMC video-calibration skill](https://github.com/NVIDIA/DeepStream/blob/bbcd9ad3eca558a394318f8a6274e180a1f7bd60/skills/amc-run-video-calibration/SKILL.md) — project creation, project lookup, and MV3DT result endpoint.
 - [NVIDIA Container Toolkit install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) — repository and Docker runtime configuration.
 
 Repo files referenced:
