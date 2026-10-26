@@ -79,16 +79,23 @@ Out of scope for this step, but adjacent:
 - `ctx.install_dir` / `ctx.conf` — install root (default `/opt/mv3dt`),
   resolved via `config.load()`
   ([`00` section 11](00-FRAMEWORK-AND-BOOTSTRAP.md#11-install-location-config)).
-- `LOCATION_ID` from `installer.conf`, which names the subscribed topic.
+- `LOCATION_ID` from `installer.conf`, which names the subscribed topic and
+  selects the calibration files below.
 - The local Mosquitto broker set up by
   [`STEP-1`](STEP-1-PREREQUISITES.md), and the pipeline publishing to it
   ([`STEP-6`](STEP-6-REMOTE-SUPERVISION.md) supervision or a foreground
   Step 5 run).
-- The Step 4 calibration output — `transforms.yml`, the AMC floor-plan image
-  `map.png`, and the camera models
+- The Step 4 calibration output for that `LOCATION_ID` — `map.png` and
+  `transforms.yml` in `calibration/<LOCATION_ID>/`, and
+  `camera_models/camInfo_*.yml`, both under `<install_dir>/deepstream/`
   ([`STEP-4` section 5](STEP-4-CALIB-OUTPUT-WIRING.md#5-calibration-destination),
   [`STEP-4` section 6.4](STEP-4-CALIB-OUTPUT-WIRING.md#64-camera-models)) —
   read by `GET /tracking/meta` and `GET /tracking/floorplan.png`.
+
+**RESOLVED — one project per workstation in v1.** `TRACKING_PROJECT_ID` is
+the web app project id; the floor plan and camera files always come from the
+`LOCATION_ID` in `installer.conf`, so there is no mapping between web app
+projects and local calibrations to maintain.
 
 ### 2.2 Outputs
 
@@ -155,9 +162,15 @@ a ticket only when all of these hold:
 | `exp` | present and in the future; tickets live 5 minutes |
 | `name` | display name of the holder, shown in lock refusals ([section 9](#9-data-access-lock-required)) |
 
-A missing, malformed, expired, wrong-scope or wrong-project ticket is refused
-with `401` or `403`. Which failure maps to which code is an open decision
-([section 12](#12-out-of-scope--open-decisions), item 4).
+**RESOLVED — refusal codes and issuer.**
+
+| Failure | Status |
+|---|---|
+| ticket missing, malformed, bad signature, or expired | `401` |
+| valid ticket with wrong `scope` or wrong `pid` | `403` |
+
+`iss` is checked only when `TICKET_ISSUER` is set in `tracking.env`; when
+set, it must equal the web app's `JWT_ISSUER`.
 
 ---
 
@@ -165,9 +178,11 @@ with `401` or `403`. Which failure maps to which code is an open decision
 
 ### 4.1 Gate
 
-Gated by `MV3DT_TRACKING_HISTORY` in `installer.conf`, following the
-mechanism in
-[`00` section 3.4](00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates):
+Gated by `MV3DT_TRACKING_HISTORY` in `installer.conf` with the CLI flag
+`--tracking-history`, following the mechanism and seeding tiers in
+[`00` section 3.4](00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates). H5
+adds the key to `config.py`, the flag to the `app.py` parser, and a row to
+the `00` gate table ([section 13](#13-decomposition)):
 
 | Value | Behavior |
 |---|---|
@@ -197,9 +212,20 @@ never open a listener the operator did not ask for.
 
 | Key | Source |
 |---|---|
-| `WORKSTATION_TICKET_SECRET` | generated once on first `run`; never regenerated on a re-run. Printed once so the operator can set the same value in the web app's environment |
+| `WORKSTATION_TICKET_SECRET` | generated once on first `run`; never regenerated on a re-run |
 | `TRACKING_PROJECT_ID` | the web app project whose tickets are accepted; captured from the operator |
 | `ALLOWED_ORIGINS` | comma-separated web app origins for CORS; captured from the operator |
+| `TICKET_ISSUER` | optional; when set, tickets must carry this `iss` ([section 3.2](#32-tickets-required)) |
+
+The file is mode `600` and owned by the invoking user.
+
+**RESOLVED — the secret is never printed.** It is written only to
+`tracking.env`. `report` tells the operator to read it once with
+`sudo cat <install_dir>/secrets/tracking.env` and copy the value into the
+web app's `WORKSTATION_TICKET_SECRET`. The redaction rule
+([`00` section 14.4](00-FRAMEWORK-AND-BOOTSTRAP.md#144-redaction-required))
+applies to every log line, including the transcript
+([`00` section 8.2](00-FRAMEWORK-AND-BOOTSTRAP.md#82-transcript-log-file)).
 
 ### 4.4 The unit
 
@@ -209,7 +235,9 @@ never open a listener the operator did not ask for.
 `Type=simple`, `Restart=on-failure`, `RestartSec=5`, `StartLimitBurst=5`,
 journald output with `LogRateLimitIntervalSec=30s`, `EnvironmentFile=` for
 both `installer.conf` and `secrets/tracking.env`,
-`WantedBy=multi-user.target`. Unlike the uploader it **does** depend on the
+`WantedBy=multi-user.target`. Like the uploader it runs as the invoking
+non-root user (`User=@USER@`), who also owns `<install_dir>/tracking/` and
+`/var/lib/mv3dt-tracking/`. Unlike the uploader it **does** depend on the
 broker: `After=mosquitto.service` and `Wants=mosquitto.service`. `ExecStart`
 runs the package's `serve` command from the venv
 ([section 10](#10-cli)). One process runs both the recorder and the API, so
@@ -231,9 +259,9 @@ schema additions upstream do not break it. Only these fields are read:
 | `Frame` | `timestamp` | 3 | `google.protobuf.Timestamp` | `ts_ms` |
 | `Frame` | `sensorId` | 4 | string | `sensor`, via the `sensors` table |
 | `Frame` | `objects` | 5 | repeated `Object` | one row each |
-| `Object` | `id` | 1 | string (numeric tracker id) | `track_id` |
+| `Object` | `id` | 1 | string (numeric tracker id) | `track_id`; a non-numeric id skips the object |
 | `Object` | `confidence` | 4 | float | `conf` |
-| `Object` | `info` | 5 | `map<string,string>` | key `footLocation3D`, value `"x,y"` in metres |
+| `Object` | `info` | 5 | `map<string,string>` | key `footLocation3D`, value `"x,y"` in AMC world units (metres) |
 | `Object` | `bbox3d` | 14 | `Bbox3d` | `z`, `w`, `l`, `h`; fallback `x`, `y` |
 | `Timestamp` | `seconds` | 1 | int64 | `ts_ms = seconds * 1000 + nanos // 1_000_000` |
 | `Timestamp` | `nanos` | 2 | int32 | as above |
@@ -244,7 +272,14 @@ A `map` entry is a length-delimited message with `key` = 1 and `value` = 2.
 **Floor position** is `footLocation3D`; when it is absent or unparsable, the
 `x, y` of `bbox3d` is used instead. The recorder uses the message timestamp
 and falls back to receive time when `Frame.timestamp` is absent. A payload
-that fails to decode is counted and logged and never stops the recorder.
+that fails to decode is counted and logged and never stops the recorder. An
+object whose `id` does not parse as an integer is skipped and counted the
+same way.
+
+**RESOLVED — world units are metres.** `footLocation3D` is in AMC world
+units, verified live as metres: recorded positions fall inside the
+7.41 x 5.02 m floor plan at 100 px per metre. `dist` in
+[section 7](#7-stitching) is therefore in metres.
 
 The decode test fixture is one real payload captured from the workstation's
 broker, with its `protoc --decode=nv.Frame` output kept beside it as the
@@ -319,7 +354,7 @@ ticket ([section 3.2](#32-tickets-required)).
 | `POST /tracking/session/{id}/heartbeat` | ticket | keep the lease alive |
 | `DELETE /tracking/session/{id}` | ticket | release the lease |
 | `GET /tracking/range?from&to&hz=5&mode=stitched\|raw` | ticket + lease | columnar history, max 6 h per request |
-| `GET /tracking/export?from&to&mode&format=csv\|jsonl` | ticket + lease | streamed export |
+| `GET /tracking/export?from&to&mode&format=csv\|jsonl` | ticket + lease | streamed export, max 24 h per request |
 
 `range` returns columnar JSON:
 
@@ -332,8 +367,8 @@ ticket ([section 3.2](#32-tickets-required)).
 ```
 
 `hz` defaults to `5`; `mode` is `stitched` or `raw`
-([section 7](#7-stitching)). A `range` request wider than 6 hours is
-refused.
+([section 7](#7-stitching)). A `range` request wider than 6 hours, or an
+`export` wider than 24 hours, is refused.
 
 ---
 
@@ -362,7 +397,7 @@ the one place all data traffic reaches.
 | Expiry after last heartbeat | 45 s |
 | Hard cap per lease | 15 min; re-acquire to continue |
 | In-flight requests per lease | 1; a second concurrent request gets `429` |
-| `range` requests per lease | 30 per minute |
+| `range` requests per lease | 30 per minute; beyond that `429` with `Retry-After` |
 | Concurrent exports | 1 |
 | Session kind | `replay` \| `export`, recorded on the lease |
 | State | in memory; a service restart clears it |
@@ -384,8 +419,10 @@ mv3dt-installer tracking wipe --yes [--before DATE]
 ```
 
 `stats` reports what is recorded (row counts per day file, data span).
-`wipe --yes` deletes recorded data, all of it or only days before `DATE`,
-leaving a clean state in which recording resumes. Without `--yes` it refuses.
+**RESOLVED — wipe sequence.** `wipe --yes` stops `mv3dt-tracking`, deletes
+the day files (all of them, or only days before `DATE`), and starts the
+service again, so recording resumes on a clean state. Without `--yes` it
+refuses.
 Wipe is local only ([section 3.1](#31-security-controls-required)).
 
 ---
@@ -399,8 +436,11 @@ Implements the `Step` protocol
 
 - Gate `off` ([section 4.1](#41-gate)) → `COMPLETE` immediately.
 - Otherwise confirm the inputs in [section 2.1](#21-inputs-via-context)
-  are present; what is checked for Tailscale is an open decision
-  ([section 12](#12-out-of-scope--open-decisions), item 2).
+  are present.
+- **RESOLVED — Tailscale is not a blocker.** If `tailscale` is missing or
+  not logged in, the step still installs the service; the expose sub-phase
+  of `run` is reported as a warning that prints the manual
+  `tailscale serve` command. `tailscale funnel` is never used.
 
 ### 11.2 `run(ctx)`
 
@@ -415,7 +455,15 @@ Implements the `Step` protocol
 5. **Unit**: render `mv3dt-tracking.service.in`, `systemctl daemon-reload`,
    `systemctl enable --now mv3dt-tracking.service`, mirroring
    [`STEP-6` section A.4](STEP-6-REMOTE-SUPERVISION.md#a4-installer-integration-mirror-installsh).
-6. **Expose**: `tailscale serve --bg --https=8443 http://127.0.0.1:8090`.
+6. **Expose**: `tailscale serve --bg --https=8443 http://127.0.0.1:8090`,
+   or a warning carrying that command when Tailscale is unavailable.
+7. **Report the unit** with the exact string format of
+   [`00` section 8.3](00-FRAMEWORK-AND-BOOTSTRAP.md#83-reporting-format-for-dependencies-required-exact-strings),
+   using the package `__version__` as the version:
+
+   ```
+   installed mv3dt-tracking.service version 0.1.0
+   ```
 
 ### 11.3 `verify(ctx)`
 
@@ -430,12 +478,13 @@ Implements the `Step` protocol
 ### 11.4 `report(ctx)`
 
 Prints, with no side effects: the unit state, the data directory, today's
-row count, and the `journalctl -u mv3dt-tracking` command. Never prints the
-ticket secret.
+row count, the `journalctl -u mv3dt-tracking` command, and the instruction
+to read the ticket secret once with `sudo cat` and copy it into the web app
+([section 4.3](#43-trackingenv)). Never prints the secret itself.
 
 ---
 
-## 12. Out of scope / open decisions
+## 12. Out of scope
 
 Settled exclusions:
 
@@ -448,41 +497,8 @@ Settled exclusions:
 - The web app's ticket route, its per-user mint limit, and the replay UI —
   owned by the web app repository.
 
-Open decisions (not specified by the approved plan; flagged):
-
-1. **Gate plumbing.** `00` section 3.4 lists each gate with a CLI flag and
-   seeding tiers. The flag name for `MV3DT_TRACKING_HISTORY` and the edits to
-   `config.py`, the `00` gate table and the CLI parser are not in any row of
-   [section 13](#13-decomposition).
-2. **Tailscale preflight.** Whether preflight requires `tailscale` to be
-   installed and logged in with HTTPS enabled, and whether a missing tailnet
-   is `USER_ACTION_REQUIRED` or a local-only install.
-3. **Printing the secret.** Printing `WORKSTATION_TICKET_SECRET` also lands
-   it in the transcript log
-   ([`00` section 8.2](00-FRAMEWORK-AND-BOOTSTRAP.md#82-transcript-log-file)).
-   How this reconciles with the redaction rule
-   ([`00` section 14.4](00-FRAMEWORK-AND-BOOTSTRAP.md#144-redaction-required))
-   is undecided.
-4. **Auth status codes and issuer.** The `401` versus `403` split per
-   failure, and whether `iss` is checked.
-5. **Rate-limit response.** The status returned when a lease exceeds 30
-   `range` requests per minute, and whether `export` has a maximum range.
-6. **Unit user and ownership.** Which user the unit runs as, and who owns
-   `/var/lib/mv3dt-tracking/` and `tracking.env`.
-7. **Project mapping.** `TRACKING_PROJECT_ID` is a web app project; which
-   local calibration `meta` and `floorplan.png` read from when more than one
-   Step 4 project exists.
-8. **World units.** `footLocation3D` is specified in metres, but AMC's world
-   units and origin are not yet checked against `map.png`
-   ([`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-10-20)).
-   `dist = 1.2` assumes metres.
-9. **Non-numeric ids.** What the recorder does with an `Object.id` that does
-   not parse as an integer.
-10. **Wipe while running.** Whether `wipe` stops the service around the
-    deletion or the recorder reopens day files on its own.
-11. **Report strings.** The version string used in the
-    [`00` section 8.3](00-FRAMEWORK-AND-BOOTSTRAP.md#83-reporting-format-for-dependencies-required-exact-strings)
-    install lines for the unit.
+Open decisions: none. Each question raised by the first draft is now
+recorded in place as **RESOLVED**.
 
 ---
 
@@ -494,7 +510,7 @@ Open decisions (not specified by the approved plan; flagged):
 | H2 Store + stitch | `feat/installer-tracking-store` | `assets/tracking/mv3dt_tracking/__init__.py`, `store.py`, `stitch.py`, `tests/tracking/test_store.py`, `test_stitch.py` | none | 1 |
 | H3 Decode + recorder | `feat/installer-tracking-recorder` | `assets/tracking/mv3dt_tracking/decode.py`, `recorder.py`, `tests/tracking/test_decode.py`, fixture | none | 1 |
 | H4 Auth + lock + API + CLI | `feat/installer-tracking-api` | `assets/tracking/mv3dt_tracking/auth.py`, `lock.py`, `api.py`, `cli.py`, `assets/tracking/requirements.txt`, `tests/tracking/test_api.py`, `test_auth.py`, `test_lock.py` | H2 | 2 |
-| H5 STEP-8 step | `feat/installer-step8-tracking` | `steps/step8_tracking_history.py`, `__main__.py`, `assets/systemd/mv3dt-tracking.service.in`, `tests/test_step8.py` | H1, H3, H4 | 3 |
+| H5 STEP-8 step | `feat/installer-step8-tracking` | `steps/step8_tracking_history.py`, `__main__.py`, `config.py`, `app.py`, `assets/systemd/mv3dt-tracking.service.in`, `installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`, `tests/test_step8.py` | H1, H3, H4 | 3 |
 
 Package paths are relative to `installer/mv3dt_installer/`; test paths are
 relative to `installer/`.
@@ -504,8 +520,11 @@ Serialization points:
 - H2 and H3 both add files under `assets/tracking/mv3dt_tracking/` but share
   none; `__init__.py` belongs to H2 alone, so H3 must not create it.
 - H4 imports `store` and `stitch`, so it branches from H2 once H2 merges.
-- H5 implements this spec, bundles the whole package, and registers the step
-  in `__main__.py`, so it lands last. `installer.spec` already bundles all of
+- H5 implements this spec, bundles the whole package, registers the step
+  in `__main__.py`, and owns the gate plumbing (`config.py`, the `app.py`
+  flag, the `00` gate table), so it lands last. It edits
+  `00-FRAMEWORK-AND-BOOTSTRAP.md`, which H1 does not touch. The reported
+  version comes from `mv3dt_tracking.__version__`, which H2 defines. `installer.spec` already bundles all of
   `assets/` recursively, so no row touches it.
 - Recommended merge order: H1, H2, H3, H4, H5, then a release.
 
@@ -548,7 +567,10 @@ Repo files referenced:
 - [`STEP-7-WEBAPP-INTEGRATION.md`](STEP-7-WEBAPP-INTEGRATION.md) — section
   H.1 unit conventions; the "nothing listens" rule amended here.
 - [`DEVELOPMENT-STATUS.md`](DEVELOPMENT-STATUS.md) — the dated workstation
-  record, including the unchecked AMC world units.
+  record, which carries this step's status row.
+- `installer/mv3dt_installer/config.py` and `installer/mv3dt_installer/app.py`
+  — the existing gate keys and CLI flags the `MV3DT_TRACKING_HISTORY` gate
+  joins.
 - `installer/mv3dt_installer/assets/systemd/mv3dt-uploader.service.in` — the
   unit template `mv3dt-tracking.service.in` follows.
 - `installer/installer.spec` — bundles `assets/` into the binary.
