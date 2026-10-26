@@ -327,8 +327,32 @@ subPeerBrokerTopicStrs:
 ```
 
 `mv3dt/config_mqtt.txt` is the `[message-broker]` file for the local
-anonymous broker installed by [`STEP-1`](STEP-1-PREREQUISITES.md), with
-`set-threaded = 0`. It never carries a real credential.
+anonymous broker installed by
+[`STEP-1` section 3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker). Its
+content is pinned exactly:
+
+```ini
+[message-broker]
+username = user
+password = password
+#client-id = uniqueID
+#enable-tls = 1
+#tls-cafile =
+#tls-capath =
+#tls-certfile =
+#tls-keyfile =
+#share-connection = 1
+#loop-timeout = 2000
+#keep-alive = 60
+set-threaded = 0
+```
+
+`username = user` and `password = password` are the fixed placeholders from
+NVIDIA's MV3DT sample, not credentials: the broker allows anonymous access,
+and the live pipeline log confirms it connects with exactly these values.
+They are never replaced with a real credential. The golden render of
+[section 7](#7-verification) compares `username`, `password` and
+`set-threaded` exactly.
 
 ### 5.2 Dewarpers
 
@@ -574,7 +598,7 @@ Open decisions:
 | U1 Spec | `feat/installer-live-baseline-spec` | `installer/plan/LIVE-BASELINE-AND-EDIT-PROTECTION.md`, `installer/plan/DEVELOPMENT-STATUS.md` | none | 1 |
 | U2 Edit protection | `feat/installer-managed-files` | `mv3dt_installer/managed_files.py`, `steps/step4_calib_output_wiring.py` (write helpers + ingest skip), `app.py` (configs subcommand), `tests/test_managed_files.py`, `tests/test_step4_calib_output_wiring.py` | none | 1 |
 | U3 Template baseline | `feat/installer-template-baseline` | `laptop/deepstream/config_tracker_NvMOT.yml`, `config_infer_primary.txt`, `deepstream_app_config.txt`, `tests/test_deepstream_templates.py` | none | 1 |
-| U4 AMC 3.3.0 | `feat/installer-amc-330` | `steps/step3_amc_launcher.py`, `tests/test_step3_amc_launcher.py` | none | 1 |
+| U4 AMC 3.3.0 | `feat/installer-amc-330` | `steps/step3_amc_launcher.py`, `tests/test_step3_amc_launcher.py`, `installer/plan/STEP-3-AMC-LAUNCHER.md` | none | 1 |
 | U5 Generated files + viewer + pose model | `feat/installer-fusion-dewarper-viewer` | `steps/step4_calib_output_wiring.py` (render), `config.py`, `app.py` (viewer gate), `tests/test_step4_calib_output_wiring.py`, `tests/test_config.py` | U2, U3 | 2 |
 | U6 Runtime and systemd | `feat/installer-runtime-hardening` | `steps/step4_calib_output_wiring.py` (timer gate), `steps/step5_per_project_exes.py` (`-t`), `steps/step6_remote_supervision.py`, `mv3dt_installer/watchdog.py`, `assets/systemd/mv3dt-pipeline@.service.in`, `assets/systemd/mv3dt-watchdog@.service.in`, `config.py`, `app.py`, tests for steps 4/5/6 and watchdog | U5 | 3 |
 
