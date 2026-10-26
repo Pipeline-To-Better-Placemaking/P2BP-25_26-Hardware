@@ -15,7 +15,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import AsyncIterator, Iterator, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__, calib
 from .auth import Claims, ticket_dependency
@@ -109,6 +110,33 @@ def export_records(store: TrackStore, from_ms: int, to_ms: int, stitched: bool) 
                 if stitcher is not None:
                     rec["person_id"] = person_of.get(row.track_id)
                 yield rec
+
+
+def encode_export(records: Iterator[dict], format: str, columns: tuple[str, ...]) -> Iterator[str]:
+    """CSV or JSON Lines text for the records, in chunks of about 64 KiB."""
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(columns)
+        for rec in records:
+            writer.writerow(["" if rec[c] is None else rec[c] for c in columns])
+            if buf.tell() > 64 * 1024:
+                yield buf.getvalue()
+                buf.seek(0)
+                buf.truncate()
+        yield buf.getvalue()
+    else:
+        lines: list[str] = []
+        size = 0
+        for rec in records:
+            line = json.dumps({c: rec[c] for c in columns}, separators=(",", ":"))
+            lines.append(line)
+            size += len(line) + 1
+            if size > 64 * 1024:
+                yield "\n".join(lines) + "\n"
+                lines, size = [], 0
+        if lines:
+            yield "\n".join(lines) + "\n"
 
 
 def create_app(
@@ -251,6 +279,7 @@ def create_app(
 
     @app.get("/tracking/export")
     def export(
+        request: Request,
         from_ms: int = Query(alias="from"),
         to_ms: int = Query(alias="to"),
         mode: Literal["stitched", "raw"] = Query("raw"),
@@ -263,32 +292,27 @@ def create_app(
         stitched = mode == "stitched"
         columns = COLUMNS + (("person_id",) if stitched else ())
 
-        records = export_records(store, from_ms, to_ms, stitched)
+        chunks = encode_export(export_records(store, from_ms, to_ms, stitched), format, columns)
 
-        def body() -> Iterator[str]:
+        async def body() -> AsyncIterator[str]:
+            # uvicorn advertises ASGI 2.4, so Starlette does not watch for a
+            # disconnect and send() returns quietly once the client is gone.
+            # Check between chunks, so an abandoned export stops generating
+            # and frees the guard at once rather than at the end of the data.
             try:
-                if format == "csv":
-                    buf = io.StringIO()
-                    writer = csv.writer(buf, lineterminator="\n")
-                    writer.writerow(columns)
-                    for rec in records:
-                        writer.writerow(["" if rec[c] is None else rec[c] for c in columns])
-                        if buf.tell() > 64 * 1024:
-                            yield buf.getvalue()
-                            buf.seek(0)
-                            buf.truncate()
-                    yield buf.getvalue()
-                else:
-                    chunk: list[str] = []
-                    for rec in records:
-                        chunk.append(json.dumps({c: rec[c] for c in columns}, separators=(",", ":")))
-                        if len(chunk) >= 1000:
-                            yield "\n".join(chunk) + "\n"
-                            chunk = []
-                    if chunk:
-                        yield "\n".join(chunk) + "\n"
+                while not await request.is_disconnected():
+                    chunk = await run_in_threadpool(next, chunks, None)
+                    if chunk is None:
+                        break
+                    yield chunk
             finally:
                 leases.end(admitted)
+                try:
+                    chunks.close()
+                except ValueError:
+                    # Cancelled while a worker thread is inside next(); that
+                    # chunk finishes and the generator is never resumed.
+                    pass
 
         media = "text/csv" if format == "csv" else "application/x-ndjson"
         filename = f"tracking_{from_ms}_{to_ms}_{mode}.{format}"
