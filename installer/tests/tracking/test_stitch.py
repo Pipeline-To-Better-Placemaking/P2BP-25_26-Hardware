@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from mv3dt_tracking.stitch import people_series, raw_series, stitch
+from mv3dt_tracking.stitch import Stitcher, people_series, raw_series, stitch
 from mv3dt_tracking.store import Detection
 
 T0 = 1_760_000_000_000
@@ -111,3 +111,42 @@ def test_negative_timestamps_bucket_by_floor_like_the_store():
     (series,) = raw_series(rows, hz=5)
     assert series["t"] == [-200, 0]
     assert series["x"] == [1.0, 3.0]
+
+
+def _walk_rows():
+    # Three people, each churning through new IDs every 1.5 s, plus one ID
+    # that reappears 2.9 s later (inside the gap window) at the same spot.
+    rows = []
+    tid = 1
+    for person, (x0, y0) in enumerate([(0.0, 0.0), (5.0, 0.0), (0.0, 5.0)]):
+        t = person * 0.3
+        for k in range(8):
+            rows += [_det(t, tid, x0 + 0.1 * k, y0), _det(t + 0.5, tid, x0 + 0.1 * k, y0, "cam2")]
+            tid += 1
+            t += 2.0
+    rows += [_det(30.0, 900, 9.0, 9.0), _det(32.9, 901, 9.1, 9.0), _det(36.0, 902, 9.1, 9.0)]
+    return sorted(rows, key=lambda r: r.ts_ms)
+
+
+@pytest.mark.parametrize("chunk", [1, 2, 5, 7, 1000])
+def test_stitcher_in_chunks_matches_one_call(chunk):
+    rows = _walk_rows()
+    expected = stitch(rows)
+    s = Stitcher()
+    returned: dict[int, int] = {}
+    for i in range(0, len(rows), chunk):
+        new = s.feed(rows[i:i + chunk])
+        assert not set(new) & set(returned)  # each track reported once
+        returned.update(new)
+    assert s.mapping == expected == returned
+    assert len(set(expected.values())) == 5  # 3 walkers, 900+901, 902
+
+
+def test_stitcher_boundary_inside_gap_window():
+    # Split exactly between the two sightings 2.9 s apart.
+    a, b = [_det(30.0, 900, 9.0, 9.0)], [_det(32.9, 901, 9.1, 9.0)]
+    s = Stitcher()
+    assert s.feed(a) == {900: 1}
+    assert s.feed(b) == {901: 1}
+    assert s.feed([]) == {}
+    assert s.mapping == stitch(a + b) == {900: 1, 901: 1}

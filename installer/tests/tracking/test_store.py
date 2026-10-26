@@ -295,3 +295,59 @@ def test_twenty_minute_query_at_5hz_is_fast(store, capsys):
         print(f"\n20 min @ 5 Hz over 158,400 rows: {best * 1000:.0f} ms")
     # Generous bound so a loaded CI runner does not flake; target is < 300 ms.
     assert best < 1.5
+
+
+def test_new_sensors_committed_during_reads_never_break_name_mapping(store):
+    # The writer keeps committing batches under sensor names never seen
+    # before, so a reader that took rows and sensor names from different
+    # snapshots would meet a sensor id it cannot name. Readers query the
+    # most recent window, where the fresh commits land.
+    store.insert_many([_det(NOON, "seed")])
+    errors: list[BaseException] = []
+    done = threading.Event()
+    batch = [0]
+    reads = [0, 0]
+
+    def writer():
+        try:
+            while not done.is_set():
+                i = batch[0]
+                store.insert_many([_det(NOON + i * 10 + k, f"cam{i}", k) for k in range(3)])
+                batch[0] = i + 1
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    def reader(slot, hz):
+        try:
+            for _ in range(1500):
+                lo = NOON + max(0, batch[0] - 20) * 10
+                for d in store.query_range(lo, NOON + 86_400_000 // 2, hz=hz):
+                    assert d.sensor == "seed" or d.sensor.startswith("cam")
+                reads[slot] += 1
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+
+    t0 = time.perf_counter()
+    w = threading.Thread(target=writer)
+    readers = [threading.Thread(target=reader, args=(0, None)), threading.Thread(target=reader, args=(1, 5))]
+    w.start()
+    for t in readers:
+        t.start()
+    for t in readers:
+        t.join(timeout=60)
+    done.set()
+    w.join(timeout=30)
+    elapsed = time.perf_counter() - t0
+    assert not errors, repr(errors[0])
+    assert reads == [1500, 1500]
+    assert batch[0] > 100  # the writer really ran alongside
+    assert elapsed < 30
+
+
+def test_unknown_sensor_id_falls_back_instead_of_raising(store):
+    from mv3dt_tracking.store import _SensorNames
+
+    store.insert_many([_det(NOON, "camA")])
+    names = _SensorNames(store.path_for(date(2026, 10, 20)), [])
+    assert names[1] == "camA"   # fresh lookup on a new connection
+    assert names[99] == "99"    # still unknown: the id itself, no KeyError

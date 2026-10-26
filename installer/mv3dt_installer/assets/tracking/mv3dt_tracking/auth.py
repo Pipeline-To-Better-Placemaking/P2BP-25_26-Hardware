@@ -18,6 +18,7 @@ from fastapi import HTTPException, Request
 AUDIENCE = "p2bp-workstation"
 SCOPE = "tracking"
 ALGORITHM = "HS256"
+INVALID = "Invalid or expired ticket"
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ def verify_ticket(
     """Return the ticket's claims or raise TicketError(401 or 403)."""
     if not secret:
         # Never verify against an empty key: anyone could sign with it.
-        raise TicketError(401, "ticket verification is not configured")
+        raise TicketError(401, INVALID)
     try:
         claims = jwt.decode(
             token,
@@ -59,14 +60,12 @@ def verify_ticket(
             leeway=leeway,
             options={"require": ["exp", "aud"] + (["iss"] if issuer else [])},
         )
-    except jwt.ExpiredSignatureError:
-        raise TicketError(401, "ticket expired") from None
-    except jwt.InvalidTokenError as exc:
-        raise TicketError(401, f"invalid ticket: {exc}") from None
+    except jwt.InvalidTokenError:
+        raise TicketError(401, INVALID) from None
 
     sub = claims.get("sub")
     if not isinstance(sub, str) or not sub:
-        raise TicketError(401, "invalid ticket: missing sub")
+        raise TicketError(401, INVALID)
     if not _has_scope(claims.get("scope")):
         raise TicketError(403, "ticket scope does not include tracking")
     pid = claims.get("pid")
@@ -78,10 +77,10 @@ def verify_ticket(
 
 def bearer_token(header: str | None) -> str:
     if not header:
-        raise TicketError(401, "missing Authorization header")
+        raise TicketError(401, "Missing bearer ticket")
     scheme, _, token = header.strip().partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
-        raise TicketError(401, "Authorization must be a Bearer ticket")
+        raise TicketError(401, "Missing bearer ticket")
     return token.strip()
 
 

@@ -20,24 +20,50 @@ def _ordered(rows: Iterable[Detection]) -> list[Detection]:
     return sorted(rows, key=lambda r: (r.ts_ms, r.sensor, r.track_id, r.x, r.y))
 
 
+class Stitcher:
+    """Incremental stitching, for inputs too large to hold at once.
+
+    Feed batches in timestamp order across calls (each batch is sorted
+    internally); per-person last-seen state and the next person id carry
+    over, so any chunking gives the same result as one `stitch` call.
+    """
+
+    def __init__(self, gap_s: float = 3.0, dist_m: float = 1.2) -> None:
+        self._gap_ms = gap_s * 1000.0
+        self._dist_m = dist_m
+        self._person_of: dict[int, int] = {}
+        self._last: dict[int, tuple[int, float, float]] = {}
+        self._next_person = 1
+
+    @property
+    def mapping(self) -> dict[int, int]:
+        """Every track_id -> person_id assignment so far."""
+        return dict(self._person_of)
+
+    def feed(self, rows: Iterable[Detection]) -> dict[int, int]:
+        """Stitch one batch; return the assignments for tracks first seen in it."""
+        person_of, last = self._person_of, self._last
+        new: dict[int, int] = {}
+        for r in _ordered(rows):
+            if r.track_id not in person_of:
+                best, best_d = None, None
+                for p, (lt, lx, ly) in last.items():
+                    d = hypot(r.x - lx, r.y - ly)
+                    if (r.ts_ms - lt <= self._gap_ms and d <= self._dist_m
+                            and (best_d is None or d < best_d)):
+                        best, best_d = p, d
+                if best is None:
+                    best, self._next_person = self._next_person, self._next_person + 1
+                person_of[r.track_id] = new[r.track_id] = best
+            last[person_of[r.track_id]] = (r.ts_ms, r.x, r.y)
+        return new
+
+
 def stitch(rows: list[Detection], gap_s: float = 3.0, dist_m: float = 1.2) -> dict[int, int]:
     """Map each track_id to a person id (1, 2, 3, ... in order of creation)."""
-    gap_ms = gap_s * 1000.0
-    person_of: dict[int, int] = {}
-    last: dict[int, tuple[int, float, float]] = {}
-    next_person = 1
-    for r in _ordered(rows):
-        if r.track_id not in person_of:
-            best, best_d = None, None
-            for p, (lt, lx, ly) in last.items():
-                d = hypot(r.x - lx, r.y - ly)
-                if r.ts_ms - lt <= gap_ms and d <= dist_m and (best_d is None or d < best_d):
-                    best, best_d = p, d
-            if best is None:
-                best, next_person = next_person, next_person + 1
-            person_of[r.track_id] = best
-        last[person_of[r.track_id]] = (r.ts_ms, r.x, r.y)
-    return person_of
+    s = Stitcher(gap_s, dist_m)
+    s.feed(rows)
+    return s.mapping
 
 
 def _series(rows: Iterable[Detection], key: Callable[[Detection], int], hz: float) -> list[dict]:
