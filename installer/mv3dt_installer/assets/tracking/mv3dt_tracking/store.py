@@ -78,6 +78,22 @@ def _is_missing(err: sqlite3.OperationalError, path: Path) -> bool:
     return msg.startswith("unable to open database file") and not path.exists()
 
 
+class _SensorNames(dict):
+    """Sensor id -> name for one day file. Reads take rows and names from
+    one snapshot, so an unknown id should not happen; if it ever does, look
+    it up again on a fresh connection, and fall back to the id itself rather
+    than failing the whole query."""
+
+    def __init__(self, path: Path, names: Iterable[tuple[int, str]]) -> None:
+        super().__init__(names)
+        self._path = path
+
+    def __missing__(self, sensor_id: int) -> str:
+        fresh = TrackStore._read(self._path, "SELECT id, name FROM sensors", ())
+        self.update(fresh or ())
+        return self.setdefault(sensor_id, str(sensor_id))
+
+
 class TrackStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
@@ -108,23 +124,33 @@ class TrackStore:
     @staticmethod
     def _read(
         path: Path, sql: str, params: tuple, names: bool = False
-    ) -> list[tuple] | tuple[list[tuple], dict[int, str]] | None:
+    ) -> list[tuple] | tuple[list[tuple], _SensorNames] | None:
         """Run a read on an existing day file, opened read-only so a reader
         never creates one. With `names`, also return the sensor id -> name
-        map from the same connection. None if the file or its tables are
-        missing; a lock outlasting busy_timeout and any other error raise."""
+        map, read in the same transaction so both see one WAL snapshot. None
+        if the file or its tables are missing; a lock outlasting
+        busy_timeout and any other error raise."""
         try:
-            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+            conn = sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0, isolation_level=None
+            )
         except sqlite3.OperationalError as e:
             if _is_missing(e, path):
                 return None
             raise
         try:
-            if names:
-                # Sensors first: a writer adds a sensor before its rows.
-                sensor_names = dict(conn.execute("SELECT id, name FROM sensors"))
-                return conn.execute(sql, params).fetchall(), sensor_names
-            return conn.execute(sql, params).fetchall()
+            if not names:
+                return conn.execute(sql, params).fetchall()
+            # Without one transaction each SELECT gets its own snapshot, and a
+            # writer committing a new sensor and its rows in between would
+            # leave rows whose sensor id is not in the map.
+            conn.execute("BEGIN")
+            try:
+                rows = conn.execute(sql, params).fetchall()
+                sensor_names = _SensorNames(path, conn.execute("SELECT id, name FROM sensors"))
+            finally:
+                conn.execute("COMMIT")
+            return rows, sensor_names
         except sqlite3.OperationalError as e:
             if _is_missing(e, path):
                 return None
