@@ -1,0 +1,6 @@
+# Runtime dependencies of the mv3dt-tracking service venv (STEP-8 section 4.2).
+fastapi==0.135.2
+uvicorn==0.30.0
+paho-mqtt==2.1.0
+PyJWT==2.10.1
+PyYAML==6.0.2
