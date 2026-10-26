@@ -128,12 +128,15 @@ def create_app(
     def meta(claims: Claims = Depends(ticket)):
         span = store.span()
         size = calib.png_size(Path(settings.calib_dir) / "map.png") if settings.calib_dir else None
+        t_gt2px = calib.read_t_gt2px(settings.calib_dir)
+        floorplan = None
+        if size is not None and t_gt2px is not None:
+            floorplan = {"width": size[0], "height": size[1], "T_gt2px": t_gt2px}
         return {
-            "locationId": settings.location_id or None,
-            "span": {"from": span[0], "to": span[1]} if span else None,
-            "floorplan": {"width": size[0], "height": size[1]} if size else None,
-            "T_gt2px": calib.read_t_gt2px(settings.calib_dir),
-            "cameras": calib.read_cameras(settings.camera_models_dir),
+            "location_id": settings.location_id or None,
+            "span": [span[0], span[1]] if span else None,
+            "floorplan": floorplan,
+            "cameras": calib.read_cameras(settings.camera_models_dir) or [],
         }
 
     @app.get("/tracking/floorplan.png")
@@ -154,12 +157,11 @@ def create_app(
 
     @app.post("/tracking/session/{session_id}/heartbeat")
     def heartbeat(session_id: str, claims: Claims = Depends(ticket)):
-        try:
-            state = leases.heartbeat(session_id, claims.sub)
-        except NotHolder as exc:
-            raise HTTPException(403, str(exc)) from None
+        state = leases.heartbeat(session_id, claims.sub)
         if state is None:
             raise HTTPException(404, "no such session; acquire a new one")
+        if isinstance(state, Locked):
+            return _locked(state)
         return {"ExpiresAt": _iso(leases.expires_at(state))}
 
     @app.delete("/tracking/session/{session_id}", status_code=204)

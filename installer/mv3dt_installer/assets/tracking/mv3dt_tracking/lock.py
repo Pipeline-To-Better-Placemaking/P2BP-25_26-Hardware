@@ -140,16 +140,16 @@ class LeaseManager:
             self._lease = lease
             return lease
 
-    def heartbeat(self, lease_id: str, holder_sub: str) -> Lease | None:
-        """Extend the lease. None if no live lease has this id; NotHolder if
-        the caller is not its holder."""
+    def heartbeat(self, lease_id: str, holder_sub: str) -> Lease | Locked | None:
+        """Extend the lease. None if no live lease has this id; Locked if the
+        caller is not its holder."""
         with self._mutex:
             now = self._clock()
             lease = self._live(now)
             if lease is None or lease.id != lease_id:
                 return None
             if lease.holder_sub != holder_sub:
-                raise NotHolder("only the lease holder may extend it")
+                return Locked(lease.holder_name, self.expires_at(lease))
             lease.last_heartbeat = now
             return lease
 

@@ -233,10 +233,10 @@ def test_meta_with_calibration(client):
     r = client.get("/tracking/meta", headers=auth())
     assert r.status_code == 200
     body = r.json()
-    assert body["locationId"] == "loc-a"
-    assert body["span"] == {"from": T0, "to": T0 + 3900}
-    assert body["floorplan"] == {"width": 4, "height": 3}
-    assert body["T_gt2px"] == T_GT2PX
+    assert set(body) == {"location_id", "span", "floorplan", "cameras"}
+    assert body["location_id"] == "loc-a"
+    assert body["span"] == [T0, T0 + 3900]
+    assert body["floorplan"] == {"width": 4, "height": 3, "T_gt2px": T_GT2PX}
     # camInfo_01 has an unusable matrix and is skipped.
     assert body["cameras"] == [{"name": "camInfo_00", "x": 2.0, "y": 3.0, "z": 4.0}]
 
@@ -245,16 +245,21 @@ def test_meta_without_calibration_is_nulls(tmp_path, clock):
     c = make_client(TrackStore(tmp_path / "empty"), clock, tmp_path / "nope", tmp_path / "nope2")
     r = c.get("/tracking/meta", headers=auth())
     assert r.status_code == 200
-    assert r.json() == {"locationId": "loc-a", "span": None, "floorplan": None,
-                        "T_gt2px": None, "cameras": None}
+    assert r.json() == {"location_id": "loc-a", "span": None, "floorplan": None, "cameras": []}
     c = make_client(TrackStore(tmp_path / "empty"), clock)
-    assert c.get("/tracking/meta", headers=auth()).json()["cameras"] is None
+    assert c.get("/tracking/meta", headers=auth()).json()["cameras"] == []
 
 
 def test_meta_with_broken_transforms(client, calib_dirs):
     (calib_dirs[0] / "transforms.yml").write_text("T_gt2px: [1, 2, :\n")
     r = client.get("/tracking/meta", headers=auth())
-    assert r.status_code == 200 and r.json()["T_gt2px"] is None
+    assert r.status_code == 200 and r.json()["floorplan"] is None
+
+
+def test_meta_floorplan_needs_the_image_too(client, calib_dirs):
+    (calib_dirs[0] / "map.png").unlink()
+    body = client.get("/tracking/meta", headers=auth()).json()
+    assert body["floorplan"] is None and len(body["cameras"]) == 1
 
 
 def test_floorplan(client, calib_dirs):
@@ -289,7 +294,8 @@ def test_session_lifecycle(client, clock):
     clock.t += 20
     r = client.post(f"/tracking/session/{sid}/heartbeat", headers=auth())
     assert r.status_code == 200 and r.json() == {"ExpiresAt": iso(clock.t + 45)}
-    assert client.post(f"/tracking/session/{sid}/heartbeat", headers=auth(sub="user-2")).status_code == 403
+    r = client.post(f"/tracking/session/{sid}/heartbeat", headers=auth(sub="user-2"))
+    assert r.status_code == 423 and r.json() == {"HeldBy": "Ada", "Until": iso(clock.t + 45)}
     assert client.post("/tracking/session/unknown/heartbeat", headers=auth()).status_code == 404
 
     r = client.delete(f"/tracking/session/{sid}", headers=auth(sub="user-2", name="Bob"))
@@ -347,6 +353,7 @@ def test_range_stitched_shape(client):
     assert [p["trackIds"] for p in people] == [[1, 2], [9]]
     first = people[0]
     assert set(first) == {"id", "trackIds", "t", "x", "y"}
+    assert all(type(p["id"]) is int for p in people)
     assert len(first["t"]) == len(first["x"]) == len(first["y"])
     assert first["t"][0] == T0 and all(b - a >= 200 for a, b in zip(first["t"], first["t"][1:]))
 
@@ -481,6 +488,31 @@ def test_export_releases_guard_and_blocks_concurrent(client):
     assert export(client, sid).status_code == 200
     # The finished export freed the lease for the next request.
     assert export(client, sid).status_code == 200
+    assert rng(client, sid).status_code == 200
+
+
+@pytest.mark.parametrize("op", ["range", "export"])
+def test_running_data_request_never_blocks_other_routes(client, op):
+    sid = session(client)
+    leases = client.app.state.leases
+    guard = leases.begin(sid, "user-1", op)
+    try:
+        assert client.post(f"/tracking/session/{sid}/heartbeat", headers=auth()).status_code == 200
+        r = client.post("/tracking/session", json={"kind": "export"}, headers=auth())
+        assert r.status_code == 200 and r.json()["SessionId"] == sid
+        assert client.get("/tracking/meta", headers=auth()).status_code == 200
+        assert client.get("/tracking/floorplan.png", headers=auth()).status_code == 200
+        assert client.get("/health").status_code == 200
+        assert client.delete(f"/tracking/session/{sid}", headers=auth()).status_code == 204
+    finally:
+        leases.end(guard)
+
+
+def test_rate_limit_ignores_non_data_routes(client, clock):
+    sid = session(client)
+    for _ in range(40):
+        assert client.post(f"/tracking/session/{sid}/heartbeat", headers=auth()).status_code == 200
+        assert client.get("/tracking/meta", headers=auth()).status_code == 200
     assert rng(client, sid).status_code == 200
 
 

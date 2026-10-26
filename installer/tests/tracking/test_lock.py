@@ -78,8 +78,7 @@ def test_hard_cap_is_15_minutes_despite_heartbeats(mgr, clock):
 
 def test_heartbeat_by_other_holder_or_stale_id(mgr):
     lease = mgr.acquire("alice", "Alice", "replay")
-    with pytest.raises(NotHolder):
-        mgr.heartbeat(lease.id, "bob")
+    assert mgr.heartbeat(lease.id, "bob") == Locked("Alice", mgr.expires_at(lease))
     assert mgr.heartbeat("nope", "bob") is None
     assert mgr.heartbeat("nope", "alice") is None
 
