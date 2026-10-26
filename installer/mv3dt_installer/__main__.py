@@ -24,6 +24,7 @@ from mv3dt_installer.steps import step4_calib_output_wiring  # noqa: F401
 from mv3dt_installer.steps import step5_per_project_exes  # noqa: F401
 from mv3dt_installer.steps import step6_remote_supervision  # noqa: F401
 from mv3dt_installer.steps import step7_webapp_integration  # noqa: F401
+from mv3dt_installer.steps import step8_tracking_history  # noqa: F401
 
 
 def run() -> int:

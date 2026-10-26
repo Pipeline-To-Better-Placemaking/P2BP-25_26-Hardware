@@ -1,0 +1,39 @@
+# Template for /etc/systemd/system/mv3dt-tracking.service
+#
+# Rendered by mv3dt_installer.steps.step8_tracking_history via
+# systemd.render_unit(). STEP-8 section 4.4: one process records the
+# mv3dt/${LOCATION_ID}/sv3d stream into per-day SQLite files and serves the
+# read-only history API on 127.0.0.1:8090. The package derives its MQTT topic
+# from LOCATION_ID in installer.conf; the ticket secret, project id and
+# allowed origins come from secrets/tracking.env.
+#
+# Runs as @USER@, who owns the package, its venv and the data directory.
+# Unlike the uploader it depends on the local broker.
+[Unit]
+Description=mv3dt tracking history recorder and API
+After=network.target mosquitto.service
+Wants=mosquitto.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@TRACKING_DIR@
+EnvironmentFile=@INSTALL_DIR@/installer.conf
+EnvironmentFile=@INSTALL_DIR@/secrets/tracking.env
+Environment="PYTHONPATH=@TRACKING_DIR@"
+Environment="DATA_DIR=@DATA_DIR@"
+Environment="CALIB_DIR=@CALIB_DIR@"
+Environment="CAMERA_MODELS_DIR=@CAMERA_MODELS_DIR@"
+Environment=BIND=127.0.0.1:8090
+Environment=PYTHONUNBUFFERED=1
+ExecStart="@VENV_PYTHON@" -m mv3dt_tracking serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+
+[Install]
+WantedBy=multi-user.target

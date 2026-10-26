@@ -224,6 +224,7 @@ matching CLI flag (§3.3):
 |---|---|---|---|
 | `MV3DT_REMOTE_SUPERVISION` | `off` \| `local` \| `remote` | `--remote-supervision` | [`STEP-6` §E.2](STEP-6-REMOTE-SUPERVISION.md#e2-gating-opt-in) |
 | `MV3DT_WEBAPP_INTEGRATION` | `off` \| `on` | `--webapp-integration` | [`STEP-7` §H.2](STEP-7-WEBAPP-INTEGRATION.md#h2-gating-opt-in) |
+| `MV3DT_TRACKING_HISTORY` | `off` \| `on` | `--tracking-history` | [`STEP-8` section 4.1](STEP-8-TRACKING-HISTORY.md#41-gate) |
 
 When a gate is `off` the dispatch loop treats that step as auto-`COMPLETE`
 (skipped) with a one-line log, using the same skip discipline as a genuinely
