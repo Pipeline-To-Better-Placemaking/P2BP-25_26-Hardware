@@ -606,3 +606,76 @@ def test_cors_simple_request_headers(client):
     assert "content-disposition" in exposed and "retry-after" in exposed
     r = client.get("/health", headers={"Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in r.headers
+
+
+# -- client disconnect during export ---------------------------------------------
+
+
+class SlowDenseStore:
+    """A store whose raw reads are slow and full, so a 24 h export would take
+    far longer than the test if generation did not stop on disconnect."""
+
+    def __init__(self) -> None:
+        self.raw_reads = 0
+
+    def span(self):
+        return None
+
+    def query_range(self, lo, hi, hz=None):
+        if hz is not None:
+            return []
+        self.raw_reads += 1
+        time.sleep(0.02)
+        step = max(1, (hi - lo) // 2000)
+        return [Detection(t, "cam1", 7, 1.0, 2.0, 0.0, 0.5, 0.5, 1.7, 0.9) for t in range(lo, hi, step)]
+
+
+def test_abandoned_export_stops_and_releases_guard(clock):
+    uvicorn = pytest.importorskip("uvicorn")
+    import socket
+    import threading
+
+    store = SlowDenseStore()
+    settings = Settings(ticket_secret=SECRET, project_id=PID, allowed_origins=[ORIGIN])
+    leases = LeaseManager(clock=clock)
+    app = create_app(settings, store, leases=leases)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            assert time.monotonic() < deadline, "server did not start"
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        lease = leases.acquire("user-1", "Ada", "export")
+
+        request = (
+            f"GET /tracking/export?from={T0}&to={T0 + 24 * HOUR}&format=jsonl HTTP/1.1\r\n"
+            f"Host: 127.0.0.1\r\nAuthorization: Bearer {mint()}\r\n"
+            f"X-Tracking-Session: {lease.id}\r\n\r\n"
+        ).encode()
+        sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        sock.sendall(request)
+        received = b""
+        while len(received) < 256 * 1024:
+            data = sock.recv(65536)
+            assert data, "server closed early"
+            received += data
+        assert received.startswith(b"HTTP/1.1 200")
+        assert lease.in_flight
+        sock.close()
+
+        deadline = time.monotonic() + 1.5
+        while lease.in_flight or leases._exporting:
+            assert time.monotonic() < deadline, "guard still held after disconnect"
+            time.sleep(0.02)
+        reads = store.raw_reads
+        time.sleep(0.3)
+        # Generation stopped: at most the chunk in flight finished, far
+        # short of the 1440 one-minute reads of the whole window.
+        assert store.raw_reads <= reads + 1
+        assert store.raw_reads < 100
+    finally:
+        server.should_exit = True
+        thread.join(5)
