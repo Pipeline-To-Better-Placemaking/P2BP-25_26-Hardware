@@ -10,6 +10,7 @@ file (`sensors` table); reads map them back.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Iterable
 
 _SUFFIX = ".sqlite"
+_DAY_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}\.sqlite$")
 _SIDECARS = ("-wal", "-shm")
 _MEASURES = ("x", "y", "z", "w", "l", "h", "conf")
 
@@ -30,9 +32,9 @@ CREATE TABLE IF NOT EXISTS detections (
     ts_ms INTEGER NOT NULL,
     sensor INTEGER NOT NULL,
     track_id INTEGER NOT NULL,
-    x REAL, y REAL, z REAL, w REAL, l REAL, h REAL, conf REAL
-);
-CREATE INDEX IF NOT EXISTS detections_ts ON detections (ts_ms);
+    x REAL, y REAL, z REAL, w REAL, l REAL, h REAL, conf REAL,
+    PRIMARY KEY (ts_ms, sensor, track_id)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS detections_track_ts ON detections (track_id, ts_ms);
 """
 
@@ -56,6 +58,26 @@ def utc_day(ts_ms: int) -> date:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
 
 
+def bucket_ms(hz: float) -> int:
+    """Bucket width in whole milliseconds for a sample rate (at least 1 ms).
+
+    Shared with `stitch` so the store and the series agree on bucket edges:
+    a bucket starts at `ts_ms - ts_ms % width` (floor, also for negatives).
+    """
+    if not hz > 0:
+        raise ValueError(f"hz must be > 0, got {hz}")
+    return max(1, round(1000.0 / hz))
+
+
+def _is_missing(err: sqlite3.OperationalError, path: Path) -> bool:
+    """True when a read failed only because the file or its tables are absent
+    (wiped between listing and opening, or created but not yet initialised)."""
+    msg = str(err)
+    if msg.startswith("no such table"):
+        return True
+    return msg.startswith("unable to open database file") and not path.exists()
+
+
 class TrackStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
@@ -70,22 +92,49 @@ class TrackStore:
         if not self.data_dir.is_dir():
             return []
         found = []
-        for p in self.data_dir.glob(f"*{_SUFFIX}"):
+        for p in self.data_dir.iterdir():
+            # Only names this store would have produced: date.fromisoformat
+            # alone also accepts forms like 20261020 or 2026-W43-1.
+            if not _DAY_NAME.match(p.name):
+                continue
             try:
                 day = date.fromisoformat(p.name[: -len(_SUFFIX)])
             except ValueError:
                 continue
-            found.append((day, p))
+            if self.path_for(day).name == p.name and p.is_file():
+                found.append((day, p))
         return sorted(found)
 
-    def _connect(self, path: Path) -> sqlite3.Connection:
-        conn = sqlite3.connect(path, timeout=10.0)
-        conn.execute("PRAGMA busy_timeout = 10000")
-        return conn
+    @staticmethod
+    def _read(
+        path: Path, sql: str, params: tuple, names: bool = False
+    ) -> list[tuple] | tuple[list[tuple], dict[int, str]] | None:
+        """Run a read on an existing day file, opened read-only so a reader
+        never creates one. With `names`, also return the sensor id -> name
+        map from the same connection. None if the file or its tables are
+        missing; a lock outlasting busy_timeout and any other error raise."""
+        try:
+            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+        except sqlite3.OperationalError as e:
+            if _is_missing(e, path):
+                return None
+            raise
+        try:
+            if names:
+                # Sensors first: a writer adds a sensor before its rows.
+                sensor_names = dict(conn.execute("SELECT id, name FROM sensors"))
+                return conn.execute(sql, params).fetchall(), sensor_names
+            return conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            if _is_missing(e, path):
+                return None
+            raise
+        finally:
+            conn.close()
 
     def _open_for_write(self, day: date) -> sqlite3.Connection:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        conn = self._connect(self.path_for(day))
+        conn = sqlite3.connect(self.path_for(day), timeout=10.0)
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.executescript(_SCHEMA)
@@ -94,7 +143,11 @@ class TrackStore:
     # -- writes --------------------------------------------------------------
 
     def insert_many(self, rows: Iterable[Detection]) -> int:
-        """Insert rows, one transaction per UTC day file. Returns rows written."""
+        """Insert rows, one transaction per UTC day file. Returns rows written.
+
+        A row with the same (ts_ms, sensor, track_id) as a stored one
+        replaces it.
+        """
         by_day: dict[date, list[Detection]] = defaultdict(list)
         for r in rows:
             by_day[utc_day(r.ts_ms)].append(r)
@@ -106,7 +159,7 @@ class TrackStore:
                 with conn:
                     ids = self._sensor_ids(conn, {r.sensor for r in day_rows})
                     conn.executemany(
-                        "INSERT INTO detections"
+                        "INSERT OR REPLACE INTO detections"
                         " (ts_ms, sensor, track_id, x, y, z, w, l, h, conf)"
                         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [
@@ -133,14 +186,13 @@ class TrackStore:
     def query_range(self, from_ms: int, to_ms: int, hz: float | None = None) -> list[Detection]:
         """Detections with from_ms <= ts_ms <= to_ms, sorted by ts_ms.
 
-        With `hz`, rows are downsampled per (sensor, track_id) into buckets of
-        1000/hz ms aligned to the epoch: measures are averaged and ts_ms is
-        the bucket start.
+        With `hz`, rows are downsampled per (sensor, track_id) into buckets
+        of `bucket_ms(hz)` ms aligned to the epoch: measures are averaged
+        (NULLs ignored) and ts_ms is the bucket start.
         """
         if from_ms > to_ms:
             raise ValueError(f"from_ms ({from_ms}) is after to_ms ({to_ms})")
-        if hz is not None and not hz > 0:
-            raise ValueError(f"hz must be > 0, got {hz}")
+        width = None if hz is None else bucket_ms(hz)
 
         paths = []
         day, last = utc_day(from_ms), utc_day(to_ms)
@@ -150,81 +202,76 @@ class TrackStore:
                 paths.append(p)
             day += timedelta(days=1)
 
-        if hz is None:
+        if width is None:
             out = []
             for p in paths:
                 out.extend(self._raw(p, from_ms, to_ms))
         else:
-            out = self._downsampled(paths, from_ms, to_ms, 1000.0 / hz)
+            out = self._downsampled(paths, from_ms, to_ms, width)
         out.sort(key=lambda d: (d.ts_ms, d.sensor, d.track_id))
         return out
 
     def _raw(self, path: Path, from_ms: int, to_ms: int) -> list[Detection]:
-        conn = self._connect(path)
-        try:
-            cur = conn.execute(
-                "SELECT d.ts_ms, s.name, d.track_id, d.x, d.y, d.z, d.w, d.l, d.h, d.conf"
-                " FROM detections d JOIN sensors s ON s.id = d.sensor"
-                " WHERE d.ts_ms BETWEEN ? AND ?",
-                (from_ms, to_ms),
-            )
-            return [Detection(*row) for row in cur]
-        except sqlite3.OperationalError:
-            # A file created but not yet initialised by the writer.
+        got = self._read(
+            path,
+            "SELECT ts_ms, sensor, track_id, x, y, z, w, l, h, conf FROM detections"
+            " WHERE ts_ms BETWEEN ? AND ?",
+            (from_ms, to_ms),
+            names=True,
+        )
+        if got is None:
             return []
-        finally:
-            conn.close()
+        rows, names = got
+        return [Detection(ts, names[s], tid, *rest) for ts, s, tid, *rest in rows]
 
     def _downsampled(
-        self, paths: list[Path], from_ms: int, to_ms: int, bucket_ms: float
+        self, paths: list[Path], from_ms: int, to_ms: int, width: int
     ) -> list[Detection]:
-        # SQL returns SUM and COUNT per measure rather than AVG so that a
-        # bucket straddling UTC midnight (bucket_ms need not divide a day)
-        # can be merged exactly across the two day files.
-        sums = ", ".join(f"SUM(d.{m}), COUNT(d.{m})" for m in _MEASURES)
-        sql = (
-            f"SELECT s.name, d.track_id, CAST(d.ts_ms / ? AS INTEGER) AS b, {sums}"
-            " FROM detections d JOIN sensors s ON s.id = d.sensor"
-            " WHERE d.ts_ms BETWEEN ? AND ?"
-            " GROUP BY d.sensor, d.track_id, b"
-        )
-        acc: dict[tuple[str, int, int], list[float]] = {}
-        for p in paths:
-            conn = self._connect(p)
-            try:
-                rows = conn.execute(sql, (bucket_ms, from_ms, to_ms)).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
-            finally:
-                conn.close()
-            for name, track_id, b, *vals in rows:
-                key = (name, track_id, b)
-                vals = [v or 0 for v in vals]
-                if key in acc:
-                    acc[key] = [a + v for a, v in zip(acc[key], vals)]
-                else:
-                    acc[key] = vals
+        # Bucket start in integer SQL arithmetic. SQLite's % truncates toward
+        # zero, so ((ts % w) + w) % w is the floor remainder and negative
+        # timestamps bucket the same way as Python's ts - ts % w. Grouping
+        # with the bucket first and on the integer sensor id keeps the
+        # temporary b-tree cheap; names are mapped afterwards.
+        start = "(ts_ms - ((ts_ms % ?1) + ?1) % ?1)"
+        where = " FROM detections WHERE ts_ms BETWEEN ?2 AND ?3 GROUP BY b, sensor, track_id"
+        params = (width, from_ms, to_ms)
 
-        out = []
-        for (name, track_id, b), vals in acc.items():
-            means = [
-                (vals[2 * i] / vals[2 * i + 1]) if vals[2 * i + 1] else None
-                for i in range(len(_MEASURES))
-            ]
-            out.append(Detection(int(b * bucket_ms), name, track_id, *means))
-        return out
+        if len(paths) == 1:
+            path = paths[0]
+            avgs = ", ".join(f"AVG({m})" for m in _MEASURES)
+            got = self._read(path, f"SELECT {start} AS b, sensor, track_id, {avgs}{where}", params, True)
+            if got is None:
+                return []
+            rows, names = got
+            return [Detection(b, names[s], tid, *rest) for b, s, tid, *rest in rows]
+
+        # Several day files: a bucket can straddle UTC midnight when the width
+        # does not divide a day, so sum and count per measure and merge.
+        sums = ", ".join(f"SUM({m}), COUNT({m})" for m in _MEASURES)
+        acc: dict[tuple[int, str, int], list[float]] = {}
+        for path in paths:
+            got = self._read(path, f"SELECT {start} AS b, sensor, track_id, {sums}{where}", params, True)
+            if got is None:
+                continue
+            rows, names = got
+            for b, s, tid, *vals in rows:
+                key = (b, names[s], tid)
+                prev = acc.get(key)
+                if prev is None:
+                    acc[key] = [v or 0 for v in vals]
+                else:
+                    acc[key] = [a + (v or 0) for a, v in zip(prev, vals)]
+        return [
+            Detection(b, name, tid, *(
+                vals[i] / vals[i + 1] if vals[i + 1] else None
+                for i in range(0, 2 * len(_MEASURES), 2)
+            ))
+            for (b, name, tid), vals in acc.items()
+        ]
 
     def _count_and_bounds(self, path: Path) -> tuple[int, int | None, int | None]:
-        conn = self._connect(path)
-        try:
-            n, lo, hi = conn.execute(
-                "SELECT COUNT(*), MIN(ts_ms), MAX(ts_ms) FROM detections"
-            ).fetchone()
-            return n, lo, hi
-        except sqlite3.OperationalError:
-            return 0, None, None
-        finally:
-            conn.close()
+        rows = self._read(path, "SELECT COUNT(*), MIN(ts_ms), MAX(ts_ms) FROM detections", ())
+        return rows[0] if rows else (0, None, None)
 
     def span(self) -> tuple[int, int] | None:
         """(oldest_ms, newest_ms) over all day files, or None if empty."""
