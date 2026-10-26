@@ -24,7 +24,9 @@ pytest.importorskip("yaml")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from mv3dt_tracking import api  # noqa: E402
 from mv3dt_tracking.api import create_app  # noqa: E402
+from mv3dt_tracking.stitch import stitch  # noqa: E402
 from mv3dt_tracking.lock import LeaseManager  # noqa: E402
 from mv3dt_tracking.settings import Settings  # noqa: E402
 from mv3dt_tracking.store import Detection, TrackStore  # noqa: E402
@@ -209,7 +211,8 @@ TRACKING_GETS = ["/tracking/meta", "/tracking/floorplan.png",
 def test_auth_matrix(client, path, headers, code):
     r = client.get(path, headers=headers)
     assert r.status_code == code
-    assert "Message" in r.json()
+    if code == 401:
+        assert r.json()["Message"] in ("Invalid or expired ticket", "Missing bearer ticket")
     if code == 401:
         assert r.headers["www-authenticate"] == "Bearer"
 
@@ -386,9 +389,14 @@ def test_range_validation(client, params):
     assert "Message" in r.json()
 
 
-def test_range_exactly_6h_and_25hz_allowed(client):
+def test_range_sample_cap(client):
     sid = session(client)
-    assert rng(client, sid, to=T0 + 6 * HOUR, hz=25).status_code == 200
+    assert rng(client, sid, to=T0 + 6 * HOUR, hz=5).status_code == 200
+    assert rng(client, sid, to=T0 + 72 * 60 * 1000, hz=25).status_code == 200
+    for to, hz in ((T0 + 6 * HOUR, 25), (T0 + 72 * 60 * 1000 + 1, 25), (T0 + 6 * HOUR, 5.01)):
+        r = rng(client, sid, to=to, hz=hz)
+        assert r.status_code == 400
+        assert "108000" in r.json()["Message"]
 
 
 def test_range_concurrent_request_gets_429(client):
@@ -461,6 +469,52 @@ def test_export_spans_chunks_in_order(store, client):
     r = export(client, sid, mode="raw", format="jsonl", to=T0 + 3 * HOUR)
     lines = [json.loads(line) for line in r.text.splitlines()]
     assert len(lines) == 52 and lines[-1]["track_id"] == 50
+
+
+def test_export_ids_match_one_shot_stitching_across_chunks(tmp_path):
+    store = TrackStore(tmp_path / "chunked")
+    edge = T0 - T0 % (10 * 60 * 1000) + 10 * 60 * 1000  # a stitch-window edge
+    rows = []
+    # Track 1 ends just before the edge; track 2 starts just after, nearby,
+    # so it continues person 1 across the boundary. Track 3 straddles the
+    # edge on its own; track 4 starts later, far away.
+    for i in range(30):
+        rows.append(Detection(edge - 3000 + i * 50, "cam1", 1, 1.0 + 0.01 * i, 1.0))
+    for i in range(30):
+        rows.append(Detection(edge + 900 + i * 50, "cam2", 2, 1.4, 1.0))
+    for i in range(200):
+        rows.append(Detection(edge - 5000 + i * 50, "cam1", 3, 8.0, 8.0))
+    for i in range(10):
+        rows.append(Detection(edge + 20 * 60 * 1000 + 7 + i * 33, "cam1", 4, -5.0, 0.0))
+    store.insert_many(rows)
+    lo, hi = edge - 60_000 + 13, edge + 25 * 60 * 1000
+
+    one_shot = stitch([r for r in store.query_range(lo, hi, 5) if r.x is not None])
+    recs = list(api.export_records(store, lo, hi, stitched=True))
+    chunked = {r["track_id"]: r["person_id"] for r in recs}
+    assert chunked == one_shot
+    assert chunked[1] == chunked[2] != chunked[3]
+    assert len(recs) == len(rows)
+    assert [r["ts_ms"] for r in recs] == sorted(r["ts_ms"] for r in recs)
+
+
+def test_export_reads_in_bounded_windows(store, monkeypatch):
+    spans = []
+    real = store.query_range
+
+    def spy(lo, hi, hz=None):
+        spans.append((hi - lo, hz))
+        return real(lo, hi, hz)
+
+    monkeypatch.setattr(store, "query_range", spy)
+    list(api.export_records(store, T0 - 7, T0 + 3 * HOUR, stitched=True))
+    assert max(w for w, hz in spans if hz is None) < 60 * 1000
+    assert max(w for w, hz in spans if hz is not None) < 10 * 60 * 1000
+
+
+def test_wildcard_origin_rejected(store):
+    with pytest.raises(ValueError):
+        create_app(Settings(ticket_secret=SECRET, project_id=PID, allowed_origins=["*"]), store)
 
 
 def test_export_csv_stitched_has_person_id(client):

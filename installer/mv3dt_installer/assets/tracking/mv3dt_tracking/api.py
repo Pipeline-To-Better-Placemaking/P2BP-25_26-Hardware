@@ -28,15 +28,20 @@ from . import __version__, calib
 from .auth import Claims, ticket_dependency
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
 from .settings import Settings
-from .stitch import people_series, raw_series, stitch
+from .stitch import Stitcher, people_series, raw_series, stitch
 from .store import Detection, TrackStore
 
 HOUR_MS = 3600 * 1000
 RANGE_MAX_MS = 6 * HOUR_MS
 EXPORT_MAX_MS = 24 * HOUR_MS
-EXPORT_CHUNK_MS = HOUR_MS
 MAX_HZ = 25.0
+# Samples per range request (hz x window seconds): 6 h at 5 Hz, 72 min at 25 Hz.
+RANGE_MAX_SAMPLES = 108_000
 STITCH_HZ = 5.0
+# Export works through the window in epoch-aligned 10-minute stitch windows,
+# reading raw rows one minute at a time, so memory is bounded by a chunk.
+STITCH_CHUNK_MS = 10 * 60 * 1000
+RAW_CHUNK_MS = 60 * 1000
 SESSION_HEADER = "X-Tracking-Session"
 COLUMNS = ("ts_ms", "sensor", "track_id", "x", "y", "z", "w", "l", "h", "conf")
 
@@ -70,12 +75,50 @@ def _positioned(rows: list[Detection]) -> list[Detection]:
     return [r for r in rows if r.x is not None and r.y is not None]
 
 
+def _windows(from_ms: int, to_ms: int, width: int) -> Iterator[tuple[int, int]]:
+    """Inclusive (start, stop) windows covering [from_ms, to_ms], with inner
+    edges on epoch multiples of `width`."""
+    start = from_ms
+    while start <= to_ms:
+        stop = min(start - start % width + width - 1, to_ms)
+        yield start, stop
+        start = stop + 1
+
+
+def export_records(store: TrackStore, from_ms: int, to_ms: int, stitched: bool) -> Iterator[dict]:
+    """Raw rows of [from_ms, to_ms] in ts order as dicts, with `person_id`
+    added when `stitched`.
+
+    Person ids match `range` at 5 Hz over the same window: each 10-minute
+    stitch window is downsampled at 5 Hz and fed to one Stitcher whose state
+    carries across windows. The window edges are multiples of the 200 ms
+    bucket, so no bucket is split and the fed rows equal the one-shot query's.
+    A window's raw rows are emitted after it is fed, and a track's first 5 Hz
+    sample is never later than its first raw row, so every positioned track
+    has its id when its rows go out. Tracks never seen with a position get
+    a null person_id.
+    """
+    stitcher = Stitcher() if stitched else None
+    person_of: dict[int, int] = {}
+    for w_start, w_stop in _windows(from_ms, to_ms, STITCH_CHUNK_MS):
+        if stitcher is not None:
+            person_of.update(stitcher.feed(_positioned(store.query_range(w_start, w_stop, STITCH_HZ))))
+        for start, stop in _windows(w_start, w_stop, RAW_CHUNK_MS):
+            for row in store.query_range(start, stop):
+                rec = asdict(row)
+                if stitcher is not None:
+                    rec["person_id"] = person_of.get(row.track_id)
+                yield rec
+
+
 def create_app(
     settings: Settings,
     store: TrackStore,
     recorder=None,
     leases: LeaseManager | None = None,
 ) -> FastAPI:
+    if any("*" in o for o in settings.allowed_origins):
+        raise ValueError("ALLOWED_ORIGINS must list origins, not a wildcard")
     app = FastAPI(title="mv3dt-tracking", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
     leases = leases or LeaseManager()
     app.state.leases = leases
@@ -188,6 +231,12 @@ def create_app(
         _check_window(from_ms, to_ms, RANGE_MAX_MS)
         if not 0 < hz <= MAX_HZ:
             raise HTTPException(400, f"hz must be > 0 and <= {MAX_HZ:g}")
+        if hz * (to_ms - from_ms) / 1000 > RANGE_MAX_SAMPLES:
+            raise HTTPException(
+                400,
+                f"hz x window seconds must not exceed {RANGE_MAX_SAMPLES}"
+                " (6 h at 5 Hz, 72 min at 25 Hz); lower hz or narrow the window",
+            )
         admitted = guard("range", session, claims)
         try:
             rows = _positioned(store.query_range(from_ms, to_ms, hz))
@@ -195,9 +244,10 @@ def create_app(
                 people = people_series(rows, stitch(rows), hz)
             else:
                 people = raw_series(rows, hz)
+            # Serialize while the guard is held, so the work counts as in flight.
+            return JSONResponse({"from": from_ms, "to": to_ms, "hz": hz, "mode": mode, "people": people})
         finally:
             leases.end(admitted)
-        return {"from": from_ms, "to": to_ms, "hz": hz, "mode": mode, "people": people}
 
     @app.get("/tracking/export")
     def export(
@@ -210,28 +260,10 @@ def create_app(
     ):
         _check_window(from_ms, to_ms, EXPORT_MAX_MS)
         admitted = guard("export", session, claims)
-        try:
-            mapping = None
-            if mode == "stitched":
-                # Person ids come from the same 5 Hz stitching `range` uses by
-                # default, so an export and a replay agree on who is who.
-                mapping = stitch(_positioned(store.query_range(from_ms, to_ms, STITCH_HZ)))
-        except BaseException:
-            leases.end(admitted)
-            raise
+        stitched = mode == "stitched"
+        columns = COLUMNS + (("person_id",) if stitched else ())
 
-        columns = COLUMNS + (("person_id",) if mapping is not None else ())
-
-        def records() -> Iterator[dict]:
-            start = from_ms
-            while start <= to_ms:
-                stop = min(start + EXPORT_CHUNK_MS - 1, to_ms)
-                for row in store.query_range(start, stop):
-                    rec = asdict(row)
-                    if mapping is not None:
-                        rec["person_id"] = mapping.get(row.track_id)
-                    yield rec
-                start = stop + 1
+        records = export_records(store, from_ms, to_ms, stitched)
 
         def body() -> Iterator[str]:
             try:
@@ -239,7 +271,7 @@ def create_app(
                     buf = io.StringIO()
                     writer = csv.writer(buf, lineterminator="\n")
                     writer.writerow(columns)
-                    for rec in records():
+                    for rec in records:
                         writer.writerow(["" if rec[c] is None else rec[c] for c in columns])
                         if buf.tell() > 64 * 1024:
                             yield buf.getvalue()
@@ -248,7 +280,7 @@ def create_app(
                     yield buf.getvalue()
                 else:
                     chunk: list[str] = []
-                    for rec in records():
+                    for rec in records:
                         chunk.append(json.dumps({c: rec[c] for c in columns}, separators=(",", ":")))
                         if len(chunk) >= 1000:
                             yield "\n".join(chunk) + "\n"

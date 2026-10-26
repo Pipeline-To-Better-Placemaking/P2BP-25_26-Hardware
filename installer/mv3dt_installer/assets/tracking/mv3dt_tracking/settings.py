@@ -6,6 +6,7 @@ environment files, so every setting is an environment variable.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,7 +14,6 @@ from typing import Mapping
 
 DEFAULT_BIND = "127.0.0.1:8090"
 DEFAULT_DATA_DIR = "/var/lib/mv3dt-tracking"
-_LOOPBACK_HOSTS = {"localhost", "::1"}
 
 
 def _path(value: str | None) -> Path | None:
@@ -73,4 +73,10 @@ class Settings:
 
 
 def is_loopback(host: str) -> bool:
-    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+    """True for "localhost" or a loopback IP literal; any other name is not."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from mv3dt_tracking.cli import main, rows_to_detections
-from mv3dt_tracking.settings import Settings
+from mv3dt_tracking.settings import Settings, is_loopback
 from mv3dt_tracking.store import Detection, TrackStore
 
 DAY1 = 1_760_918_400_000  # 2025-10-20T00:00Z
@@ -39,6 +39,16 @@ def test_settings_from_env_defaults_and_parsing():
     assert Settings(bind="[::1]:9000").bind_address() == ("::1", 9000)
     with pytest.raises(ValueError):
         Settings(bind="8090").bind_address()
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [("127.0.0.1", True), ("127.1.2.3", True), ("::1", True), ("localhost", True),
+     ("0.0.0.0", False), ("::", False), ("192.0.2.1", False), ("127.example.com", False),
+     ("localhost.example.com", False), ("", False)],
+)
+def test_is_loopback(host, expected):
+    assert is_loopback(host) is expected
 
 
 def test_rows_to_detections():
@@ -88,11 +98,16 @@ def test_wipe_rejects_bad_date(tmp_path):
         {"WORKSTATION_TICKET_SECRET": "s" * 32, "TRACKING_PROJECT_ID": "p", "LOCATION_ID": "loc-a",
          "BIND": "0.0.0.0:8090"},
         {"WORKSTATION_TICKET_SECRET": "s" * 32, "TRACKING_PROJECT_ID": "p", "LOCATION_ID": "loc-a",
-         "BIND": "192.168.1.5:8090", "ALLOW_NON_LOCAL_BIND": "0"},
+         "BIND": "192.0.2.1:8090", "ALLOW_NON_LOCAL_BIND": "0"},
+        {"WORKSTATION_TICKET_SECRET": "s" * 32, "TRACKING_PROJECT_ID": "p", "LOCATION_ID": "loc-a",
+         "BIND": "127.example.com:8090"},
+        {"WORKSTATION_TICKET_SECRET": "s" * 32, "TRACKING_PROJECT_ID": "p", "LOCATION_ID": "loc-a",
+         "ALLOWED_ORIGINS": "https://a.example,*"},
         {"WORKSTATION_TICKET_SECRET": "s" * 32, "TRACKING_PROJECT_ID": "p", "LOCATION_ID": "loc-a",
          "BIND": "nonsense"},
     ],
-    ids=["no-secret", "no-project", "all-interfaces", "lan-address", "bad-bind"],
+    ids=["no-secret", "no-project", "all-interfaces", "non-loopback-address", "127-hostname",
+         "wildcard-origin", "bad-bind"],
 )
 def test_serve_refuses_unsafe_config(tmp_path, extra, capsys):
     assert main(["serve"], env=_env(tmp_path, **extra)) == 2

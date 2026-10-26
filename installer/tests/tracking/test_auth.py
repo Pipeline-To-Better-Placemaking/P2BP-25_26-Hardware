@@ -74,7 +74,10 @@ def test_scope_may_be_a_list_or_space_separated():
          "no-sub", "wrong-alg"],
 )
 def test_401_cases(token):
-    assert status(token) == 401
+    with pytest.raises(TicketError) as exc:
+        verify_ticket(token, SECRET, PID)
+    assert exc.value.status == 401
+    assert exc.value.message == "Invalid or expired ticket"
 
 
 @pytest.mark.parametrize(

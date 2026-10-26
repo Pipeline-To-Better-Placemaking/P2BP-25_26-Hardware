@@ -44,6 +44,9 @@ def _serve(settings: Settings) -> int:
     if missing:
         print(f"refusing to serve: {', '.join(missing)} not set", file=sys.stderr)
         return 2
+    if any("*" in o for o in settings.allowed_origins):
+        print("refusing to serve: ALLOWED_ORIGINS must list origins, not *", file=sys.stderr)
+        return 2
     try:
         host, port = settings.bind_address()
     except ValueError as exc:
