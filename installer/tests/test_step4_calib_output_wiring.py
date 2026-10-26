@@ -22,6 +22,7 @@ from mv3dt_installer import (
     config as config_mod,
     footage as footage_mod,
     logs,
+    managed_files,
     report,
     systemd,
     waitui,
@@ -38,6 +39,9 @@ REAL_TEMPLATES_DIR = REPO_ROOT / "laptop" / "deepstream"
 def _isolate_globals(monkeypatch, tmp_path):
     logs._transcript_path = None
     monkeypatch.setattr(systemd, "UNIT_DIR", tmp_path / "units")
+    monkeypatch.setattr(
+        managed_files, "DEFAULT_MANIFEST_PATH", tmp_path / "state" / "managed-files.json"
+    )
     yield
     logs._transcript_path = None
 
@@ -1433,3 +1437,124 @@ def test_ingest_without_persisted_root_never_attempts_deletion(
     assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
     assert calls == []
     assert (project / footage_mod.MARKER_NAME).is_file()
+
+
+# -- edit protection (managed_files) ----------------------------------------
+
+
+def _deepstream_files(ctx):
+    root = ctx.install_dir / "deepstream"
+    return {
+        path: path.stat().st_mtime_ns
+        for path in root.rglob("*")
+        if path.is_file() and step4.REID_MODEL_NAME not in path.name
+    }
+
+
+def _tracker_path(ctx):
+    return ctx.install_dir / "deepstream" / step4.TRACKER_YAML_TEMPLATE_NAME
+
+
+def test_first_install_writes_and_records_every_rendered_file(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    recorded = managed_files.Manifest().load()
+    deepstream = ctx.install_dir / "deepstream"
+    expected = {
+        deepstream / step4.TRACKER_YAML_TEMPLATE_NAME,
+        deepstream / step4.RENDERED_APP_CONFIG_NAME,
+        deepstream / step4.INFER_PRIMARY_TEMPLATE_NAME,
+        deepstream / step4.MSGCONV_TEMPLATE_NAME,
+        deepstream / step4.CAMERA_MODEL_DIR_NAME / "camInfo_00.yml",
+    }
+    assert {pathlib.Path(p) for p in recorded} == expected
+    assert all(value is not None for value in recorded.values())
+    assert not list(deepstream.rglob("*" + managed_files.NEW_SUFFIX))
+
+
+def test_operator_edit_is_kept_and_new_version_offered(tmp_path, templates, capsys):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    tracker = _tracker_path(ctx)
+    edited = tracker.read_text() + "# operator tuning\n"
+    tracker.write_text(edited)
+    (templates / step4.TRACKER_YAML_TEMPLATE_NAME).write_text(
+        (templates / step4.TRACKER_YAML_TEMPLATE_NAME).read_text() + "# new release\n"
+    )
+    capsys.readouterr()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert tracker.read_text() == edited
+    pending = managed_files.pending_path(tracker)
+    assert pending.read_text().endswith("# new release\n")
+    err = capsys.readouterr().err
+    assert "operator edited" in err and str(pending) in err
+
+
+def test_untouched_rendered_file_is_updated(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    infer = templates / step4.INFER_PRIMARY_TEMPLATE_NAME
+    infer.write_text(infer.read_text() + "# new release\n")
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    rendered = ctx.install_dir / "deepstream" / step4.INFER_PRIMARY_TEMPLATE_NAME
+    assert rendered.read_text().endswith("# new release\n")
+    assert not managed_files.pending_path(rendered).exists()
+
+
+def test_pre_manifest_existing_differing_file_is_kept(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    tracker = _tracker_path(ctx)
+    tracker.parent.mkdir(parents=True)
+    tracker.write_text("live tuned tracker\n")
+    model = ctx.install_dir / "deepstream" / step4.CAMERA_MODEL_DIR_NAME / "camInfo_00.yml"
+    model.parent.mkdir(parents=True)
+    model.write_text("live camera model\n")
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert tracker.read_text() == "live tuned tracker\n"
+    assert model.read_text() == "live camera model\n"
+    assert managed_files.pending_path(tracker).is_file()
+    assert managed_files.pending_path(model).is_file()
+    states = {e.path: e.state for e in managed_files.status(managed_files.Manifest())}
+    assert states[tracker] is managed_files.FileState.PENDING_NEW
+    assert states[model] is managed_files.FileState.PENDING_NEW
+
+
+def test_ingest_with_unchanged_archive_writes_nothing(tmp_path, templates, capsys):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    infer = templates / step4.INFER_PRIMARY_TEMPLATE_NAME
+    infer.write_text(infer.read_text() + "# new release\n")
+    before = _deepstream_files(ctx)
+    manifest_before = managed_files.Manifest().path.read_bytes()
+    capsys.readouterr()
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert _deepstream_files(ctx) == before
+    assert managed_files.Manifest().path.read_bytes() == manifest_before
+    assert "nothing to render" in capsys.readouterr().err
+
+
+def test_ingest_with_changed_archive_renders(tmp_path, templates):
+    runner = Runner()
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    infer = templates / step4.INFER_PRIMARY_TEMPLATE_NAME
+    infer.write_text(infer.read_text() + "# new release\n")
+    runner.archive = _zip_bytes(
+        {
+            "transforms.yml": "transforms: [1]\n",
+            "camInfo/camInfo_00.yml": AMC_CAMINFO,
+        }
+    )
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    rendered = ctx.install_dir / "deepstream" / step4.INFER_PRIMARY_TEMPLATE_NAME
+    assert rendered.read_text().endswith("# new release\n")
+
+
+def test_ingest_unchanged_archive_renders_missing_targets(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    _tracker_path(ctx).unlink()
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert _tracker_path(ctx).is_file()
