@@ -144,7 +144,9 @@ class Runner:
         self.log_rc = log_rc
         self.status_payload = status_payload
         self.disable_rc = disable_rc
-        self.enabled_units = enabled_units
+        # Unit names `systemctl is-enabled` reports enabled; `enable --now`
+        # adds to it and a successful `disable --now` removes from it.
+        self.enabled_units = set(enabled_units or ())
         self.reid_rc = reid_rc
         self.bodypose_rc = bodypose_rc
         self.bodypose_bytes = bodypose_bytes
@@ -206,13 +208,16 @@ class Runner:
                     )
                 pathlib.Path(args[args.index("-o") + 1]).write_bytes(self.archive)
                 return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ("systemctl", "enable", "--now"):
+            self.enabled_units.add(args[3])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ("systemctl", "is-active", "--quiet"):
+            return subprocess.CompletedProcess(
+                args, 0 if args[3] in self.enabled_units else 3, "", ""
+            )
         if args[:2] == ("systemctl", "is-enabled"):
             unit = args[-1]
-            enabled = (
-                unit.endswith(".timer")
-                if self.enabled_units is None
-                else unit in self.enabled_units
-            )
+            enabled = unit in self.enabled_units
             if enabled:
                 return subprocess.CompletedProcess(args, 0, "enabled\n", "")
             if unit.endswith(".service"):
@@ -221,6 +226,8 @@ class Runner:
                 return subprocess.CompletedProcess(args, 0, "static\n", "")
             return subprocess.CompletedProcess(args, 1, "disabled\n", "")
         if args[:3] == ("systemctl", "disable", "--now"):
+            if not self.disable_rc:
+                self.enabled_units.discard(args[3])
             return subprocess.CompletedProcess(
                 args,
                 self.disable_rc,
@@ -731,12 +738,102 @@ def test_run_ingests_renders_and_installs_timer(tmp_path, templates):
     # A root service has no sudo; without SUDO_USER the installer's
     # preflight refuses to run, so the timer never ingested anything.
     assert "Environment=SUDO_USER=operator" in service_text
-    enabled_calls = [
-        call[0][3]
-        for call in ctx.runner.calls
-        if call[0][:3] == ("systemctl", "enable", "--now")
+    # MV3DT_AUTO_INGEST defaults off: the units are installed, not enabled.
+    assert not any(
+        call[0][:3] == ("systemctl", "enable", "--now") for call in ctx.runner.calls
+    )
+
+
+def _systemctl_calls(ctx, *prefix):
+    return [
+        call[0] for call in ctx.runner.calls if call[0][: len(prefix)] == prefix
     ]
-    assert enabled_calls == ["mv3dt-ingest-site-42.timer"]
+
+
+def test_run_enables_timer_when_auto_ingest_on(tmp_path, templates):
+    conf = _conf(tmp_path)
+    conf[config_mod.GATE_AUTO_INGEST] = "on"
+    ctx = _ctx(tmp_path, templates, conf=conf, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert [c[3] for c in _systemctl_calls(ctx, "systemctl", "enable", "--now")] == [
+        "mv3dt-ingest-site-42.timer"
+    ]
+    assert step.verify(ctx).status is StepStatus.COMPLETE
+
+
+def test_run_disables_enabled_timer_when_auto_ingest_off(tmp_path, templates):
+    runner = Runner(enabled_units={"mv3dt-ingest-site-42.timer"})
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert ("systemctl", "disable", "--now", "mv3dt-ingest-site-42.timer") in [
+        c[:4] for c in _systemctl_calls(ctx, "systemctl", "disable")
+    ]
+    assert "mv3dt-ingest-site-42.timer" not in runner.enabled_units
+    assert step.verify(ctx).status is StepStatus.COMPLETE
+
+
+def test_run_leaves_disabled_timer_alone_when_auto_ingest_off(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert not _systemctl_calls(ctx, "systemctl", "disable")
+
+
+def test_run_fails_when_timer_disable_fails(tmp_path, templates):
+    runner = Runner(enabled_units={"mv3dt-ingest-site-42.timer"}, disable_rc=1)
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    result = step4.Step4CalibOutputWiring().run(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "mv3dt-ingest-site-42.timer" in result.message
+
+
+def test_verify_rejects_enabled_timer_when_auto_ingest_off(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    ctx.runner.enabled_units.add("mv3dt-ingest-site-42.timer")
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "MV3DT_AUTO_INGEST is off" in result.message
+
+
+def test_verify_requires_enabled_timer_when_auto_ingest_on(tmp_path, templates):
+    conf = _conf(tmp_path)
+    conf[config_mod.GATE_AUTO_INGEST] = "on"
+    ctx = _ctx(tmp_path, templates, conf=conf, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    ctx.runner.enabled_units.discard("mv3dt-ingest-site-42.timer")
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "is not enabled" in result.message
+
+
+def test_run_keeps_hand_edited_ingest_unit_and_skips_reload(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert _systemctl_calls(ctx, "systemctl", "daemon-reload")
+    timer = systemd.UNIT_DIR / "mv3dt-ingest-site-42.timer"
+    timer.write_text(timer.read_text(encoding="utf-8") + "# hand edit\n", encoding="utf-8")
+    ctx.runner.calls.clear()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert timer.read_text(encoding="utf-8").endswith("# hand edit\n")
+    # Unchanged installer content and an operator edit: nothing new to offer.
+    assert not managed_files.pending_path(timer).exists()
+    assert not _systemctl_calls(ctx, "systemctl", "daemon-reload")
+
+
+def test_run_offers_new_ingest_unit_beside_pre_manifest_unit(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    systemd.UNIT_DIR.mkdir(parents=True)
+    timer = systemd.UNIT_DIR / "mv3dt-ingest-site-42.timer"
+    timer.write_text("[Timer]\nOnUnitActiveSec=5min\n", encoding="utf-8")
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert timer.read_text(encoding="utf-8") == "[Timer]\nOnUnitActiveSec=5min\n"
+    pending = managed_files.pending_path(timer)
+    assert "OnUnitActiveSec=60s" in pending.read_text(encoding="utf-8")
 
 
 def test_run_removes_only_obsolete_legacy_path_unit(tmp_path, templates):
@@ -1500,6 +1597,8 @@ def test_first_install_writes_and_records_every_rendered_file(tmp_path, template
         deepstream / step4.CAMERA_MODEL_DIR_NAME / "camInfo_00.yml",
         deepstream / step4.MV3DT_DIR_NAME / step4.PUB_SUB_CONFIG_NAME,
         deepstream / step4.MV3DT_DIR_NAME / step4.MQTT_CONFIG_NAME,
+        systemd.UNIT_DIR / "mv3dt-ingest-site-42.service",
+        systemd.UNIT_DIR / "mv3dt-ingest-site-42.timer",
     }
     assert {pathlib.Path(p) for p in recorded} == expected
     assert all(value is not None for value in recorded.values())

@@ -1,0 +1,28 @@
+# Template for /etc/systemd/system/mv3dt-watchdog@.service
+#
+# Rendered by mv3dt_installer.systemd.render_unit() from
+# step6_remote_supervision.py and enabled once per registered project as
+# mv3dt-watchdog@<slug>.service (LIVE-BASELINE-AND-EDIT-PROTECTION.md section
+# 6.3). `%i` is the Step 5 project slug, resolved by systemd.
+#
+# Runs as root, unlike the pipeline and agent units: it stops and starts
+# mv3dt-pipeline@%i.service and reads that unit's journal. The agent's polkit
+# rule only grants the verbs to the invoking user and journal access would
+# still need a group membership the installer does not manage, so root is
+# the narrower change. SUDO_USER names the invoking user because the
+# installer refuses to run as root without one (doc 00 section 9.2).
+[Unit]
+Description=MV3DT pipeline hang watchdog (%i)
+After=mv3dt-pipeline@%i.service
+
+[Service]
+Type=simple
+Environment=SUDO_USER=@USER@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/mv3dt/bin/mv3dt-installer watchdog --project-slug %i --non-interactive
+SyslogIdentifier=mv3dt-watchdog
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

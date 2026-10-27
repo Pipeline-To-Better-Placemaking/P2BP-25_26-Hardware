@@ -23,6 +23,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from mv3dt_installer import app  # noqa: E402
 from mv3dt_installer import config as config_mod  # noqa: E402
+from mv3dt_installer import managed_files, report, systemd  # noqa: E402
 from mv3dt_installer.steps import STEP_REGISTRY  # noqa: E402
 from mv3dt_installer.steps import step5_per_project_exes as step5  # noqa: E402
 from mv3dt_installer.steps import step6_remote_supervision as step6  # noqa: E402
@@ -626,7 +627,10 @@ def test_disable_hook_runs_systemctl_disable_now_when_gate_active(tmp_path):
     ctx = _FakeCtx(install_dir, {config_mod.GATE_REMOTE_SUPERVISION: "local"}, runner)
 
     step6._disable_pipeline_unit_before_remove(ctx, entry)
-    assert runner.calls == [["systemctl", "disable", "--now", "mv3dt-pipeline@north-lobby-2.service"]]
+    assert runner.calls == [
+        ["systemctl", "disable", "--now", "mv3dt-watchdog@north-lobby-2.service"],
+        ["systemctl", "disable", "--now", "mv3dt-pipeline@north-lobby-2.service"],
+    ]
 
 
 def test_remove_project_artifacts_calls_the_registered_hook_before_removing(tmp_path):
@@ -638,7 +642,10 @@ def test_remove_project_artifacts_calls_the_registered_hook_before_removing(tmp_
     step5.register_removal_hook(step6._disable_pipeline_unit_before_remove)
     step5.remove_project_artifacts(ctx, entry)
 
-    assert runner.calls == [["systemctl", "disable", "--now", "mv3dt-pipeline@north-lobby-2.service"]]
+    assert runner.calls == [
+        ["systemctl", "disable", "--now", "mv3dt-watchdog@north-lobby-2.service"],
+        ["systemctl", "disable", "--now", "mv3dt-pipeline@north-lobby-2.service"],
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -895,3 +902,159 @@ def test_status_round_trip_check_reports_failure_from_live_result():
     )
     assert ok is False
     assert result["error"] == "timed out"
+
+
+# ---------------------------------------------------------------------------
+# Runtime hardening -- pipeline logging, watchdog unit, edit protection
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_unit_disables_the_journal_rate_limit():
+    unit = step6.render_pipeline_unit("alice")
+    assert "LogRateLimitIntervalSec=0" in unit.splitlines()
+    assert "LogRateLimitBurst" not in unit
+
+
+def test_watchdog_unit_runs_the_subcommand_as_root():
+    unit = step6.render_watchdog_unit("alice")
+    lines = unit.splitlines()
+    assert (
+        "ExecStart=/opt/mv3dt/bin/mv3dt-installer watchdog --project-slug %i "
+        "--non-interactive"
+    ) in lines
+    assert not any(line.startswith("User=") for line in lines)
+    assert "Environment=SUDO_USER=alice" in lines
+    assert "After=mv3dt-pipeline@%i.service" in lines
+    assert "Restart=always" in lines
+    assert "RestartSec=10" in lines
+    assert "SyslogIdentifier=mv3dt-watchdog" in lines
+
+
+class _RunCtx:
+    def __init__(self, tmp_path, runner):
+        self.install_dir = tmp_path / "mv3dt"
+        self.install_dir.mkdir(parents=True, exist_ok=True)
+        self.conf = {config_mod.GATE_REMOTE_SUPERVISION: "local"}
+        self.user = type("U", (), {"name": "alice", "uid": 1000, "gid": 1000})()
+        self.non_interactive = True
+        from mv3dt_installer import logs
+
+        self.log = logs.log
+        self.report_installed = report.report_installed
+        self.report_already_installed = report.report_already_installed
+        self.progress = type("P", (), {"phase": lambda *a: None, "task": lambda *a: None})()
+        self._runner = runner
+
+    def run_root(self, *args, **kwargs):
+        return self._runner(list(args), **kwargs)
+
+    def run_as_user(self, *args, **kwargs):
+        return self._runner(list(args), **kwargs)
+
+
+@pytest.fixture
+def unit_dir(tmp_path, monkeypatch):
+    path = tmp_path / "units"
+    monkeypatch.setattr(systemd, "UNIT_DIR", path)
+    monkeypatch.setattr(
+        managed_files, "DEFAULT_MANIFEST_PATH", tmp_path / "state" / "managed-files.json"
+    )
+    monkeypatch.setattr(step6, "POLKIT_RULES_DIR", tmp_path / "polkit")
+    return path
+
+
+def _run(tmp_path, runner=None):
+    runner = runner or ScriptedRunner()
+    ctx = _RunCtx(tmp_path, runner)
+    _make_entry(ctx.install_dir)
+    result = step6.Step6RemoteSupervision().run(ctx)
+    return result, runner
+
+
+def test_run_installs_and_enables_the_watchdog_per_project(tmp_path, unit_dir):
+    result, runner = _run(tmp_path)
+    assert result.status is step6.StepStatus.COMPLETE
+    for name in ("mv3dt-pipeline@.service", "mv3dt-watchdog@.service", "mv3dt-agent.service"):
+        assert (unit_dir / name).is_file()
+    assert ["systemctl", "daemon-reload"] in runner.calls
+    enabled = [c[3] for c in runner.calls if c[:3] == ["systemctl", "enable", "--now"]]
+    assert "mv3dt-pipeline@north-lobby-2.service" in enabled
+    assert "mv3dt-watchdog@north-lobby-2.service" in enabled
+
+
+def test_rerun_with_unchanged_units_skips_daemon_reload(tmp_path, unit_dir):
+    _run(tmp_path)
+    result, runner = _run(tmp_path)
+    assert result.status is step6.StepStatus.COMPLETE
+    assert ["systemctl", "daemon-reload"] not in runner.calls
+
+
+def test_hand_made_watchdog_unit_is_kept_with_installer_new(tmp_path, unit_dir):
+    """The live box has a hand-made mv3dt-watchdog@.service that predates the
+    manifest: it is kept and the installer's version lands beside it."""
+    unit_dir.mkdir(parents=True)
+    hand = unit_dir / "mv3dt-watchdog@.service"
+    hand_text = "[Service]\nExecStart=/opt/mv3dt/bin/mv3dt-watchdog.sh %i\n"
+    hand.write_text(hand_text, encoding="utf-8")
+    result, runner = _run(tmp_path)
+    assert result.status is step6.StepStatus.COMPLETE
+    assert hand.read_text(encoding="utf-8") == hand_text
+    pending = managed_files.pending_path(hand)
+    assert pending.read_text(encoding="utf-8") == step6.render_watchdog_unit("alice")
+    # The other units were new, so a reload still happens on this run.
+    assert ["systemctl", "daemon-reload"] in runner.calls
+
+
+def test_edited_pipeline_unit_is_kept_and_no_reload_when_nothing_written(tmp_path, unit_dir):
+    _run(tmp_path)
+    pipeline = unit_dir / "mv3dt-pipeline@.service"
+    pipeline.write_text(pipeline.read_text(encoding="utf-8") + "Nice=5\n", encoding="utf-8")
+    result, runner = _run(tmp_path)
+    assert result.status is step6.StepStatus.COMPLETE
+    assert pipeline.read_text(encoding="utf-8").endswith("Nice=5\n")
+    assert ["systemctl", "daemon-reload"] not in runner.calls
+
+
+def _verify_runner(*, watchdog_enabled=True, watchdog_active=True):
+    runner = ScriptedRunner()
+    runner.when(_prefix("systemctl", "is-enabled"), stdout="enabled\n")
+    runner.when(
+        _prefix("systemctl", "is-enabled", "mv3dt-watchdog@north-lobby-2.service"),
+        returncode=0 if watchdog_enabled else 1,
+        stdout="enabled\n" if watchdog_enabled else "disabled\n",
+    )
+    runner.when(
+        _prefix("systemctl", "is-active", "--quiet", "mv3dt-watchdog@north-lobby-2.service"),
+        returncode=0 if watchdog_active else 3,
+    )
+    return runner
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        ({"watchdog_enabled": False}, "mv3dt-watchdog@north-lobby-2.service not enabled"),
+        ({"watchdog_active": False}, "mv3dt-watchdog@north-lobby-2.service not active"),
+    ],
+)
+def test_verify_requires_the_watchdog(tmp_path, monkeypatch, kwargs, expected):
+    runner = _verify_runner(**kwargs)
+    ctx = _RunCtx(tmp_path, runner)
+    _make_entry(ctx.install_dir)
+    monkeypatch.setattr(step6, "status_round_trip_check", lambda **kw: (True, {}))
+    monkeypatch.setattr(
+        step6, "check_polkit_authorization", lambda **kw: {"ok": True}
+    )
+    result = step6.Step6RemoteSupervision().verify(ctx)
+    assert result.status is step6.StepStatus.FAILED
+    assert expected in result.message
+
+
+def test_verify_passes_with_the_watchdog_running(tmp_path, monkeypatch):
+    ctx = _RunCtx(tmp_path, _verify_runner())
+    _make_entry(ctx.install_dir)
+    monkeypatch.setattr(step6, "status_round_trip_check", lambda **kw: (True, {}))
+    monkeypatch.setattr(
+        step6, "check_polkit_authorization", lambda **kw: {"ok": True}
+    )
+    assert step6.Step6RemoteSupervision().verify(ctx).status is step6.StepStatus.COMPLETE

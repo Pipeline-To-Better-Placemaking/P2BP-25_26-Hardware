@@ -23,16 +23,18 @@ prefilled"); `--non-interactive` uses the default silently.
 
 `installer.conf` also carries the three §3.4 opt-in step-gate keys
 (`MV3DT_REMOTE_SUPERVISION`, `MV3DT_WEBAPP_INTEGRATION`,
-`MV3DT_TRACKING_HISTORY`) and the `MV3DT_VIEWER_STREAM` feature gate (Step 4
-renders the tiled view, on-screen display and RTSP viewer sink only when it
-is `on`; it gates no step). The *first* time
+`MV3DT_TRACKING_HISTORY`) and two feature gates that skip no step:
+`MV3DT_VIEWER_STREAM` (Step 4 renders the tiled view, on-screen display and
+RTSP viewer sink, and `pipeline --service-exec` passes `-t`, only when it is
+`on`) and `MV3DT_AUTO_INGEST` (Step 4 enables the ingest timer only when it
+is `on`). The *first* time
 `load()` ever writes a fresh `installer.conf` (i.e. the key is not already
 present in the file), each gate is seeded through four tiers, in order:
 
     1. `gate_overrides[key]`  -- the matching CLI flag doc 00 §3.4's own
        table promises for every gate (`--remote-supervision`,
        `--webapp-integration`, `--tracking-history`, `--viewer-stream`,
-       parsed by
+       `--auto-ingest`, parsed by
        `app.build_parser()` with
        `default=None` so "not passed" stays distinguishable from an
        explicit `off`).
@@ -68,7 +70,8 @@ under it (`secrets/`, `bin/`, `deepstream/`, `projects/`, `agent/`,
 Public API:
     CONF_FILENAME       -- "installer.conf".
     GATE_REMOTE_SUPERVISION / GATE_WEBAPP_INTEGRATION / GATE_TRACKING_HISTORY
-        -- the §3.4 key names. GATE_VIEWER_STREAM -- the viewer feature gate.
+        -- the §3.4 key names. GATE_VIEWER_STREAM / GATE_AUTO_INGEST -- the
+        viewer and auto-ingest feature gates.
     GATE_KEYS            -- every key name, in table order.
     GATE_DEFAULTS         -- {key: "off"} for each.
     GATE_CHOICES          -- {key: allowed values}, in doc 00 §3.4's table
@@ -79,7 +82,8 @@ Public API:
         only to name the source in the "flag overrode a persisted value"
         log line.
     Config                -- dataclass: install_dir, remote_supervision,
-        webapp_integration, tracking_history, viewer_stream, values (full parsed KEY=VALUE
+        webapp_integration, tracking_history, viewer_stream, auto_ingest,
+        values (full parsed KEY=VALUE
         dict).
     load(install_dir_override, state, non_interactive, ...,
         gate_overrides=None) -> Config
@@ -101,6 +105,7 @@ __all__ = [
     "GATE_WEBAPP_INTEGRATION",
     "GATE_TRACKING_HISTORY",
     "GATE_VIEWER_STREAM",
+    "GATE_AUTO_INGEST",
     "GATE_KEYS",
     "GATE_DEFAULTS",
     "GATE_CHOICES",
@@ -134,17 +139,23 @@ GATE_TRACKING_HISTORY = "MV3DT_TRACKING_HISTORY"
 # OSD, RTSP sink on 8554) to the rendered DeepStream config. Seeded and
 # overridden exactly like the step gates.
 GATE_VIEWER_STREAM = "MV3DT_VIEWER_STREAM"
+# Not a step gate either: Step 4 always installs the ingest service and timer
+# but enables the timer only when this is `on`; otherwise re-ingest is the
+# manual `mv3dt-installer ingest`.
+GATE_AUTO_INGEST = "MV3DT_AUTO_INGEST"
 GATE_KEYS: tuple[str, ...] = (
     GATE_REMOTE_SUPERVISION,
     GATE_WEBAPP_INTEGRATION,
     GATE_TRACKING_HISTORY,
     GATE_VIEWER_STREAM,
+    GATE_AUTO_INGEST,
 )
 GATE_DEFAULTS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "off",
     GATE_WEBAPP_INTEGRATION: "off",
     GATE_TRACKING_HISTORY: "off",
     GATE_VIEWER_STREAM: "off",
+    GATE_AUTO_INGEST: "off",
 }
 
 # Allowed values per gate, in doc 00 §3.4's table order. Step 6's remote
@@ -159,6 +170,7 @@ GATE_CHOICES: dict[str, tuple[str, ...]] = {
     GATE_WEBAPP_INTEGRATION: ("off", "on"),
     GATE_TRACKING_HISTORY: ("off", "on"),
     GATE_VIEWER_STREAM: ("off", "on"),
+    GATE_AUTO_INGEST: ("off", "on"),
 }
 
 # The CLI flag that overrides each gate (doc 00 §3.4: "a matching CLI
@@ -169,6 +181,7 @@ GATE_FLAGS: dict[str, str] = {
     GATE_WEBAPP_INTEGRATION: "--webapp-integration",
     GATE_TRACKING_HISTORY: "--tracking-history",
     GATE_VIEWER_STREAM: "--viewer-stream",
+    GATE_AUTO_INGEST: "--auto-ingest",
 }
 
 # installer.conf also records the resolved install_dir under this key
@@ -188,6 +201,7 @@ class Config:
     webapp_integration: str = GATE_DEFAULTS[GATE_WEBAPP_INTEGRATION]
     tracking_history: str = GATE_DEFAULTS[GATE_TRACKING_HISTORY]
     viewer_stream: str = GATE_DEFAULTS[GATE_VIEWER_STREAM]
+    auto_ingest: str = GATE_DEFAULTS[GATE_AUTO_INGEST]
     # Full parsed installer.conf KEY=VALUE map, including the two gate keys
     # and INSTALL_DIR, plus anything else already present in the file (other
     # modules, e.g. ngc.py/webapp.py, may add their own shared vars here
@@ -464,5 +478,6 @@ def load(
         webapp_integration=values[GATE_WEBAPP_INTEGRATION],
         tracking_history=values[GATE_TRACKING_HISTORY],
         viewer_stream=values[GATE_VIEWER_STREAM],
+        auto_ingest=values[GATE_AUTO_INGEST],
         values=values,
     )

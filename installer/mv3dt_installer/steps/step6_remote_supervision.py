@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from mv3dt_installer import __version__
 from mv3dt_installer import app as app_mod
 from mv3dt_installer import config as config_mod
+from mv3dt_installer import managed_files
 from mv3dt_installer import systemd as systemd_mod
 from mv3dt_installer.steps import StepResult, StepStatus, UserAction, register
 from mv3dt_installer.steps import step5_per_project_exes as step5_mod
@@ -67,6 +68,8 @@ if TYPE_CHECKING:  # pragma: no cover -- import-time only, never at runtime.
 __all__ = [
     "PIPELINE_UNIT_NAME",
     "AGENT_UNIT_NAME",
+    "WATCHDOG_UNIT_TEMPLATE",
+    "WATCHDOG_UNIT_NAME",
     "POLKIT_RULE_NAME",
     "resolve_host_id",
     "cmd_topic",
@@ -77,6 +80,7 @@ __all__ = [
     "decide_broker_topology",
     "render_pipeline_unit",
     "render_agent_unit",
+    "render_watchdog_unit",
     "render_polkit_rule",
     "validate_command",
     "RequestDedup",
@@ -98,7 +102,9 @@ Runner = Callable[..., "subprocess.CompletedProcess[Any]"]
 
 PIPELINE_UNIT_TEMPLATE = "mv3dt-pipeline@.service"
 AGENT_UNIT_NAME = "mv3dt-agent.service"
+WATCHDOG_UNIT_TEMPLATE = "mv3dt-watchdog@.service"
 POLKIT_RULE_NAME = "49-mv3dt-agent.rules"
+POLKIT_RULES_DIR = pathlib.Path("/etc/polkit-1/rules.d")
 
 
 def PIPELINE_UNIT_NAME(slug: str) -> str:  # noqa: N802 -- reads like a constant at call sites
@@ -106,6 +112,11 @@ def PIPELINE_UNIT_NAME(slug: str) -> str:  # noqa: N802 -- reads like a constant
     duplicated rather than imported private so this module's public surface
     doesn't depend on a step5 underscore-prefixed helper)."""
     return f"mv3dt-pipeline@{slug}.service"
+
+
+def WATCHDOG_UNIT_NAME(slug: str) -> str:  # noqa: N802
+    """`mv3dt-watchdog@<slug>.service`, the hang watchdog of one pipeline."""
+    return f"mv3dt-watchdog@{slug}.service"
 
 
 # Bound on the read-only systemctl/nvidia-smi probes the status path makes
@@ -267,6 +278,35 @@ def render_agent_unit(user: str) -> str:
     return systemd_mod.render_unit(("systemd", "mv3dt-agent.service.in"), {"USER": user})
 
 
+def render_watchdog_unit(user: str) -> str:
+    """Render `mv3dt-watchdog@.service.in`. It runs as root (it restarts the
+    pipeline unit and reads its journal); `@USER@` only fills `SUDO_USER`."""
+    return systemd_mod.render_unit(
+        ("systemd", "mv3dt-watchdog@.service.in"), {"USER": user}
+    )
+
+
+def _install_units(ctx: "Context", units: dict[str, str]) -> bool:
+    """Install each unit through the edit protection of `managed_files`: a
+    hand-edited or pre-manifest unit is kept and its new version written as
+    `<name>.installer-new`. Returns whether any unit file was written."""
+    written = False
+    for name, content in units.items():
+        outcome = systemd_mod.install_managed_unit(name, content)
+        if outcome is managed_files.Outcome.WRITTEN:
+            written = True
+            ctx.report_installed(name, __version__)
+        elif outcome is managed_files.Outcome.UNCHANGED:
+            ctx.report_already_installed(name, __version__)
+        else:
+            ctx.log.warn(
+                f"kept the existing {name}; review the new version with "
+                "`mv3dt-installer configs diff` and take it with "
+                "`configs accept`, then `systemctl daemon-reload`"
+            )
+    return written
+
+
 def render_polkit_rule(user: str) -> str:
     """Render the LOCKED polkit rule (section B.1.1), substituting only
     `@USER@`. The rule's own JavaScript is reproduced verbatim in the
@@ -297,9 +337,10 @@ def _disable_pipeline_unit_before_remove(ctx: "Context", entry: "step5_mod.Proje
     business making."""
     if not _supervision_gate_active(ctx):
         return
-    unit = PIPELINE_UNIT_NAME(entry.slug)
-    ctx.log.info(f"Step 6: disabling {unit} before removing project artifacts")
-    ctx.run_root("systemctl", "disable", "--now", unit, check=False, capture_output=True, text=True)
+    # The watchdog first, so it cannot restart the pipeline being removed.
+    for unit in (WATCHDOG_UNIT_NAME(entry.slug), PIPELINE_UNIT_NAME(entry.slug)):
+        ctx.log.info(f"Step 6: disabling {unit} before removing project artifacts")
+        ctx.run_root("systemctl", "disable", "--now", unit, check=False, capture_output=True, text=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1074,37 +1115,30 @@ class Step6RemoteSupervision:
 
         ctx.progress.phase(1)
         ctx.progress.task("installing systemd units")
-        pipeline_content = render_pipeline_unit(ctx.user.name)
-        pipeline_changed = systemd_mod.install_unit(PIPELINE_UNIT_TEMPLATE, pipeline_content)
-
-        agent_content = render_agent_unit(ctx.user.name)
-        agent_changed = systemd_mod.install_unit(AGENT_UNIT_NAME, agent_content)
-
-        systemd_mod.daemon_reload(runner=runner)
-
-        if pipeline_changed:
-            ctx.report_installed(PIPELINE_UNIT_TEMPLATE, __version__)
-        else:
-            ctx.report_already_installed(PIPELINE_UNIT_TEMPLATE, __version__)
+        written = _install_units(
+            ctx,
+            {
+                PIPELINE_UNIT_TEMPLATE: render_pipeline_unit(ctx.user.name),
+                WATCHDOG_UNIT_TEMPLATE: render_watchdog_unit(ctx.user.name),
+                AGENT_UNIT_NAME: render_agent_unit(ctx.user.name),
+            },
+        )
+        if written:
+            systemd_mod.daemon_reload(runner=runner)
 
         ctx.progress.phase(2)
-        ctx.progress.task("enabling per-project pipeline units")
+        ctx.progress.task("enabling per-project pipeline and watchdog units")
         for entry in step5_mod.list_projects(ctx.install_dir):
-            unit = PIPELINE_UNIT_NAME(entry.slug)
-            systemd_mod.enable_now(unit, runner=runner)
-            ctx.report_installed(unit, __version__)
-
-        if agent_changed:
-            ctx.report_installed(AGENT_UNIT_NAME, __version__)
-        else:
-            ctx.report_already_installed(AGENT_UNIT_NAME, __version__)
+            for unit in (PIPELINE_UNIT_NAME(entry.slug), WATCHDOG_UNIT_NAME(entry.slug)):
+                systemd_mod.enable_now(unit, runner=runner)
+                ctx.report_installed(unit, __version__)
 
         # section B.1.1: the scoped polkit rule, written before the agent is
         # ever started against it.
         ctx.progress.phase(3)
         ctx.progress.task("writing the scoped polkit rule")
         rule_content = render_polkit_rule(ctx.user.name)
-        rule_path = pathlib.Path("/etc/polkit-1/rules.d") / POLKIT_RULE_NAME
+        rule_path = POLKIT_RULES_DIR / POLKIT_RULE_NAME
         rule_path.parent.mkdir(parents=True, exist_ok=True)
         existing = rule_path.read_text(encoding="utf-8") if rule_path.is_file() else None
         if existing != rule_content:
@@ -1176,6 +1210,15 @@ class Step6RemoteSupervision:
                     message=f"{unit} not active/activating; check `journalctl -u {unit}`",
                 )
 
+            watchdog = WATCHDOG_UNIT_NAME(entry.slug)
+            if not systemd_mod.is_enabled(watchdog, runner=runner):
+                return StepResult(status=StepStatus.FAILED, message=f"{watchdog} not enabled")
+            if not systemd_mod.is_active(watchdog, runner=runner):
+                return StepResult(
+                    status=StepStatus.FAILED,
+                    message=f"{watchdog} not active; check `journalctl -u {watchdog}`",
+                )
+
             auth = check_polkit_authorization(
                 run_as_agent_user=_bind_run_as_user(ctx), slug=entry.slug
             )
@@ -1213,6 +1256,11 @@ class Step6RemoteSupervision:
                 f"  {unit}: enabled={systemd_mod.is_enabled(unit, runner=runner)} "
                 f"active={systemd_mod.is_active(unit, runner=runner)} "
                 f"(logs: journalctl -u {unit})"
+            )
+            watchdog = WATCHDOG_UNIT_NAME(entry.slug)
+            lines.append(
+                f"  {watchdog}: enabled={systemd_mod.is_enabled(watchdog, runner=runner)} "
+                f"active={systemd_mod.is_active(watchdog, runner=runner)}"
             )
         ctx.log.info("\n".join(lines))
 

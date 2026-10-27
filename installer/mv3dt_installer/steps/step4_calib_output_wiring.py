@@ -4,7 +4,9 @@ Step 3 persists the AMC project identity and local microservice port. This
 step follows that project through the AMC API, downloads its documented
 MV3DT result archive, validates it, and swaps it into the configured
 calibration directory atomically. Later recalibrations are picked up by a
-systemd timer that invokes the same one-shot ``ingest`` subcommand.
+systemd timer that invokes the same one-shot ``ingest`` subcommand; the timer
+is always installed but enabled only when ``MV3DT_AUTO_INGEST=on``, otherwise
+re-ingest is the manual ``mv3dt-installer ingest``.
 """
 
 from __future__ import annotations
@@ -119,6 +121,9 @@ DEWARPER_FOCAL_LENGTH = 1600
 
 # The VLC viewer stream (tiled view, on-screen display, RTSP out on 8554).
 CONF_VIEWER_STREAM_KEY = config_mod.GATE_VIEWER_STREAM
+
+# The ingest timer is installed always but enabled only when this is on.
+CONF_AUTO_INGEST_KEY = config_mod.GATE_AUTO_INGEST
 
 # Single-view 3D tracking needs one camera model per camera
 # (ObjectModelProjection.cameraModelFilepath). AMC's export carries them as
@@ -1242,6 +1247,10 @@ def _systemd_runner(ctx: "Context"):
     return lambda argv, **kwargs: ctx.run_root(*argv, **kwargs)
 
 
+def _auto_ingest_on(ctx: "Context") -> bool:
+    return (ctx.conf.get(CONF_AUTO_INGEST_KEY) or "off").strip().lower() == "on"
+
+
 def _install_reingest_units(ctx: "Context", *, inputs: ProjectInputs) -> None:
     runner = _systemd_runner(ctx)
     slug = _slugify(inputs.project_name, location_id=inputs.location_id)
@@ -1266,16 +1275,40 @@ def _install_reingest_units(ctx: "Context", *, inputs: ProjectInputs) -> None:
         changed_any = True
         ctx.log.info(f"removed obsolete re-ingest unit {legacy_name}")
     for name, content in _render_reingest_units(ctx, inputs=inputs).items():
-        changed = systemd.install_unit(
-            name, content, unit_dir=systemd.UNIT_DIR, runner=runner
-        )
-        changed_any = changed_any or changed
-        (ctx.report_installed if changed else ctx.report_already_installed)(
-            name, "systemd unit"
-        )
+        outcome = systemd.install_managed_unit(name, content)
+        if outcome is managed_files.Outcome.WRITTEN:
+            changed_any = True
+            ctx.report_installed(name, "systemd unit")
+        elif outcome is managed_files.Outcome.UNCHANGED:
+            ctx.report_already_installed(name, "systemd unit")
     if changed_any:
         systemd.daemon_reload(runner=runner)
-    systemd.enable_now(f"mv3dt-ingest-{slug}.timer", runner=runner)
+    timer = f"mv3dt-ingest-{slug}.timer"
+    if _auto_ingest_on(ctx):
+        systemd.enable_now(timer, runner=runner)
+        return
+    # MV3DT_AUTO_INGEST=off: re-ingest is the manual `mv3dt-installer ingest`.
+    if systemd.is_enabled(timer, runner=runner) or systemd.is_active(
+        timer, runner=runner
+    ):
+        result = ctx.run_root(
+            "systemctl",
+            "disable",
+            "--now",
+            timer,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if getattr(result, "returncode", 1) != 0:
+            raise AmcApiError(
+                f"could not disable {timer} (MV3DT_AUTO_INGEST=off): "
+                f"{_result_detail(result)}"
+            )
+        ctx.log.info(
+            f"disabled {timer} (MV3DT_AUTO_INGEST=off); re-ingest with "
+            "`mv3dt-installer ingest`"
+        )
 
 
 def _camera_inventory_missing(ctx: "Context") -> bool:
@@ -1774,9 +1807,15 @@ class Step4CalibOutputWiring:
             return StepResult(
                 status=StepStatus.FAILED, message="re-ingest systemd units are missing"
             )
-        if not systemd.is_enabled(timer, runner=_systemd_runner(ctx)):
+        timer_enabled = systemd.is_enabled(timer, runner=_systemd_runner(ctx))
+        if _auto_ingest_on(ctx) and not timer_enabled:
             return StepResult(
                 status=StepStatus.FAILED, message=f"{timer} is not enabled"
+            )
+        if not _auto_ingest_on(ctx) and timer_enabled:
+            return StepResult(
+                status=StepStatus.FAILED,
+                message=f"{timer} is enabled but MV3DT_AUTO_INGEST is off",
             )
         if systemd.is_enabled(service, runner=_systemd_runner(ctx)):
             return StepResult(
