@@ -295,6 +295,7 @@ def test_legacy_amc_root_message_only_for_non_330_roots(tmp_path):
     ) is None
     message = step3.legacy_amc_root_message(home / "auto-magic-calib", home)
     assert message is not None
+    assert f"`docker compose down` in {home / 'auto-magic-calib' / 'compose'}" in message
     assert f"AMC_ROOT={home / 'amc-3.3.0' / 'tools' / 'auto-magic-calib'}" in message
     assert "AMC_PROJECT_ID=" in message
 
@@ -1240,6 +1241,23 @@ def test_run_warns_about_a_legacy_amc_root_without_changing_it(tmp_path, monkeyp
     assert "pre-3.3.0" in err and "AMC_PROJECT_ID=" in err
 
 
+def test_run_skips_the_launch_offer_for_a_legacy_amc_root(tmp_path, monkeypatch, capsys):
+    legacy = str(tmp_path / "home" / "op" / "auto-magic-calib")
+    ctx = FakeContext(tmp_path, runner_user=_passing_runner(), non_interactive=False)
+    ctx.conf[step3.CONF_AMC_ROOT_KEY] = legacy
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(
+        step3, "_INPUT", lambda prompt: pytest.fail(f"unexpected prompt: {prompt}")
+    )
+    monkeypatch.setattr(
+        step3, "launch_amc", lambda *a, **k: pytest.fail("must not launch")
+    )
+    result = step3.Step3AmcLauncher().run(ctx)
+    assert result.status is StepStatus.COMPLETE
+    assert (ctx.install_dir / "bin" / "amc").is_file()
+    assert "Skipping the AutoMagicCalib launch offer" in capsys.readouterr().err
+
+
 def test_verify_rejects_checkout_at_wrong_commit(tmp_path):
     ctx = _fully_provisioned_ctx(tmp_path)
     ctx.runner_user.when(
@@ -1566,11 +1584,81 @@ def test_readiness_failure_is_fatal_and_tears_down_once(tmp_path, monkeypatch):
     assert len(downs) == 1
 
 
-def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
+def _ps_json(ms_image, ui_image, *, ndjson=False) -> str:
+    import json as _json
+
+    entries = [
+        {"Service": "auto-magic-calib-ms", "Image": ms_image, "State": "running"},
+        {"Service": "auto-magic-calib-ui", "Image": ui_image, "State": "running"},
+    ]
+    entries = [e for e in entries if e["Image"] is not None]
+    if ndjson:
+        return "\n".join(_json.dumps(e) for e in entries) + "\n"
+    return _json.dumps(entries)
+
+
+def _running_stack_runner(ps_json: str) -> ScriptedRunner:
     runner = _passing_runner()
     runner.when(
         lambda a: a[:3] == ("docker", "compose", "ps"),
         stdout="auto-magic-calib-ms\nauto-magic-calib-ui\n",
+    )
+    runner.when(
+        lambda a: a[:3] == ("docker", "compose", "ps") and "json" in a,
+        stdout=ps_json,
+    )
+    return runner
+
+
+@pytest.mark.parametrize("ndjson", [False, True])
+def test_running_stack_images_match_the_pins(tmp_path, ndjson):
+    runner = _running_stack_runner(
+        _ps_json(step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE, ndjson=ndjson)
+    )
+    ctx = FakeContext(tmp_path, runner_user=runner)
+    step3.check_running_stack_images(ctx, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "ms_image, ui_image, ps_override",
+    [
+        ("nvcr.io/nvidia/auto-magic-calib:3.2.1",
+         "nvcr.io/nvidia/auto-magic-calib-ui:3.2.1", None),
+        (step3.AMC_MS_IMAGE, None, None),
+        (None, None, "not json"),
+    ],
+    ids=["legacy-321-stack", "ui-image-unknown", "unparseable-ps"],
+)
+def test_running_stack_with_other_or_unknown_images_is_refused(
+    tmp_path, monkeypatch, ms_image, ui_image, ps_override
+):
+    ps = ps_override if ps_override is not None else _ps_json(ms_image, ui_image)
+    runner = _running_stack_runner(ps)
+    ctx = FakeContext(tmp_path, runner_user=runner)
+    _stub_amc_root_with_compose(ctx)
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(
+        step3, "ensure_amc_project",
+        lambda ctx, cfg: pytest.fail("must not drive another AMC release"),
+    )
+
+    result = step3.launch_amc(ctx, keep_up=True, non_interactive=True)
+
+    assert result.status is StepStatus.FAILED
+    assert "docker compose down" in result.message
+    assert step3.AMC_MS_IMAGE in result.message
+    if ms_image and ms_image != step3.AMC_MS_IMAGE:
+        assert ms_image in result.message
+    else:
+        assert "unknown image" in result.message
+    assert not any(call[:3] == ("docker", "compose", "port") for call in runner.calls)
+    assert not any(call[:3] == ("docker", "compose", "up") for call in runner.calls)
+    assert not any(call[:3] == ("docker", "compose", "down") for call in runner.calls)
+
+
+def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
+    runner = _running_stack_runner(
+        _ps_json(step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE)
     )
     runner.when(
         lambda a: a[:4] == ("docker", "compose", "port", "auto-magic-calib-ui"),

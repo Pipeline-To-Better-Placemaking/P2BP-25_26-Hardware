@@ -93,6 +93,7 @@ __all__ = [
     "amc_clone_root",
     "legacy_amc_root_message",
     "check_compose_images",
+    "check_running_stack_images",
     "locate_compose_dir",
     "ENV_KEYS",
     "check_env_drift",
@@ -231,10 +232,12 @@ def legacy_amc_root_message(
     return (
         f"AMC_ROOT ({amc_root}) is not an AMC {AMC_VERSION} checkout (expected "
         f"<clone>/{AMC_SUBDIR}); it is likely the pre-{AMC_VERSION} standalone "
-        f"checkout. To migrate, set {CONF_AMC_ROOT_KEY}="
-        f"{default_amc_root(home)} and {CONF_AMC_PROJECT_ID_KEY}=<the AMC "
-        f"{AMC_VERSION} project id> in installer.conf (or remove "
-        f"{CONF_AMC_PROJECT_ID_KEY} so the next launch creates the project)."
+        f"checkout. To migrate, first stop its stack with `docker compose "
+        f"down` in {pathlib.Path(amc_root) / 'compose'}, then set "
+        f"{CONF_AMC_ROOT_KEY}={default_amc_root(home)} and "
+        f"{CONF_AMC_PROJECT_ID_KEY}=<the AMC {AMC_VERSION} project id> in "
+        f"installer.conf (or remove {CONF_AMC_PROJECT_ID_KEY} so the next "
+        "launch creates the project)."
     )
 
 
@@ -782,6 +785,72 @@ def compose_stack_running(ctx: "Context", compose_dir: pathlib.Path) -> bool:
         "auto-magic-calib-ms",
         "auto-magic-calib-ui",
     }.issubset(services)
+
+
+_SERVICE_IMAGES: dict[str, str] = {
+    "auto-magic-calib-ms": AMC_MS_IMAGE,
+    "auto-magic-calib-ui": AMC_UI_IMAGE,
+}
+
+
+def compose_running_images(
+    ctx: "Context", compose_dir: pathlib.Path
+) -> dict[str, str]:
+    """Map each running Compose service to its image, from `docker compose
+    ps --format json` (a JSON array or one JSON object per line, depending on
+    the Compose release). Unparseable output yields an empty map."""
+    result = ctx.run_as_user(
+        "docker", "compose", "ps", "--status", "running", "--format", "json",
+        cwd=str(compose_dir), check=False, capture_output=True, text=True,
+        stream=False,
+    )
+    if result.returncode != 0:
+        return {}
+    text = (result.stdout or "").strip()
+    entries: list[Any] = []
+    try:
+        parsed = json.loads(text) if text else []
+        entries = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                return {}
+    images: dict[str, str] = {}
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("Service") and entry.get("Image"):
+            images[str(entry["Service"])] = str(entry["Image"])
+    return images
+
+
+def check_running_stack_images(
+    ctx: "Context", compose_dir: pathlib.Path
+) -> None:
+    """Refuse to reuse a running stack that is not the pinned AMC release.
+
+    A pre-3.3.0 checkout also keeps its files in a directory named
+    `compose`, so its stack shares the default Compose project name, service
+    names, and container names, and `compose ps` from the new directory
+    reports it as running. Driving it would create the project against the
+    wrong AMC API, so anything other than the pinned images (including an
+    image that cannot be determined) is fatal.
+    """
+    images = compose_running_images(ctx, compose_dir)
+    wrong = [
+        f"{service}={images.get(service) or 'unknown image'}"
+        for service, expected in _SERVICE_IMAGES.items()
+        if images.get(service) != expected
+    ]
+    if wrong:
+        raise AmcLaunchError(
+            "running AMC containers are not the pinned AMC "
+            f"{AMC_VERSION} images ({', '.join(wrong)}; expected "
+            f"{AMC_MS_IMAGE} and {AMC_UI_IMAGE}). Stop the old stack with "
+            "`docker compose down` in the <AMC_ROOT>/compose directory that "
+            "started it, then rerun; the installer will not drive another "
+            "AMC release."
+        )
 
 
 def compose_published_port(
@@ -1515,6 +1584,7 @@ def launch_amc(
 
         stack_running = compose_stack_running(ctx, compose_dir)
         if stack_running:
+            check_running_stack_images(ctx, compose_dir)
             ui_port = compose_published_port(
                 ctx, compose_dir, "auto-magic-calib-ui", 5000
             )
@@ -1813,6 +1883,15 @@ class Step3AmcLauncher:
             ctx.report_installed("amc launcher", str(wrapper_path))
         else:
             ctx.report_already_installed("amc launcher", str(wrapper_path))
+
+        if legacy is not None:
+            # The launch would refuse the pre-3.3.0 root; the warning above
+            # already carries the migration hint, so do not offer it.
+            ctx.log.warn(
+                "Skipping the AutoMagicCalib launch offer until AMC_ROOT is "
+                f"migrated to AMC {AMC_VERSION}"
+            )
+            return StepResult(status=StepStatus.COMPLETE)
 
         if not _confirm_launch_now(ctx):
             return StepResult(status=StepStatus.COMPLETE)
