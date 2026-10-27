@@ -1,0 +1,10 @@
+# MV3DT vision-neighbor pub/sub, ordered by stream index (source0, source1).
+# Format and topic template from NVIDIA's deepstream-tracker-3d-multi-view
+# generator: one DeepStream instance, broker 127.0.0.1:1883, topic /trck/cam<N>.
+# Each camera publishes its tracklets and subscribes to the other camera.
+pubBrokerTopicStr:
+- 127.0.0.1:1883;/trck/cam1
+- 127.0.0.1:1883;/trck/cam2
+subPeerBrokerTopicStrs:
+- - 127.0.0.1:1883;/trck/cam2
+- - 127.0.0.1:1883;/trck/cam1

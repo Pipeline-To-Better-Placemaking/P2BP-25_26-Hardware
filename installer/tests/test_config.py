@@ -42,9 +42,11 @@ def _reset_transcript_state():
 @pytest.fixture(autouse=True)
 def _seed_tracking_gate_off(monkeypatch):
     """Most tests here script the Step 6 and 7 gate prompts only. Seeding
-    the Step 8 gate through its env var (tier 2) keeps it out of their
-    prompt sequences; the tracking-gate tests below remove it again."""
+    the Step 8 and viewer gates through their env vars (tier 2) keeps them
+    out of their prompt sequences; the tracking- and viewer-gate tests below
+    remove them again."""
     monkeypatch.setenv(config.GATE_TRACKING_HISTORY, "off")
+    monkeypatch.setenv(config.GATE_VIEWER_STREAM, "off")
 
 
 def _state(tmp_path: Path) -> StateMachine:
@@ -703,10 +705,10 @@ def test_tracking_gate_flag_seeds_and_overrides(tmp_path, monkeypatch):
     assert "MV3DT_TRACKING_HISTORY=on" in conf_text
 
 
-def test_tracking_gate_is_prompted_last_with_off_prefilled(tmp_path, monkeypatch):
+def test_tracking_gate_is_prompted_after_the_step_gates(tmp_path, monkeypatch):
     for key in config.GATE_KEYS:
         monkeypatch.delenv(key, raising=False)
-    prompt = _scripted_prompt("", "", "on")
+    prompt = _scripted_prompt("", "", "on", "")
 
     cfg = config.load(
         str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
@@ -714,7 +716,51 @@ def test_tracking_gate_is_prompted_last_with_off_prefilled(tmp_path, monkeypatch
     )
 
     assert cfg.tracking_history == "on"
-    assert prompt.asked[-1] == "MV3DT_TRACKING_HISTORY (off/on) [off]: "
+    assert prompt.asked[2] == "MV3DT_TRACKING_HISTORY (off/on) [off]: "
+
+
+def test_viewer_gate_is_prompted_last_with_off_prefilled(tmp_path, monkeypatch):
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    prompt = _scripted_prompt("", "", "", "on")
+
+    cfg = config.load(
+        str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
+        prompt=prompt,
+    )
+
+    assert cfg.viewer_stream == "on"
+    assert cfg.values[config.GATE_VIEWER_STREAM] == "on"
+    assert prompt.asked[-1] == "MV3DT_VIEWER_STREAM (off/on) [off]: "
+
+
+def test_viewer_gate_defaults_off_under_non_interactive(tmp_path, monkeypatch):
+    monkeypatch.delenv(config.GATE_VIEWER_STREAM, raising=False)
+
+    cfg = config.load(
+        str(tmp_path / "install"), _state(tmp_path), non_interactive=True,
+        prompt=_refuse_prompt,
+    )
+
+    assert cfg.viewer_stream == "off"
+    assert "MV3DT_VIEWER_STREAM=off" in cfg.conf_path.read_text(encoding="utf-8")
+
+
+def test_viewer_gate_flag_seeds_and_overrides(tmp_path, monkeypatch):
+    monkeypatch.delenv(config.GATE_VIEWER_STREAM, raising=False)
+    sm = _state(tmp_path)
+    install_dir = tmp_path / "install"
+
+    first = config.load(str(install_dir), sm, non_interactive=True)
+    assert first.viewer_stream == "off"
+
+    second = config.load(
+        None, sm, non_interactive=True,
+        gate_overrides={config.GATE_VIEWER_STREAM: "on"},
+    )
+    assert second.viewer_stream == "on"
+    conf_text = (install_dir / config.CONF_FILENAME).read_text(encoding="utf-8")
+    assert "MV3DT_VIEWER_STREAM=on" in conf_text
 
 
 # ---------------------------------------------------------------------------
@@ -813,3 +859,13 @@ def test_remove_values_drops_only_named_keys(tmp_path):
     assert "CAM_USER" not in text
     assert "CAM_PASSWORD" not in text
     assert "CAMERA_SCAN_CIDR=10.0.0.0/24" in text
+
+
+def test_viewer_stream_flag_maps_to_its_gate():
+    from mv3dt_installer import app
+
+    assert app.parse_args([]).viewer_stream is None
+    args = app.parse_args(["--viewer-stream", "on"])
+    assert app._gate_overrides_from_args(args) == {config.GATE_VIEWER_STREAM: "on"}
+    # A feature gate, not a step gate: no step is skipped on it.
+    assert "viewer_stream" not in app._GATE_ORDER_TO_CONF_ATTR.values()

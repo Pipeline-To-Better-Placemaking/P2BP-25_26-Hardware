@@ -23,13 +23,16 @@ prefilled"); `--non-interactive` uses the default silently.
 
 `installer.conf` also carries the three §3.4 opt-in step-gate keys
 (`MV3DT_REMOTE_SUPERVISION`, `MV3DT_WEBAPP_INTEGRATION`,
-`MV3DT_TRACKING_HISTORY`). The *first* time
+`MV3DT_TRACKING_HISTORY`) and the `MV3DT_VIEWER_STREAM` feature gate (Step 4
+renders the tiled view, on-screen display and RTSP viewer sink only when it
+is `on`; it gates no step). The *first* time
 `load()` ever writes a fresh `installer.conf` (i.e. the key is not already
 present in the file), each gate is seeded through four tiers, in order:
 
     1. `gate_overrides[key]`  -- the matching CLI flag doc 00 §3.4's own
        table promises for every gate (`--remote-supervision`,
-       `--webapp-integration`, `--tracking-history`, parsed by
+       `--webapp-integration`, `--tracking-history`, `--viewer-stream`,
+       parsed by
        `app.build_parser()` with
        `default=None` so "not passed" stays distinguishable from an
        explicit `off`).
@@ -65,7 +68,7 @@ under it (`secrets/`, `bin/`, `deepstream/`, `projects/`, `agent/`,
 Public API:
     CONF_FILENAME       -- "installer.conf".
     GATE_REMOTE_SUPERVISION / GATE_WEBAPP_INTEGRATION / GATE_TRACKING_HISTORY
-        -- the §3.4 key names.
+        -- the §3.4 key names. GATE_VIEWER_STREAM -- the viewer feature gate.
     GATE_KEYS            -- every key name, in table order.
     GATE_DEFAULTS         -- {key: "off"} for each.
     GATE_CHOICES          -- {key: allowed values}, in doc 00 §3.4's table
@@ -76,7 +79,7 @@ Public API:
         only to name the source in the "flag overrode a persisted value"
         log line.
     Config                -- dataclass: install_dir, remote_supervision,
-        webapp_integration, tracking_history, values (full parsed KEY=VALUE
+        webapp_integration, tracking_history, viewer_stream, values (full parsed KEY=VALUE
         dict).
     load(install_dir_override, state, non_interactive, ...,
         gate_overrides=None) -> Config
@@ -97,6 +100,7 @@ __all__ = [
     "GATE_REMOTE_SUPERVISION",
     "GATE_WEBAPP_INTEGRATION",
     "GATE_TRACKING_HISTORY",
+    "GATE_VIEWER_STREAM",
     "GATE_KEYS",
     "GATE_DEFAULTS",
     "GATE_CHOICES",
@@ -126,15 +130,21 @@ CAMERA_SCAN_IFACE_KEY = "CAMERA_SCAN_IFACE"
 GATE_REMOTE_SUPERVISION = "MV3DT_REMOTE_SUPERVISION"
 GATE_WEBAPP_INTEGRATION = "MV3DT_WEBAPP_INTEGRATION"
 GATE_TRACKING_HISTORY = "MV3DT_TRACKING_HISTORY"
+# Not a step gate: Step 4 reads it to add the VLC viewer stream (tiled view,
+# OSD, RTSP sink on 8554) to the rendered DeepStream config. Seeded and
+# overridden exactly like the step gates.
+GATE_VIEWER_STREAM = "MV3DT_VIEWER_STREAM"
 GATE_KEYS: tuple[str, ...] = (
     GATE_REMOTE_SUPERVISION,
     GATE_WEBAPP_INTEGRATION,
     GATE_TRACKING_HISTORY,
+    GATE_VIEWER_STREAM,
 )
 GATE_DEFAULTS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "off",
     GATE_WEBAPP_INTEGRATION: "off",
     GATE_TRACKING_HISTORY: "off",
+    GATE_VIEWER_STREAM: "off",
 }
 
 # Allowed values per gate, in doc 00 §3.4's table order. Step 6's remote
@@ -148,6 +158,7 @@ GATE_CHOICES: dict[str, tuple[str, ...]] = {
     GATE_REMOTE_SUPERVISION: ("off", "local", "remote"),
     GATE_WEBAPP_INTEGRATION: ("off", "on"),
     GATE_TRACKING_HISTORY: ("off", "on"),
+    GATE_VIEWER_STREAM: ("off", "on"),
 }
 
 # The CLI flag that overrides each gate (doc 00 §3.4: "a matching CLI
@@ -157,6 +168,7 @@ GATE_FLAGS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "--remote-supervision",
     GATE_WEBAPP_INTEGRATION: "--webapp-integration",
     GATE_TRACKING_HISTORY: "--tracking-history",
+    GATE_VIEWER_STREAM: "--viewer-stream",
 }
 
 # installer.conf also records the resolved install_dir under this key
@@ -175,6 +187,7 @@ class Config:
     remote_supervision: str = GATE_DEFAULTS[GATE_REMOTE_SUPERVISION]
     webapp_integration: str = GATE_DEFAULTS[GATE_WEBAPP_INTEGRATION]
     tracking_history: str = GATE_DEFAULTS[GATE_TRACKING_HISTORY]
+    viewer_stream: str = GATE_DEFAULTS[GATE_VIEWER_STREAM]
     # Full parsed installer.conf KEY=VALUE map, including the two gate keys
     # and INSTALL_DIR, plus anything else already present in the file (other
     # modules, e.g. ngc.py/webapp.py, may add their own shared vars here
@@ -450,5 +463,6 @@ def load(
         remote_supervision=values[GATE_REMOTE_SUPERVISION],
         webapp_integration=values[GATE_WEBAPP_INTEGRATION],
         tracking_history=values[GATE_TRACKING_HISTORY],
+        viewer_stream=values[GATE_VIEWER_STREAM],
         values=values,
     )

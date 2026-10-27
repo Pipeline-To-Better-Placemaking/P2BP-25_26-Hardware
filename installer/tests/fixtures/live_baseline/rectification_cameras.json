@@ -1,0 +1,20 @@
+{
+  "cameras": [
+    {
+      "camera_id": "cam_00",
+      "width": 1920,
+      "height": 1080,
+      "cx": 960.0,
+      "cy": 540.0,
+      "committed": {"model": "radial", "k1": -3.2126e-07, "k2": 1.00972e-13}
+    },
+    {
+      "camera_id": "cam_01",
+      "width": 1920,
+      "height": 1080,
+      "cx": 960.0,
+      "cy": 540.0,
+      "committed": {"model": "radial", "k1": -2.9989e-07, "k2": 9.0769e-14}
+    }
+  ]
+}

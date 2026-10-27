@@ -44,6 +44,10 @@ __all__ = [
     "download_and_ingest",
     "render_tracker_yaml",
     "render_app_config",
+    "render_dewarper_config",
+    "render_pub_sub_config",
+    "dewarper_distortion",
+    "tiled_display_grid",
     "handle_ingest_subcommand",
     "Step4CalibOutputWiring",
 ]
@@ -85,6 +89,36 @@ REID_MODEL_URL = (
 )
 REID_MODEL_NAME = "resnet50_market1501.etlt"
 REID_RELATIVE_DIR = pathlib.Path("deepstream") / "models" / "reid"
+
+# The tracker's PoseEstimator (poseEstimatorType 1) loads NVIDIA TAO
+# BodyPose3DNet from this ONNX file; DeepStream builds the engine beside it on
+# first start. NGC version `deployable_accuracy_onnx_1.0` holds exactly this
+# one file (guest download, no API key); size and SHA-256 are the values the
+# NGC file listing publishes for it.
+BODYPOSE_MODEL_URL = (
+    "https://api.ngc.nvidia.com/v2/models/nvidia/tao/bodypose3dnet/"
+    "versions/deployable_accuracy_onnx_1.0/files/bodypose3dnet_accuracy.onnx"
+)
+BODYPOSE_MODEL_NAME = "bodypose3dnet_accuracy.onnx"
+BODYPOSE_MODEL_SIZE = 70575749
+BODYPOSE_MODEL_SHA256 = (
+    "0452b785a70fcd6bc5bd4069249bdfd85eb139c9e9216bcf81f89df33945d028"
+)
+BODYPOSE_RELATIVE_DIR = pathlib.Path("deepstream") / "models" / "bodypose3dnet"
+
+# MV3DT fusion: each camera's tracker publishes its tracklets on the local
+# broker and subscribes to its peers (Communicator in the tracker config).
+MV3DT_DIR_NAME = "mv3dt"
+PUB_SUB_CONFIG_NAME = "pub_sub_info_config.yml"
+MQTT_CONFIG_NAME = "config_mqtt.txt"
+MV3DT_BROKER = "127.0.0.1:1883"
+
+# nvdewarper configs generated from AMC's committed lens rectification.
+DEWARPER_DIR_NAME = "dewarper"
+DEWARPER_FOCAL_LENGTH = 1600
+
+# The VLC viewer stream (tiled view, on-screen display, RTSP out on 8554).
+CONF_VIEWER_STREAM_KEY = config_mod.GATE_VIEWER_STREAM
 
 # Single-view 3D tracking needs one camera model per camera
 # (ObjectModelProjection.cameraModelFilepath). AMC's export carries them as
@@ -295,6 +329,35 @@ def _project_state(ctx: "Context", inputs: ProjectInputs) -> str:
             f"{' '.join(evidence.split())[:2000] or 'no log evidence returned'}"
         )
     return state_name
+
+
+def _fetch_rectification(ctx: "Context", inputs: ProjectInputs) -> Optional[list]:
+    """AMC's per-camera lens rectification for the project, or `None` with a
+    warning when the API is unreachable or answers with anything unusable.
+    A missing rectification never fails Step 4; it only means no dewarper."""
+    result = ctx.run_root(
+        "curl",
+        "-fsS",
+        "--max-time",
+        "10",
+        f"{_api_base(inputs)}/rectification/{inputs.project_id}/cameras",
+        check=False,
+        capture_output=True,
+        text=True,
+        stream=False,
+    )
+    try:
+        payload = _json_object(result, f"AMC rectification for {inputs.project_id}")
+    except AmcApiError as exc:
+        ctx.log.warn(f"{exc}; rendering no dewarpers")
+        return None
+    cameras = payload.get("cameras")
+    if not isinstance(cameras, list):
+        ctx.log.warn(
+            "AMC rectification response has no cameras list; rendering no dewarpers"
+        )
+        return None
+    return [camera for camera in cameras if isinstance(camera, dict)]
 
 
 def _footage_seconds(ctx: "Context") -> int:
@@ -668,7 +731,12 @@ def render_app_config(
     cameras: list,
     template_path: str,
     calibration_dir: "pathlib.Path | str",
+    viewer_stream: bool = False,
+    dewarper_files: "Optional[dict[int, pathlib.Path | str]]" = None,
 ) -> str:
+    """Render the deepstream-app config. `viewer_stream` turns on the tiled
+    display and adds the on-screen display and the RTSP sink;
+    `dewarper_files` maps a source index to its nvdewarper config."""
     text = template_text.replace("${CAM_USER}", cam_user)
     text = text.replace("${CAM_PASSWORD}", cam_password).replace(
         "${LOCATION_ID}", location_id
@@ -685,6 +753,18 @@ def render_app_config(
         return _URI_LINE_RE.sub(f"uri={uri}", match.group(0), count=1)
 
     text = _SOURCE_BLOCK_RE.sub(replace_source, text)
+    extra: list[str] = []
+    if viewer_stream:
+        text, count = _TILED_DISPLAY_BLOCK_RE.subn(
+            _tiled_display_section(len(cameras)), text, count=1
+        )
+        if count != 1:
+            raise ValueError("app config template has no [tiled-display] section")
+        extra += [_OSD_SECTION, _RTSP_SINK_SECTION]
+    for index in sorted(dewarper_files or {}):
+        extra.append(_dewarper_section(index, (dewarper_files or {})[index]))
+    if extra:
+        text = text.rstrip("\n") + "\n\n" + "\n".join(extra)
     return (
         "# Rendered by mv3dt-installer step4_calib_output_wiring\n"
         f"# Source template: {pathlib.PurePath(template_path).name}\n"
@@ -692,6 +772,181 @@ def render_app_config(
         f"# LOCATION_ID    : {location_id}\n"
         "# Edit the committed template, not this file; it is regenerated.\n\n" + text
     )
+
+
+_TILED_DISPLAY_BLOCK_RE = re.compile(
+    r"(?m)^\[tiled-display\][ \t]*\n(?:[^\[#\n][^\n]*\n|\n)*"
+)
+
+# Live workstation values (2 cameras, 2026-10-26 snapshot).
+_OSD_SECTION = (
+    "[osd]\n"
+    "display-text=1\n"
+    "enable=1\n"
+    "gpu-id=0\n"
+    "border-width=3\n"
+    "text-size=22\n"
+    "text-color=1;1;1;1\n"
+    "text-bg-color=0.3;0.3;0.3;1\n"
+    "font=Serif\n"
+)
+_RTSP_SINK_SECTION = (
+    "[sink2]\n"
+    "enable=1\n"
+    "type=4\n"
+    "codec=1\n"
+    "enc-type=0\n"
+    "sync=0\n"
+    "bitrate=4000000\n"
+    "rtsp-port=8554\n"
+    "udp-port=5400\n"
+)
+_TILED_WIDTH = 1920
+_TILED_MAX_COLUMNS = 4
+
+
+def tiled_display_grid(camera_count: int) -> tuple[int, int, int, int]:
+    """`(rows, columns, width, height)` of the viewer's tiled display.
+
+    Up to two cameras: one row, 1920x540 (the live two-camera layout). More
+    cameras: up to four tiles per row, 1920 wide, with the height chosen so
+    each tile keeps the 16:9 stream aspect (3 cameras 1x3 at 1920x360, 4 at
+    1920x270, 5 to 8 in 2x4 at 1920x540)."""
+    count = max(camera_count, 1)
+    if count <= 2:
+        return 1, count, _TILED_WIDTH, 540
+    columns = min(count, _TILED_MAX_COLUMNS)
+    rows = -(-count // columns)
+    height = _TILED_WIDTH * rows * 9 // (16 * columns)
+    return rows, columns, _TILED_WIDTH, height
+
+
+def _tiled_display_section(camera_count: int) -> str:
+    rows, columns, width, height = tiled_display_grid(camera_count)
+    return (
+        "[tiled-display]\n"
+        "enable=1\n"
+        f"rows={rows}\n"
+        f"columns={columns}\n"
+        f"width={width}\n"
+        f"height={height}\n\n"
+    )
+
+
+def _dewarper_section(index: int, config_file: "pathlib.Path | str") -> str:
+    return (
+        f"[dewarper{index}]\n"
+        "enable=1\n"
+        "gpu-id=0\n"
+        f"source-id={index}\n"
+        "num-surfaces-per-frame=1\n"
+        "num-output-buffers=4\n"
+        "nvbuf-memory-type=0\n"
+        f"config-file={config_file}\n"
+    )
+
+
+def _format_number(value: float) -> str:
+    """Integral values without a decimal point (960, not 960.0)."""
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
+
+
+def _format_coefficient(value: float) -> str:
+    """Five decimals, trailing zeros trimmed, as in the live dewarper files."""
+    text = f"{value:.5f}".rstrip("0").rstrip(".")
+    return "0" if text in ("", "-0") else text
+
+
+def dewarper_distortion(k1: float, k2: float) -> str:
+    """AMC's radial model is in pixels; nvdewarper projection type 3 wants
+    the coefficients normalized by the focal length: k1*f^2 and k2*f^4."""
+    f = DEWARPER_FOCAL_LENGTH
+    return (
+        f"{_format_coefficient(k1 * f**2)};{_format_coefficient(k2 * f**4)};0;0;0"
+    )
+
+
+def render_dewarper_config(camera: dict) -> str:
+    """One nvdewarper config from an AMC rectification camera entry with a
+    committed radial model. Raises ValueError for anything else."""
+    committed = camera.get("committed")
+    if not isinstance(committed, dict):
+        raise ValueError("no committed rectification")
+    model = committed.get("model")
+    if model != "radial":
+        raise ValueError(f"committed model is {model!r}, not radial")
+    try:
+        width = int(camera["width"])
+        height = int(camera["height"])
+        cx = float(camera["cx"])
+        cy = float(camera["cy"])
+        k1 = float(committed["k1"])
+        k2 = float(committed["k2"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"incomplete rectification entry ({exc})") from exc
+    return (
+        "[property]\n"
+        f"output-width={width}\n"
+        f"output-height={height}\n"
+        "num-batch-buffers=1\n"
+        "\n"
+        "[surface0]\n"
+        "projection-type=3\n"
+        f"width={width}\n"
+        f"height={height}\n"
+        f"focal-length={DEWARPER_FOCAL_LENGTH}\n"
+        f"distortion={dewarper_distortion(k1, k2)}\n"
+        f"src-x0={_format_number(cx)}\n"
+        f"src-y0={_format_number(cy)}\n"
+    )
+
+
+def render_pub_sub_config(camera_count: int) -> str:
+    """MV3DT vision-neighbor pub/sub for one DeepStream instance: camera k
+    (1-based, source order) publishes /trck/cam<k> and subscribes to every
+    other camera. Format and topic template of NVIDIA's
+    deepstream-tracker-3d-multi-view generate_pub_sub_configs.py."""
+    topics = [f"{MV3DT_BROKER};/trck/cam{k}" for k in range(1, camera_count + 1)]
+    lines = [
+        "# MV3DT vision-neighbor pub/sub, ordered by stream index.",
+        "# Rendered by mv3dt-installer step4_calib_output_wiring: one DeepStream",
+        f"# instance, broker {MV3DT_BROKER}, topic /trck/cam<N>. Each camera",
+        "# publishes its tracklets and subscribes to every other camera.",
+        "pubBrokerTopicStr:",
+    ]
+    lines += [f"- {topic}" for topic in topics]
+    lines.append("subPeerBrokerTopicStrs:")
+    for index in range(camera_count):
+        peers = [topic for other, topic in enumerate(topics) if other != index]
+        if not peers:
+            lines.append("- []")
+            continue
+        lines.append(f"- - {peers[0]}")
+        lines += [f"  - {peer}" for peer in peers[1:]]
+    return "\n".join(lines) + "\n"
+
+
+# NVIDIA's deepstream-tracker-3d-multi-view config_templates/config_mqtt.txt
+# (DeepStream v9.2.0), verbatim. The username/password lines are the
+# sample's fixed non-secret placeholders: the installer's local Mosquitto
+# allows anonymous clients, so they are never a real credential.
+# set-threaded=0 is required: the tracker communicator drives the client
+# with mosquitto_loop_start.
+MQTT_CONFIG_TEXT = (
+    "[message-broker]\n"
+    "username = user\n"
+    "password = password\n"
+    "#client-id = uniqueID\n"
+    "#enable-tls = 1\n"
+    "#tls-cafile =\n"
+    "#tls-capath =\n"
+    "#tls-certfile =\n"
+    "#tls-keyfile =\n"
+    "#share-connection = 1\n"
+    "#loop-timeout = 2000\n"
+    "#keep-alive = 60\n"
+    "set-threaded = 0\n"
+)
 
 
 def _source_block(text: str, index: int) -> str:
@@ -782,6 +1037,98 @@ def _ensure_reid_model(ctx: "Context") -> Optional[str]:
     return None
 
 
+def _bodypose_model_path(ctx: "Context") -> pathlib.Path:
+    return ctx.install_dir / BODYPOSE_RELATIVE_DIR / BODYPOSE_MODEL_NAME
+
+
+def _file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ensure_bodypose_model(ctx: "Context") -> Optional[str]:
+    """Download the PoseEstimator's BodyPose3DNet ONNX once, checked against
+    NGC's published size and SHA-256. Returns an error string, or `None`
+    when the model is present (already, or freshly downloaded)."""
+    target = _bodypose_model_path(ctx)
+    if target.is_file() and target.stat().st_size > 0:
+        ctx.report_already_installed("bodypose3dnet-model", BODYPOSE_MODEL_NAME)
+        return None
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(f".{BODYPOSE_MODEL_NAME}.tmp")
+    try:
+        result = ctx.run_root(
+            "curl",
+            "-fsSL",
+            "--retry",
+            "3",
+            "-o",
+            str(staged),
+            BODYPOSE_MODEL_URL,
+            check=False,
+            capture_output=True,
+            text=True,
+            stream=False,
+        )
+        if result.returncode != 0 or not staged.is_file():
+            return (
+                f"BodyPose3DNet model download failed (exit {result.returncode}): "
+                f"{(result.stderr or '').strip()[-500:]}"
+            )
+        size = staged.stat().st_size
+        if size != BODYPOSE_MODEL_SIZE:
+            return (
+                f"BodyPose3DNet model download has {size} bytes, "
+                f"expected {BODYPOSE_MODEL_SIZE}"
+            )
+        if _file_sha256(staged) != BODYPOSE_MODEL_SHA256:
+            return "BodyPose3DNet model download failed its SHA-256 check"
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+    _chown_tree(ctx, target.parent)
+    ctx.report_installed("bodypose3dnet-model", BODYPOSE_MODEL_NAME)
+    return None
+
+
+def _viewer_stream_on(ctx: "Context") -> bool:
+    return (ctx.conf.get(CONF_VIEWER_STREAM_KEY) or "off").strip().lower() == "on"
+
+
+def _write_dewarpers(
+    ctx: "Context", inputs: ProjectInputs, camera_count: int
+) -> dict[int, pathlib.Path]:
+    """Write one nvdewarper config per enabled camera that has a committed
+    radial rectification in AMC; return {source index: config path}.
+
+    AMC camera cam_NN is source NN, the same upload-order mapping the
+    camera models rely on."""
+    rectification = _fetch_rectification(ctx, inputs)
+    if rectification is None:
+        return {}
+    by_id = {str(camera.get("camera_id")): camera for camera in rectification}
+    out_dir = ctx.install_dir / "deepstream" / DEWARPER_DIR_NAME
+    written: dict[int, pathlib.Path] = {}
+    for index in range(camera_count):
+        camera_id = f"cam_{index:02d}"
+        camera = by_id.get(camera_id)
+        if camera is None:
+            ctx.log.warn(f"AMC has no rectification for {camera_id}; no dewarper")
+            continue
+        try:
+            text = render_dewarper_config(camera)
+        except ValueError as exc:
+            ctx.log.warn(f"{camera_id}: {exc}; no dewarper")
+            continue
+        target = out_dir / f"dewarper_cam{index}.txt"
+        _write_text_report(ctx, target, text, label=f"dewarper {target.name}")
+        written[index] = target
+    return written
+
+
 def _render_configs(
     ctx: "Context",
     *,
@@ -801,15 +1148,29 @@ def _render_configs(
         tracker_text,
         label=TRACKER_YAML_TEMPLATE_NAME,
     )
+    cameras = _load_enabled_cameras(ctx)
+    mv3dt_dir = deepstream_dir / MV3DT_DIR_NAME
+    _write_text_report(
+        ctx,
+        mv3dt_dir / PUB_SUB_CONFIG_NAME,
+        render_pub_sub_config(len(cameras)),
+        label=PUB_SUB_CONFIG_NAME,
+    )
+    _write_text_report(
+        ctx, mv3dt_dir / MQTT_CONFIG_NAME, MQTT_CONFIG_TEXT, label=MQTT_CONFIG_NAME
+    )
+    dewarper_files = _write_dewarpers(ctx, inputs, len(cameras))
     app_template_path = ctx.asset_path("deepstream", APP_CONFIG_TEMPLATE_NAME)
     app_text = render_app_config(
         app_template_path.read_text(encoding="utf-8"),
         cam_user=inputs.cam_user,
         cam_password=inputs.cam_password,
         location_id=inputs.location_id,
-        cameras=_load_enabled_cameras(ctx),
+        cameras=cameras,
         template_path=str(app_template_path),
         calibration_dir=calibration_dir,
+        viewer_stream=_viewer_stream_on(ctx),
+        dewarper_files=dewarper_files,
     )
     _write_text_report(
         ctx,
@@ -1154,6 +1515,10 @@ def _render_targets_exist(ctx: "Context", calibration_dir: pathlib.Path) -> bool
             MSGCONV_TEMPLATE_NAME,
         )
     ]
+    targets += [
+        deepstream_dir / MV3DT_DIR_NAME / name
+        for name in (PUB_SUB_CONFIG_NAME, MQTT_CONFIG_NAME)
+    ]
     return all(target.is_file() for target in targets)
 
 
@@ -1189,6 +1554,9 @@ def _wire_download(
     reid_failure = _ensure_reid_model(ctx)
     if reid_failure is not None:
         return StepResult(status=StepStatus.FAILED, message=reid_failure)
+    bodypose_failure = _ensure_bodypose_model(ctx)
+    if bodypose_failure is not None:
+        return StepResult(status=StepStatus.FAILED, message=bodypose_failure)
     if skip_unchanged and not outcome.changed and _render_targets_exist(ctx, dest):
         ctx.log.info(
             f"AMC result for {inputs.project_name} is unchanged and the rendered "
@@ -1375,7 +1743,12 @@ class Step4CalibOutputWiring:
                 return StepResult(
                     status=StepStatus.FAILED, message=f"[source{index}] has no RTSP URI"
                 )
-        for name in (INFER_PRIMARY_TEMPLATE_NAME, MSGCONV_TEMPLATE_NAME):
+        for name in (
+            INFER_PRIMARY_TEMPLATE_NAME,
+            MSGCONV_TEMPLATE_NAME,
+            f"{MV3DT_DIR_NAME}/{PUB_SUB_CONFIG_NAME}",
+            f"{MV3DT_DIR_NAME}/{MQTT_CONFIG_NAME}",
+        ):
             if not (deepstream_dir / name).is_file():
                 return StepResult(
                     status=StepStatus.FAILED, message=f"missing {deepstream_dir / name}"
@@ -1384,6 +1757,12 @@ class Step4CalibOutputWiring:
         if not reid_model.is_file() or reid_model.stat().st_size == 0:
             return StepResult(
                 status=StepStatus.FAILED, message=f"missing ReID model {reid_model}"
+            )
+        bodypose_model = _bodypose_model_path(ctx)
+        if not bodypose_model.is_file() or bodypose_model.stat().st_size == 0:
+            return StepResult(
+                status=StepStatus.FAILED,
+                message=f"missing BodyPose3DNet model {bodypose_model}",
             )
         slug = _slugify(inputs.project_name, location_id=inputs.location_id)
         timer = f"mv3dt-ingest-{slug}.timer"

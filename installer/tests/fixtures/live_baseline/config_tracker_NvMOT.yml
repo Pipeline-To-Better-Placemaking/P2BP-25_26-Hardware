@@ -1,0 +1,150 @@
+%YAML:1.0
+
+BaseConfig:
+  useBatchNumForFrameId: 0
+  minDetectorConfidence: 0.1894
+
+TargetManagement:
+  enableBboxUnClipping: 1
+  preserveStreamUpdateOrder: 0
+  maxTargetsPerStream: 150
+
+  minIouDiff4NewTarget: 0.2
+  minTrackerConfidence: 0.1513
+  probationAge: 2
+  maxShadowTrackingAge: 75
+  earlyTerminationAge: 1
+
+  outputTerminatedTracks: 0
+  terminatedTrackFilename: track_dump_
+
+TrajectoryManagement:
+  useUniqueID: 0
+  enableReAssoc: 1
+
+  minMatchingScore4Overall: 0.6622
+  minTrackletMatchingScore: 0.2940
+  minMatchingScore4ReidSimilarity: 0.0771
+
+  matchingScoreWeight4TrackletSimilarity: 0.7981
+  matchingScoreWeight4ReidSimilarity: 0.3848
+
+  minTrajectoryLength4Projection: 34
+  prepLength4TrajectoryProjection: 58
+  trajectoryProjectionLength: 33
+  maxAngle4TrackletMatching: 67
+  minSpeedSimilarity4TrackletMatching: 0.0574
+  minBboxSizeSimilarity4TrackletMatching: 0.1013
+  maxTrackletMatchingTimeSearchRange: 27
+  trajectoryProjectionProcessNoiseScale: 0.0100
+  trajectoryProjectionMeasurementNoiseScale: 100
+  trackletSpacialSearchRegionScale: 0.0100
+
+  reidExtractionInterval: 8
+
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  checkClassMatch: 1
+
+  minMatchingScore4Overall: 0.0222
+  minMatchingScore4SizeSimilarity: 0.3552
+  minMatchingScore4Iou: 0.0548
+  minMatchingScore4VisualSimilarity: 0.5043
+
+  matchingScoreWeight4VisualSimilarity: 0.3951
+  matchingScoreWeight4SizeSimilarity: 0.6003
+  matchingScoreWeight4Iou: 0.4033
+
+  tentativeDetectorConfidence: 0.1024
+  minMatchingScore4TentativeIou: 0.2852
+
+StateEstimator:
+  stateEstimatorType: 3
+
+  processNoiseVar4Loc: 6810.8668
+  processNoiseVar4Vel: 1348.4874
+  measurementNoiseVar4Detector: 100.0000
+  measurementNoiseVar4Tracker: 293.3238
+
+ObjectModelProjection:
+  minPoseConfidence: 0.5
+  cameraModelFilepath:
+  - /opt/mv3dt/deepstream/camera_models/camInfo_00.yml
+  - /opt/mv3dt/deepstream/camera_models/camInfo_01.yml
+  outputVisibility: 1
+  outputFootLocation: 1
+  outputConvexHull: 0
+
+VisualTracker:
+  visualTrackerType: 2
+  vpiBackend4DcfTracker: 1
+
+  useColorNames: 1
+  useHog: 1
+  featureImgSizeLevel: 3
+  featureFocusOffsetFactor_y: -0.1054
+
+  filterLr: 0.0767
+  filterChannelWeightsLr: 0.0339
+  gaussianSigma: 0.5687
+
+ReID:
+  reidType: 2
+
+  batchSize: 100
+  workspaceSize: 1000
+  reidFeatureSize: 256
+  reidHistorySize: 100
+  inferDims: [3, 256, 128]
+  networkMode: 1
+
+  inputOrder: 0
+  colorFormat: 0
+  offsets: [123.6750, 116.2800, 103.5300]
+  netScaleFactor: 0.01735207
+  keepAspc: 1
+  useVPICropScaler: 1
+
+  addFeatureNormalization: 1
+  minVisibility4GalleryUpdate: 0.6
+
+  tltEncodedModel: "models/reid/resnet50_market1501.etlt"
+  tltModelKey: "nvidia_tao"
+  modelEngineFile: "models/reid/resnet50_market1501.etlt_b100_gpu0_fp16.engine"
+
+PoseEstimator:
+  poseEstimatorType: 1
+  useVPICropScaler: 1
+  batchSize: 1
+  workspaceSize: 1000
+  inferDims: [3, 256, 192]
+  networkMode: 1
+  inputOrder: 0
+  colorFormat: 0
+  offsets: [123.6750, 116.2800, 103.5300]
+  netScaleFactor: 0.00392156
+  onnxFile: "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"
+  modelEngineFile: "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx_b1_gpu0_fp16.engine"
+  poseInferenceInterval: 5
+
+MultiViewAssociator:
+  multiViewAssociatorType: 1
+  enableLatePeerReAssoc: 1
+  enableIDCorrection: 1
+  enableSeeThrough: 1
+  enableMsgSync: 0
+  maxPeerTrackletSize: 50
+  recentlyActiveAge: 178
+  minCommonFrames4MatchScore: 2
+  maxPeerToPredDistance4Fusion: 2.0
+  minPeerVisibility4Fusion: 0.15
+  minPeerTrackletMatchScore: 0.35
+  maxTrackletMatchingTimeSearchRange: 1
+  maxPeerFrameDiff4NoDet: 2
+  communicatorInitSleepTime: 0
+
+Communicator:
+  communicatorType: 2
+  pubSubInfoConfigPath: /opt/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml
+  mqttProtoAdaptorConfigPath: /opt/mv3dt/deepstream/mv3dt/config_mqtt.txt
