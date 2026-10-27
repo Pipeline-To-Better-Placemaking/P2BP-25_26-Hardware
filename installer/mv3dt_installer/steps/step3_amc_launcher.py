@@ -9,7 +9,8 @@ subcommand dispatch extension it flags in its own section 6.2, built in
 `app.py` as `SUBCOMMAND_REGISTRY`/`register_subcommand`.
 
 Scope: provision Docker and the NVIDIA runtime, bring up the equality-pinned
-standalone NVIDIA AutoMagicCalib (AMC) 3.2.1 stack, establish its durable
+NVIDIA AutoMagicCalib (AMC) 3.3.0 stack (a sparse checkout of
+`tools/auto-magic-calib` from the NVIDIA DeepStream repo), establish its durable
 project identity, open the localhost UI as the invoking user, and hold the
 service up until the operator closes the dedicated AMC browser window or
 signals done. `run()` always drops the durable `<install_dir>/bin/amc` wrapper
@@ -48,7 +49,7 @@ them open:
 
 Every subprocess call goes through `ctx.run_root`/`ctx.run_as_user` (per doc
 00 section 9.2: docker, git, and anything touching the invoking user's home
--- the AMC clone under `$HOME/auto-magic-calib` -- run via
+-- the AMC clone under `$HOME/amc-3.3.0` -- run via
 `ctx.run_as_user`; the one root-only operation, `chown 1000:1000` on
 `projects/`/`models/`, runs via `ctx.run_root`), so no test here shells out
 to a real docker/git/curl or opens a browser.
@@ -88,6 +89,11 @@ __all__ = [
     "resolve_config",
     "repo_root",
     "check_repo_isolation",
+    "default_amc_root",
+    "amc_clone_root",
+    "legacy_amc_root_message",
+    "check_compose_images",
+    "check_running_stack_images",
     "locate_compose_dir",
     "ENV_KEYS",
     "check_env_drift",
@@ -104,12 +110,25 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# STEP-3 section 2 -- standalone AMC 3.2.1 equality pin.
+# STEP-3 section 2 -- AMC 3.3.0 equality pin. AMC 3.3.0 ships inside the
+# NVIDIA DeepStream repo; only `AMC_SUBDIR` is checked out (sparse, blobless,
+# detached at `AMC_COMMIT`, which `AMC_TAG` points at directly: it is a
+# lightweight tag, so there is no separate peeled commit).
 # ---------------------------------------------------------------------------
 
-AMC_REPO_URL = "https://github.com/NVIDIA-AI-IOT/auto-magic-calib.git"
-AMC_COMMIT = "0cfd2b790fd77598b0543340a65c2a0e1d192327"
-AMC_VERSION = "3.2.1"
+AMC_REPO_URL = "https://github.com/NVIDIA/DeepStream.git"
+AMC_TAG = "v9.2.0"
+AMC_COMMIT = "bbcd9ad3eca558a394318f8a6274e180a1f7bd60"
+AMC_VERSION = "3.3.0"
+AMC_SUBDIR = "tools/auto-magic-calib"
+# Clone root under the invoking user's home; AMC_ROOT is
+# `<home>/AMC_CLONE_DIRNAME/AMC_SUBDIR`.
+AMC_CLONE_DIRNAME = "amc-3.3.0"
+
+# Images the pinned compose files reference (ms/compose.yml, ui/compose.yml).
+AMC_MS_IMAGE = "nvcr.io/nvidia/vss-core/vss-auto-calibration:3.3.0"
+AMC_UI_IMAGE = "nvcr.io/nvidia/vss-core/vss-auto-calibration-ui:3.3.0"
+AMC_IMAGES: tuple[str, ...] = (AMC_MS_IMAGE, AMC_UI_IMAGE)
 
 DEFAULT_UI_PORT = "5000"
 DEFAULT_MS_PORT = "8000"
@@ -137,15 +156,16 @@ _STEP3_CONF_KEYS: tuple[str, ...] = (
     CONF_LOCATION_ID_KEY,
 )
 
-# section 4.2/4.3 -- the compose/.env key set, verbatim (not the same
-# spelling as the installer.conf keys above for HOST_IP/PROJECT_DIR, since
-# .env additionally derives PROJECT_DIR/MODEL_DIR from AMC_ROOT).
+# section 4.2/4.3 -- the compose/.env key set, verbatim and in the order of
+# the pinned upstream `compose/.env` (not the same spelling as the
+# installer.conf keys above for PROJECT_DIR, since .env additionally derives
+# PROJECT_DIR/MODEL_DIR from AMC_ROOT).
 ENV_KEYS: tuple[str, ...] = (
-    "HOST_IP",
     "AUTO_MAGIC_CALIB_MS_PORT",
     "AUTO_MAGIC_CALIB_UI_PORT",
     "PROJECT_DIR",
     "MODEL_DIR",
+    "HOST_IP",
 )
 
 AMC_WRAPPER_NAME = "amc"
@@ -177,6 +197,48 @@ _CHROMIUM_FAMILY: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # section 4.1 -- config resolution
 # ---------------------------------------------------------------------------
+
+
+def default_amc_root(home: pathlib.Path) -> pathlib.Path:
+    """`<home>/amc-3.3.0/tools/auto-magic-calib`, the pinned AMC root."""
+    return pathlib.Path(home) / AMC_CLONE_DIRNAME / AMC_SUBDIR
+
+
+def amc_clone_root(amc_root: pathlib.Path) -> Optional[pathlib.Path]:
+    """The DeepStream checkout that holds `amc_root`, or ``None`` when
+    `amc_root` is not shaped `<clone>/tools/auto-magic-calib` (for example a
+    pre-3.3.0 standalone checkout)."""
+    amc_root = pathlib.Path(amc_root)
+    subdir_parts = pathlib.PurePosixPath(AMC_SUBDIR).parts
+    if amc_root.parts[-len(subdir_parts):] != subdir_parts:
+        return None
+    clone_root = amc_root
+    for _ in subdir_parts:
+        clone_root = clone_root.parent
+    return clone_root
+
+
+def legacy_amc_root_message(
+    amc_root: pathlib.Path, home: pathlib.Path
+) -> Optional[str]:
+    """Return a migration hint when AMC_ROOT is not an AMC 3.3.0 layout.
+
+    An existing `installer.conf` AMC_ROOT is never rewritten (it is seeded
+    once), so an install that predates 3.3.0 keeps pointing at its 3.2.1
+    standalone checkout. That case is reported, not silently changed.
+    """
+    if amc_clone_root(amc_root) is not None:
+        return None
+    return (
+        f"AMC_ROOT ({amc_root}) is not an AMC {AMC_VERSION} checkout (expected "
+        f"<clone>/{AMC_SUBDIR}); it is likely the pre-{AMC_VERSION} standalone "
+        f"checkout. To migrate, first stop its stack with `docker compose "
+        f"down` in {pathlib.Path(amc_root) / 'compose'}, then set "
+        f"{CONF_AMC_ROOT_KEY}={default_amc_root(home)} and "
+        f"{CONF_AMC_PROJECT_ID_KEY}=<the AMC {AMC_VERSION} project id> in "
+        f"installer.conf (or remove {CONF_AMC_PROJECT_ID_KEY} so the next "
+        "launch creates the project)."
+    )
 
 
 @dataclass(frozen=True)
@@ -221,7 +283,7 @@ def resolve_config(
     conf = ctx.conf
 
     amc_root_value = conf.get(CONF_AMC_ROOT_KEY) or str(
-        pathlib.Path(ctx.user.home) / "auto-magic-calib"
+        default_amc_root(pathlib.Path(ctx.user.home))
     )
     amc_root = pathlib.Path(amc_root_value).expanduser()
 
@@ -350,13 +412,13 @@ def check_repo_isolation(amc_root: pathlib.Path) -> Optional[str]:
     if resolved_amc == resolved_root or resolved_root in resolved_amc.parents:
         return (
             f"AMC_ROOT ({amc_root}) must not live under this repo ({root}). "
-            "Choose a different path (e.g. $HOME/auto-magic-calib)."
+            f"Choose a different path (e.g. $HOME/{AMC_CLONE_DIRNAME}/{AMC_SUBDIR})."
         )
     return None
 
 
 # ---------------------------------------------------------------------------
-# section 2 -- pinned standalone checkout
+# section 2 -- pinned sparse checkout
 # ---------------------------------------------------------------------------
 
 
@@ -382,23 +444,49 @@ def _normalise_repo_url(value: str) -> str:
 
 
 def _expected_amc_worktree_change(line: str) -> bool:
-    """Allow installer-managed config and untracked AMC runtime data only."""
+    """Allow installer-managed config and untracked AMC runtime data only.
+
+    `git status --porcelain` paths are relative to the DeepStream clone
+    root, so every allowed path sits under `AMC_SUBDIR`.
+    """
     status = line[:2]
     path = line[3:].strip()
-    if path == "compose/.env":
+    if path == f"{AMC_SUBDIR}/compose/.env":
         return True
-    return status == "??" and path.startswith(("projects/", "models/"))
+    return status == "??" and path.startswith(
+        (f"{AMC_SUBDIR}/projects/", f"{AMC_SUBDIR}/models/")
+    )
 
 
 def clone_amc(ctx: "Context", amc_root: pathlib.Path) -> bool:
-    """Install or safely reconcile the standalone AMC checkout at its pin."""
-    if not amc_root.exists():
+    """Install or safely reconcile the sparse AMC checkout at its pin.
+
+    A fresh install is a blobless, sparse clone of `AMC_REPO_URL` at
+    `AMC_TAG` limited to `AMC_SUBDIR` (git >= 2.25), detached at
+    `AMC_COMMIT`. An existing checkout is only moved to the pin when it is
+    clean apart from the installer-managed `.env` and untracked runtime data.
+    """
+    clone_root = amc_clone_root(amc_root)
+    if clone_root is None:
+        raise AmcLaunchError(
+            legacy_amc_root_message(amc_root, pathlib.Path(ctx.user.home))
+            or f"AMC_ROOT {amc_root} is not an AMC {AMC_VERSION} checkout"
+        )
+
+    if not clone_root.exists():
         result = ctx.run_as_user(
             "git",
             "clone",
             "--progress",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--sparse",
+            "--depth",
+            "1",
+            "--branch",
+            AMC_TAG,
             AMC_REPO_URL,
-            str(amc_root),
+            str(clone_root),
             check=False,
             capture_output=True,
             text=True,
@@ -407,29 +495,30 @@ def clone_amc(ctx: "Context", amc_root: pathlib.Path) -> bool:
         if result.returncode != 0:
             raise AmcLaunchError(
                 f"AMC clone failed (exit {result.returncode}); any partial path "
-                f"was preserved at {amc_root}: {_result_detail(result)}"
+                f"was preserved at {clone_root}: {_result_detail(result)}"
             )
-        _run_git(ctx, "-C", str(amc_root), "checkout", "--detach", AMC_COMMIT)
+        _run_git(ctx, "-C", str(clone_root), "sparse-checkout", "set", AMC_SUBDIR)
+        _run_git(ctx, "-C", str(clone_root), "checkout", "--detach", AMC_COMMIT)
         return True
 
-    if not amc_root.is_dir() or not (amc_root / ".git").exists():
+    if not clone_root.is_dir() or not (clone_root / ".git").exists():
         raise AmcLaunchError(
-            f"AMC_ROOT exists but is not an AMC git checkout: {amc_root}. "
+            f"AMC clone root exists but is not a git checkout: {clone_root}. "
             "Move it aside or choose a different AMC_ROOT; no files were deleted."
         )
 
     remote = _run_git(
-        ctx, "-C", str(amc_root), "remote", "get-url", "origin"
+        ctx, "-C", str(clone_root), "remote", "get-url", "origin"
     ).stdout.strip()
     if _normalise_repo_url(remote) != _normalise_repo_url(AMC_REPO_URL):
         raise AmcLaunchError(
-            f"AMC_ROOT origin is {remote!r}, expected {AMC_REPO_URL!r}; "
+            f"AMC clone origin is {remote!r}, expected {AMC_REPO_URL!r}; "
             "the installer will not overwrite this checkout"
         )
 
-    head = resolved_amc_commit(ctx, amc_root)
+    head = resolved_amc_commit(ctx, clone_root)
     dirty_lines = _run_git(
-        ctx, "-C", str(amc_root), "status", "--porcelain"
+        ctx, "-C", str(clone_root), "status", "--porcelain"
     ).stdout.splitlines()
     unexpected = [line for line in dirty_lines if not _expected_amc_worktree_change(line)]
     if unexpected:
@@ -441,9 +530,9 @@ def clone_amc(ctx: "Context", amc_root: pathlib.Path) -> bool:
         )
     if head == AMC_COMMIT:
         return False
-    _run_git(ctx, "-C", str(amc_root), "fetch", "origin", AMC_COMMIT)
-    _run_git(ctx, "-C", str(amc_root), "checkout", "--detach", AMC_COMMIT)
-    if resolved_amc_commit(ctx, amc_root) != AMC_COMMIT:
+    _run_git(ctx, "-C", str(clone_root), "fetch", "origin", AMC_COMMIT)
+    _run_git(ctx, "-C", str(clone_root), "checkout", "--detach", AMC_COMMIT)
+    if resolved_amc_commit(ctx, clone_root) != AMC_COMMIT:
         raise AmcLaunchError("AMC checkout did not resolve to the required commit")
     return False
 
@@ -543,7 +632,7 @@ def docker_login(ctx: "Context") -> None:
 
 
 def locate_compose_dir(amc_root: pathlib.Path) -> Optional[pathlib.Path]:
-    """Return the pinned standalone checkout's compose directory."""
+    """Return the pinned AMC checkout's compose directory."""
     compose = amc_root / "compose"
     return compose if (compose / "compose.yml").is_file() else None
 
@@ -551,6 +640,29 @@ def locate_compose_dir(amc_root: pathlib.Path) -> Optional[pathlib.Path]:
 # ---------------------------------------------------------------------------
 # section 4.3 -- upstream drift guard
 # ---------------------------------------------------------------------------
+
+
+def check_compose_images(compose_dir: pathlib.Path) -> list[str]:
+    """Return the pinned `AMC_IMAGES` no compose file under `compose_dir`
+    references (the 3.3.0 `compose.yml` includes `ms/` and `ui/`). An empty
+    list means every pinned image is still referenced."""
+    texts = []
+    for path in (
+        compose_dir / "compose.yml",
+        compose_dir / "ms" / "compose.yml",
+        compose_dir / "ui" / "compose.yml",
+    ):
+        try:
+            texts.append(path.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    combined = "\n".join(texts)
+    missing = []
+    for image in AMC_IMAGES:
+        pattern = rf"(?m)^\s*image:\s*[\"']?{re.escape(image)}[\"']?\s*$"
+        if not re.search(pattern, combined):
+            missing.append(image)
+    return missing
 
 
 def check_env_drift(compose_dir: pathlib.Path) -> list[str]:
@@ -581,16 +693,17 @@ def check_env_drift(compose_dir: pathlib.Path) -> list[str]:
 
 
 def render_env(cfg: AmcConfig) -> str:
-    """Render `compose/.env` exactly as `30_start_amc.sh` does (section
-    4.2), including the optional `AUTO_MAGIC_CALIB_MS_API_URL` line only
-    when set.
+    """Render `compose/.env` (section 4.2) with the pinned AMC 3.3.0 key
+    set in upstream order, absolute PROJECT_DIR/MODEL_DIR under AMC_ROOT,
+    and the optional `AUTO_MAGIC_CALIB_MS_API_URL` line (read by the UI
+    compose file) only when set.
     """
     lines = [
-        f"HOST_IP={cfg.host_ip}",
         f"AUTO_MAGIC_CALIB_MS_PORT={cfg.ms_port}",
         f"AUTO_MAGIC_CALIB_UI_PORT={cfg.ui_port}",
         f"PROJECT_DIR={cfg.amc_root / 'projects'}",
         f"MODEL_DIR={cfg.amc_root / 'models'}",
+        f"HOST_IP={cfg.host_ip}",
     ]
     if cfg.ms_api_url:
         lines.append(f"AUTO_MAGIC_CALIB_MS_API_URL={cfg.ms_api_url}")
@@ -672,6 +785,72 @@ def compose_stack_running(ctx: "Context", compose_dir: pathlib.Path) -> bool:
         "auto-magic-calib-ms",
         "auto-magic-calib-ui",
     }.issubset(services)
+
+
+_SERVICE_IMAGES: dict[str, str] = {
+    "auto-magic-calib-ms": AMC_MS_IMAGE,
+    "auto-magic-calib-ui": AMC_UI_IMAGE,
+}
+
+
+def compose_running_images(
+    ctx: "Context", compose_dir: pathlib.Path
+) -> dict[str, str]:
+    """Map each running Compose service to its image, from `docker compose
+    ps --format json` (a JSON array or one JSON object per line, depending on
+    the Compose release). Unparseable output yields an empty map."""
+    result = ctx.run_as_user(
+        "docker", "compose", "ps", "--status", "running", "--format", "json",
+        cwd=str(compose_dir), check=False, capture_output=True, text=True,
+        stream=False,
+    )
+    if result.returncode != 0:
+        return {}
+    text = (result.stdout or "").strip()
+    entries: list[Any] = []
+    try:
+        parsed = json.loads(text) if text else []
+        entries = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                return {}
+    images: dict[str, str] = {}
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("Service") and entry.get("Image"):
+            images[str(entry["Service"])] = str(entry["Image"])
+    return images
+
+
+def check_running_stack_images(
+    ctx: "Context", compose_dir: pathlib.Path
+) -> None:
+    """Refuse to reuse a running stack that is not the pinned AMC release.
+
+    A pre-3.3.0 checkout also keeps its files in a directory named
+    `compose`, so its stack shares the default Compose project name, service
+    names, and container names, and `compose ps` from the new directory
+    reports it as running. Driving it would create the project against the
+    wrong AMC API, so anything other than the pinned images (including an
+    image that cannot be determined) is fatal.
+    """
+    images = compose_running_images(ctx, compose_dir)
+    wrong = [
+        f"{service}={images.get(service) or 'unknown image'}"
+        for service, expected in _SERVICE_IMAGES.items()
+        if images.get(service) != expected
+    ]
+    if wrong:
+        raise AmcLaunchError(
+            "running AMC containers are not the pinned AMC "
+            f"{AMC_VERSION} images ({', '.join(wrong)}; expected "
+            f"{AMC_MS_IMAGE} and {AMC_UI_IMAGE}). Stop the old stack with "
+            "`docker compose down` in the <AMC_ROOT>/compose directory that "
+            "started it, then rerun; the installer will not drive another "
+            "AMC release."
+        )
 
 
 def compose_published_port(
@@ -1405,6 +1584,7 @@ def launch_amc(
 
         stack_running = compose_stack_running(ctx, compose_dir)
         if stack_running:
+            check_running_stack_images(ctx, compose_dir)
             ui_port = compose_published_port(
                 ctx, compose_dir, "auto-magic-calib-ui", 5000
             )
@@ -1440,6 +1620,8 @@ def launch_amc(
 
         for key in check_env_drift(compose_dir):
             ctx.log.warn(f"pinned AMC environment no longer defines {key!r}")
+        for image in check_compose_images(compose_dir):
+            ctx.log.warn(f"pinned AMC compose files no longer reference {image}")
 
         env_changed = write_env_atomic(compose_dir, render_env(cfg))
         ownership = ctx.run_root(
@@ -1678,6 +1860,9 @@ class Step3AmcLauncher:
         except AmcLaunchError as exc:
             return StepResult(status=StepStatus.FAILED, message=str(exc))
         cfg = resolve_config(ctx, project=project_name)
+        legacy = legacy_amc_root_message(cfg.amc_root, pathlib.Path(ctx.user.home))
+        if legacy is not None:
+            ctx.log.warn(legacy)
 
         guard = check_repo_isolation(cfg.amc_root)
         if guard is not None:
@@ -1698,6 +1883,15 @@ class Step3AmcLauncher:
             ctx.report_installed("amc launcher", str(wrapper_path))
         else:
             ctx.report_already_installed("amc launcher", str(wrapper_path))
+
+        if legacy is not None:
+            # The launch would refuse the pre-3.3.0 root; the warning above
+            # already carries the migration hint, so do not offer it.
+            ctx.log.warn(
+                "Skipping the AutoMagicCalib launch offer until AMC_ROOT is "
+                f"migrated to AMC {AMC_VERSION}"
+            )
+            return StepResult(status=StepStatus.COMPLETE)
 
         if not _confirm_launch_now(ctx):
             return StepResult(status=StepStatus.COMPLETE)
@@ -1749,6 +1943,12 @@ class Step3AmcLauncher:
 
         # The checkout is lazy, but once present it must match the equality pin.
         cfg = resolve_config(ctx)
+        legacy = legacy_amc_root_message(cfg.amc_root, pathlib.Path(ctx.user.home))
+        if legacy is not None:
+            # A pre-3.3.0 AMC_ROOT is reported, never rewritten; its old
+            # checkout cannot match the 3.3.0 pin, so the pin check is skipped.
+            ctx.log.warn(legacy)
+            return StepResult(status=StepStatus.COMPLETE)
         commit = resolved_amc_commit(ctx, cfg.amc_root)
         if commit:
             ctx.log.info(f"AMC resolved commit ({cfg.amc_root}): {commit}")

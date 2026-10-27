@@ -195,7 +195,8 @@ def test_registers_the_amc_subcommand():
 def test_resolve_config_defaults(tmp_path):
     ctx = FakeContext(tmp_path, conf={step2.CONF_METHOD_KEY: "deb"})
     cfg = step3.resolve_config(ctx)
-    assert cfg.amc_root == ctx.user.home / "auto-magic-calib"
+    assert cfg.amc_root == ctx.user.home / "amc-3.3.0" / "tools" / "auto-magic-calib"
+    assert cfg.amc_root == step3.default_amc_root(ctx.user.home)
     assert cfg.host_ip == "127.0.0.1"
     assert cfg.ui_port == "5000"
     assert cfg.ms_port == "8000"
@@ -273,6 +274,32 @@ def test_persist_config_seeds_missing_keys_only(tmp_path):
     assert "HOST_IP=" not in conf_text
 
 
+def test_persist_config_never_rewrites_an_existing_legacy_amc_root(tmp_path):
+    legacy = str(tmp_path / "home" / "op" / "auto-magic-calib")
+    ctx = FakeContext(
+        tmp_path, conf={step2.CONF_METHOD_KEY: "deb", step3.CONF_AMC_ROOT_KEY: legacy}
+    )
+    cfg = step3.resolve_config(ctx)
+    assert cfg.amc_root == pathlib.Path(legacy)
+    step3.persist_config(ctx, cfg)
+    assert ctx.conf[step3.CONF_AMC_ROOT_KEY] == legacy
+    conf_text = (ctx.install_dir / "installer.conf").read_text(encoding="utf-8")
+    assert "AMC_ROOT=" not in conf_text
+
+
+def test_legacy_amc_root_message_only_for_non_330_roots(tmp_path):
+    home = tmp_path / "home" / "op"
+    assert step3.legacy_amc_root_message(step3.default_amc_root(home), home) is None
+    assert step3.legacy_amc_root_message(
+        tmp_path / "custom" / "tools" / "auto-magic-calib", home
+    ) is None
+    message = step3.legacy_amc_root_message(home / "auto-magic-calib", home)
+    assert message is not None
+    assert f"`docker compose down` in {home / 'auto-magic-calib' / 'compose'}" in message
+    assert f"AMC_ROOT={home / 'amc-3.3.0' / 'tools' / 'auto-magic-calib'}" in message
+    assert "AMC_PROJECT_ID=" in message
+
+
 # ---------------------------------------------------------------------------
 # check_repo_isolation() -- section 4 step 2
 # ---------------------------------------------------------------------------
@@ -338,6 +365,51 @@ def test_env_drift_reports_missing_keys(tmp_path):
     assert set(missing) == {"AUTO_MAGIC_CALIB_MS_PORT", "AUTO_MAGIC_CALIB_UI_PORT"}
 
 
+def test_env_drift_empty_against_the_pinned_upstream_env(tmp_path):
+    # Verbatim copy of compose/.env at the pinned v9.2.0 commit (no
+    # .env.example ships with AMC 3.3.0, so the drift guard reads .env).
+    (tmp_path / ".env").write_text(
+        "AUTO_MAGIC_CALIB_MS_PORT=8000\n"
+        "AUTO_MAGIC_CALIB_UI_PORT=5000\n"
+        "PROJECT_DIR=../../projects\n"
+        "MODEL_DIR=../../models\n"
+        "HOST_IP=\n"
+        "# VIOS_BASE_URL=http://<VIOS_HOST_IP>:30888  # Uncomment and update "
+        "this to support RTSP Stream\n"
+    )
+    assert step3.check_env_drift(tmp_path) == []
+
+
+def _write_upstream_compose(compose_dir: pathlib.Path) -> None:
+    (compose_dir / "ms").mkdir(parents=True)
+    (compose_dir / "ui").mkdir()
+    (compose_dir / "compose.yml").write_text(
+        "include:\n  - path: ./ms/compose.yml\n  - path: ./ui/compose.yml\n"
+    )
+    (compose_dir / "ms" / "compose.yml").write_text(
+        "services:\n  auto-magic-calib-ms:\n"
+        f"    image: {step3.AMC_MS_IMAGE}\n"
+    )
+    (compose_dir / "ui" / "compose.yml").write_text(
+        "services:\n  auto-magic-calib-ui:\n"
+        f"    image: {step3.AMC_UI_IMAGE}\n"
+    )
+
+
+def test_compose_images_match_the_pinned_tags(tmp_path):
+    _write_upstream_compose(tmp_path)
+    assert step3.check_compose_images(tmp_path) == []
+
+
+def test_compose_images_report_an_unpinned_tag(tmp_path):
+    _write_upstream_compose(tmp_path)
+    (tmp_path / "ui" / "compose.yml").write_text(
+        "services:\n  auto-magic-calib-ui:\n"
+        "    image: nvcr.io/nvidia/vss-core/vss-auto-calibration-ui:3.4.0\n"
+    )
+    assert step3.check_compose_images(tmp_path) == [step3.AMC_UI_IMAGE]
+
+
 def test_env_drift_empty_when_all_keys_present(tmp_path):
     content = "\n".join(f"{key}=" for key in step3.ENV_KEYS) + "\n"
     (tmp_path / ".env.example").write_text(content)
@@ -365,6 +437,13 @@ def _cfg(tmp_path, **overrides) -> step3.AmcConfig:
 def test_render_env_contents(tmp_path):
     cfg = _cfg(tmp_path)
     content = step3.render_env(cfg)
+    assert content == (
+        "AUTO_MAGIC_CALIB_MS_PORT=8000\n"
+        "AUTO_MAGIC_CALIB_UI_PORT=5000\n"
+        f"PROJECT_DIR={tmp_path / 'amc' / 'projects'}\n"
+        f"MODEL_DIR={tmp_path / 'amc' / 'models'}\n"
+        "HOST_IP=127.0.0.1\n"
+    )
     assert "HOST_IP=127.0.0.1" in content
     assert "AUTO_MAGIC_CALIB_MS_PORT=8000" in content
     assert "AUTO_MAGIC_CALIB_UI_PORT=5000" in content
@@ -411,44 +490,84 @@ def test_write_env_atomic_reports_changed_on_content_change(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_clone_amc_clones_when_missing(tmp_path):
-    ctx = FakeContext(tmp_path)
-    amc_root = tmp_path / "home" / "op" / "auto-magic-calib"
-    cloned = step3.clone_amc(ctx, amc_root)
-    assert cloned is True
-    calls = ctx.runner_user.calls
-    assert calls[0][:2] == ("git", "clone")
-    assert calls[0][2:4] == ("--progress", step3.AMC_REPO_URL)
-    assert calls[1][:4] == ("git", "-C", str(amc_root), "checkout")
-    assert calls[1][-1] == step3.AMC_COMMIT
+def _amc_paths(tmp_path) -> tuple[pathlib.Path, pathlib.Path]:
+    clone_root = tmp_path / "home" / "op" / "amc-3.3.0"
+    return clone_root, clone_root / "tools" / "auto-magic-calib"
 
 
-def test_clone_amc_skips_when_already_present(tmp_path):
-    amc_root = tmp_path / "home" / "op" / "auto-magic-calib"
-    (amc_root / ".git").mkdir(parents=True)
-    runner = ScriptedRunner()
-    runner.when(lambda a: a[-3:] == ("remote", "get-url", "origin"), stdout=step3.AMC_REPO_URL)
-    runner.when(lambda a: a[-2:] == ("rev-parse", "HEAD"), stdout=step3.AMC_COMMIT)
-    ctx = FakeContext(tmp_path, runner_user=runner)
-    cloned = step3.clone_amc(ctx, amc_root)
-    assert cloned is False
-    assert not any("fetch" in call for call in ctx.runner_user.calls)
-
-
-def test_clone_amc_allows_untracked_runtime_data(tmp_path):
-    amc_root = tmp_path / "home" / "op" / "auto-magic-calib"
-    (amc_root / ".git").mkdir(parents=True)
+def _existing_clone_runner(*, head=None, porcelain="") -> ScriptedRunner:
     runner = ScriptedRunner()
     runner.when(
         lambda a: a[-3:] == ("remote", "get-url", "origin"),
         stdout=step3.AMC_REPO_URL,
     )
     runner.when(
-        lambda a: a[-2:] == ("rev-parse", "HEAD"), stdout=step3.AMC_COMMIT
+        lambda a: a[-2:] == ("rev-parse", "HEAD"),
+        stdout=head if head is not None else step3.AMC_COMMIT,
     )
-    runner.when(
-        lambda a: a[-2:] == ("status", "--porcelain"),
-        stdout="?? projects/state.json\n?? projects/Gallery/output.json\n",
+    runner.when(lambda a: a[-2:] == ("status", "--porcelain"), stdout=porcelain)
+    return runner
+
+
+def test_amc_330_pins():
+    assert step3.AMC_REPO_URL == "https://github.com/NVIDIA/DeepStream.git"
+    assert step3.AMC_TAG == "v9.2.0"
+    assert step3.AMC_COMMIT == "bbcd9ad3eca558a394318f8a6274e180a1f7bd60"
+    assert step3.AMC_VERSION == "3.3.0"
+    assert step3.AMC_SUBDIR == "tools/auto-magic-calib"
+    assert step3.AMC_MS_IMAGE == "nvcr.io/nvidia/vss-core/vss-auto-calibration:3.3.0"
+    assert step3.AMC_UI_IMAGE == "nvcr.io/nvidia/vss-core/vss-auto-calibration-ui:3.3.0"
+    assert step3.AMC_IMAGES == (step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE)
+
+
+def test_amc_clone_root_of_default_and_legacy_roots(tmp_path):
+    clone_root, amc_root = _amc_paths(tmp_path)
+    assert step3.amc_clone_root(amc_root) == clone_root
+    assert step3.amc_clone_root(tmp_path / "home" / "op" / "auto-magic-calib") is None
+
+
+def test_clone_amc_sparse_clones_when_missing(tmp_path):
+    ctx = FakeContext(tmp_path)
+    clone_root, amc_root = _amc_paths(tmp_path)
+    cloned = step3.clone_amc(ctx, amc_root)
+    assert cloned is True
+    calls = ctx.runner_user.calls
+    assert calls[0] == (
+        "git", "clone", "--progress", "--filter=blob:none", "--no-checkout",
+        "--sparse", "--depth", "1", "--branch", step3.AMC_TAG,
+        step3.AMC_REPO_URL, str(clone_root),
+    )
+    assert calls[1] == (
+        "git", "-C", str(clone_root), "sparse-checkout", "set",
+        "tools/auto-magic-calib",
+    )
+    assert calls[2] == (
+        "git", "-C", str(clone_root), "checkout", "--detach", step3.AMC_COMMIT,
+    )
+    assert len(calls) == 3
+
+
+def test_clone_amc_skips_when_already_present(tmp_path):
+    clone_root, amc_root = _amc_paths(tmp_path)
+    (clone_root / ".git").mkdir(parents=True)
+    ctx = FakeContext(tmp_path, runner_user=_existing_clone_runner())
+    cloned = step3.clone_amc(ctx, amc_root)
+    assert cloned is False
+    assert not any("fetch" in call for call in ctx.runner_user.calls)
+    assert ctx.runner_user.called_with_prefix(
+        "git", "-C", str(clone_root), "status", "--porcelain"
+    )
+
+
+def test_clone_amc_allows_env_and_untracked_runtime_data(tmp_path):
+    clone_root, amc_root = _amc_paths(tmp_path)
+    (clone_root / ".git").mkdir(parents=True)
+    runner = _existing_clone_runner(
+        porcelain=(
+            " M tools/auto-magic-calib/compose/.env\n"
+            "?? tools/auto-magic-calib/projects/Living-Room/\n"
+            "?? tools/auto-magic-calib/models/vggt/vggt_1B_commercial.pt\n"
+        )
     )
 
     assert step3.clone_amc(
@@ -456,24 +575,35 @@ def test_clone_amc_allows_untracked_runtime_data(tmp_path):
     ) is False
 
 
-def test_clone_amc_rejects_tracked_runtime_readme_change_with_path(tmp_path):
-    amc_root = tmp_path / "home" / "op" / "auto-magic-calib"
-    (amc_root / ".git").mkdir(parents=True)
-    runner = ScriptedRunner()
-    runner.when(
-        lambda a: a[-3:] == ("remote", "get-url", "origin"),
-        stdout=step3.AMC_REPO_URL,
-    )
-    runner.when(
-        lambda a: a[-2:] == ("rev-parse", "HEAD"), stdout=step3.AMC_COMMIT
-    )
-    runner.when(
-        lambda a: a[-2:] == ("status", "--porcelain"),
-        stdout=" M projects/README.md\n",
-    )
+@pytest.mark.parametrize(
+    "line",
+    [
+        " M tools/auto-magic-calib/projects/README.md",
+        "?? tools/auto-magic-calib/notes.txt",
+        "?? projects/state.json",
+        " M tools/auto-magic-calib/compose/ms/compose.yml",
+    ],
+)
+def test_clone_amc_rejects_other_changes_with_path(tmp_path, line):
+    clone_root, amc_root = _amc_paths(tmp_path)
+    (clone_root / ".git").mkdir(parents=True)
+    runner = _existing_clone_runner(porcelain=line + "\n")
 
-    with pytest.raises(step3.AmcLaunchError, match="projects/README.md"):
+    with pytest.raises(step3.AmcLaunchError, match="local changes") as exc:
         step3.clone_amc(FakeContext(tmp_path, runner_user=runner), amc_root)
+    assert line[3:] in str(exc.value)
+
+
+def test_clone_amc_refuses_legacy_root_with_migration_hint(tmp_path):
+    legacy = tmp_path / "home" / "op" / "auto-magic-calib"
+    (legacy / ".git").mkdir(parents=True)
+    ctx = FakeContext(tmp_path)
+    with pytest.raises(step3.AmcLaunchError) as exc:
+        step3.clone_amc(ctx, legacy)
+    message = str(exc.value)
+    assert f"AMC_ROOT={step3.default_amc_root(ctx.user.home)}" in message
+    assert "AMC_PROJECT_ID" in message
+    assert ctx.runner_user.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -736,11 +866,11 @@ def test_preflight_complete_when_everything_ready(tmp_path):
 
 
 def _stub_amc_root_with_compose(ctx) -> pathlib.Path:
-    amc_root = ctx.user.home / "auto-magic-calib"
+    amc_root = step3.default_amc_root(ctx.user.home)
     compose = amc_root / "compose"
     compose.mkdir(parents=True)
     (compose / "compose.yml").write_text("services: {}\n")
-    (amc_root / ".git").mkdir()
+    (amc_root.parents[1] / ".git").mkdir()
     ctx.runner_user.when(
         lambda a: a[-3:] == ("remote", "get-url", "origin"),
         stdout=step3.AMC_REPO_URL,
@@ -933,7 +1063,7 @@ def test_run_drops_exe_and_completes_without_launching_when_declined(tmp_path, m
 
 def test_run_launches_when_operator_confirms(tmp_path, monkeypatch):
     ctx = FakeContext(tmp_path, non_interactive=False, runner_user=_passing_runner())
-    amc_root = ctx.user.home / "auto-magic-calib"
+    amc_root = step3.default_amc_root(ctx.user.home)
 
     def _fake_clone():
         compose = amc_root / "compose"
@@ -994,7 +1124,7 @@ def test_run_fails_on_repo_isolation_violation(tmp_path, monkeypatch):
 def _fully_provisioned_ctx(tmp_path) -> FakeContext:
     conf = {
         step2.CONF_METHOD_KEY: "deb",
-        step3.CONF_AMC_ROOT_KEY: str(tmp_path / "amc"),
+        step3.CONF_AMC_ROOT_KEY: str(_amc_paths(tmp_path)[1]),
         step3.CONF_HOST_IP_KEY: "127.0.0.1",
         step3.CONF_UI_PORT_KEY: "5000",
         step3.CONF_MS_PORT_KEY: "8000",
@@ -1074,7 +1204,7 @@ def test_verify_logs_the_resolved_amc_commit(tmp_path, capsys):
     ctx = _fully_provisioned_ctx(tmp_path)
     sha = step3.AMC_COMMIT
     ctx.runner_user.when(
-        lambda a: a[:4] == ("git", "-C", str(tmp_path / "amc"), "rev-parse"),
+        lambda a: a[:4] == ("git", "-C", str(_amc_paths(tmp_path)[1]), "rev-parse"),
         stdout=f"{sha}\n",
     )
 
@@ -1085,10 +1215,53 @@ def test_verify_logs_the_resolved_amc_commit(tmp_path, capsys):
     assert sha in err
 
 
+def test_verify_warns_and_skips_pin_for_legacy_amc_root(tmp_path, capsys):
+    ctx = _fully_provisioned_ctx(tmp_path)
+    legacy = str(tmp_path / "home" / "op" / "auto-magic-calib")
+    ctx.conf[step3.CONF_AMC_ROOT_KEY] = legacy
+    ctx.runner_user.when(
+        lambda a: a[:2] == ("git", "-C"), stdout="0cfd2b790fd77598b0543340a65c2a0e1d192327\n"
+    )
+    result = step3.Step3AmcLauncher().verify(ctx)
+    assert result.status is StepStatus.COMPLETE
+    assert ctx.conf[step3.CONF_AMC_ROOT_KEY] == legacy
+    err = capsys.readouterr().err
+    assert "AMC_ROOT=" in err and "AMC_PROJECT_ID=" in err
+
+
+def test_run_warns_about_a_legacy_amc_root_without_changing_it(tmp_path, monkeypatch, capsys):
+    legacy = str(tmp_path / "home" / "op" / "auto-magic-calib")
+    ctx = FakeContext(tmp_path, runner_user=_passing_runner())
+    ctx.conf[step3.CONF_AMC_ROOT_KEY] = legacy
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    result = step3.Step3AmcLauncher().run(ctx)
+    assert result.status is StepStatus.COMPLETE
+    assert ctx.conf[step3.CONF_AMC_ROOT_KEY] == legacy
+    err = capsys.readouterr().err
+    assert "pre-3.3.0" in err and "AMC_PROJECT_ID=" in err
+
+
+def test_run_skips_the_launch_offer_for_a_legacy_amc_root(tmp_path, monkeypatch, capsys):
+    legacy = str(tmp_path / "home" / "op" / "auto-magic-calib")
+    ctx = FakeContext(tmp_path, runner_user=_passing_runner(), non_interactive=False)
+    ctx.conf[step3.CONF_AMC_ROOT_KEY] = legacy
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(
+        step3, "_INPUT", lambda prompt: pytest.fail(f"unexpected prompt: {prompt}")
+    )
+    monkeypatch.setattr(
+        step3, "launch_amc", lambda *a, **k: pytest.fail("must not launch")
+    )
+    result = step3.Step3AmcLauncher().run(ctx)
+    assert result.status is StepStatus.COMPLETE
+    assert (ctx.install_dir / "bin" / "amc").is_file()
+    assert "Skipping the AutoMagicCalib launch offer" in capsys.readouterr().err
+
+
 def test_verify_rejects_checkout_at_wrong_commit(tmp_path):
     ctx = _fully_provisioned_ctx(tmp_path)
     ctx.runner_user.when(
-        lambda a: a[:4] == ("git", "-C", str(tmp_path / "amc"), "rev-parse"),
+        lambda a: a[:4] == ("git", "-C", str(_amc_paths(tmp_path)[1]), "rev-parse"),
         stdout="deadbeef\n",
     )
     result = step3.Step3AmcLauncher().verify(ctx)
@@ -1118,32 +1291,31 @@ def test_clone_failure_preserves_partial_path_and_reports_evidence(tmp_path):
     runner.when(lambda a: a[:2] == ("git", "clone"), returncode=128, stderr="network down")
     ctx = FakeContext(tmp_path, runner_user=runner)
     with pytest.raises(step3.AmcLaunchError, match="network down"):
-        step3.clone_amc(ctx, ctx.user.home / "auto-magic-calib")
+        step3.clone_amc(ctx, step3.default_amc_root(ctx.user.home))
 
 
 def test_existing_non_git_amc_root_is_never_overwritten(tmp_path):
-    root = tmp_path / "home" / "op" / "auto-magic-calib"
+    root, amc_root = _amc_paths(tmp_path)
     root.mkdir(parents=True)
     (root / "operator-data.txt").write_text("keep")
     with pytest.raises(step3.AmcLaunchError, match="no files were deleted"):
-        step3.clone_amc(FakeContext(tmp_path), root)
+        step3.clone_amc(FakeContext(tmp_path), amc_root)
     assert (root / "operator-data.txt").read_text() == "keep"
 
 
 def test_existing_dirty_checkout_at_wrong_commit_is_not_repaired(tmp_path):
-    root = tmp_path / "home" / "op" / "auto-magic-calib"
+    root, amc_root = _amc_paths(tmp_path)
     (root / ".git").mkdir(parents=True)
-    runner = ScriptedRunner()
-    runner.when(lambda a: a[-3:] == ("remote", "get-url", "origin"), stdout=step3.AMC_REPO_URL)
-    runner.when(lambda a: a[-2:] == ("rev-parse", "HEAD"), stdout="old")
-    runner.when(lambda a: a[-2:] == ("status", "--porcelain"), stdout=" M README.md")
+    runner = _existing_clone_runner(
+        head="old", porcelain=" M tools/auto-magic-calib/README.md"
+    )
     with pytest.raises(step3.AmcLaunchError, match="local changes"):
-        step3.clone_amc(FakeContext(tmp_path, runner_user=runner), root)
+        step3.clone_amc(FakeContext(tmp_path, runner_user=runner), amc_root)
     assert not any("checkout" in call for call in runner.calls)
 
 
 def test_clean_checkout_is_reconciled_to_pin(tmp_path):
-    root = tmp_path / "home" / "op" / "auto-magic-calib"
+    root, amc_root = _amc_paths(tmp_path)
     (root / ".git").mkdir(parents=True)
     heads = iter(("old\n", f"{step3.AMC_COMMIT}\n"))
     runner = ScriptedRunner()
@@ -1155,8 +1327,11 @@ def test_clean_checkout_is_reconciled_to_pin(tmp_path):
             return subprocess.CompletedProcess(args, 0, next(heads), "")
         return runner(*args, **kwargs)
 
-    assert step3.clone_amc(FakeContext(tmp_path, runner_user=scripted), root) is False
+    assert step3.clone_amc(FakeContext(tmp_path, runner_user=scripted), amc_root) is False
     assert runner.called_with_prefix("git", "-C", str(root), "fetch", "origin", step3.AMC_COMMIT)
+    assert runner.called_with_prefix(
+        "git", "-C", str(root), "checkout", "--detach", step3.AMC_COMMIT
+    )
 
 
 def test_compose_version_requires_include_capable_v2(tmp_path):
@@ -1409,11 +1584,81 @@ def test_readiness_failure_is_fatal_and_tears_down_once(tmp_path, monkeypatch):
     assert len(downs) == 1
 
 
-def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
+def _ps_json(ms_image, ui_image, *, ndjson=False) -> str:
+    import json as _json
+
+    entries = [
+        {"Service": "auto-magic-calib-ms", "Image": ms_image, "State": "running"},
+        {"Service": "auto-magic-calib-ui", "Image": ui_image, "State": "running"},
+    ]
+    entries = [e for e in entries if e["Image"] is not None]
+    if ndjson:
+        return "\n".join(_json.dumps(e) for e in entries) + "\n"
+    return _json.dumps(entries)
+
+
+def _running_stack_runner(ps_json: str) -> ScriptedRunner:
     runner = _passing_runner()
     runner.when(
         lambda a: a[:3] == ("docker", "compose", "ps"),
         stdout="auto-magic-calib-ms\nauto-magic-calib-ui\n",
+    )
+    runner.when(
+        lambda a: a[:3] == ("docker", "compose", "ps") and "json" in a,
+        stdout=ps_json,
+    )
+    return runner
+
+
+@pytest.mark.parametrize("ndjson", [False, True])
+def test_running_stack_images_match_the_pins(tmp_path, ndjson):
+    runner = _running_stack_runner(
+        _ps_json(step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE, ndjson=ndjson)
+    )
+    ctx = FakeContext(tmp_path, runner_user=runner)
+    step3.check_running_stack_images(ctx, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "ms_image, ui_image, ps_override",
+    [
+        ("nvcr.io/nvidia/auto-magic-calib:3.2.1",
+         "nvcr.io/nvidia/auto-magic-calib-ui:3.2.1", None),
+        (step3.AMC_MS_IMAGE, None, None),
+        (None, None, "not json"),
+    ],
+    ids=["legacy-321-stack", "ui-image-unknown", "unparseable-ps"],
+)
+def test_running_stack_with_other_or_unknown_images_is_refused(
+    tmp_path, monkeypatch, ms_image, ui_image, ps_override
+):
+    ps = ps_override if ps_override is not None else _ps_json(ms_image, ui_image)
+    runner = _running_stack_runner(ps)
+    ctx = FakeContext(tmp_path, runner_user=runner)
+    _stub_amc_root_with_compose(ctx)
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(
+        step3, "ensure_amc_project",
+        lambda ctx, cfg: pytest.fail("must not drive another AMC release"),
+    )
+
+    result = step3.launch_amc(ctx, keep_up=True, non_interactive=True)
+
+    assert result.status is StepStatus.FAILED
+    assert "docker compose down" in result.message
+    assert step3.AMC_MS_IMAGE in result.message
+    if ms_image and ms_image != step3.AMC_MS_IMAGE:
+        assert ms_image in result.message
+    else:
+        assert "unknown image" in result.message
+    assert not any(call[:3] == ("docker", "compose", "port") for call in runner.calls)
+    assert not any(call[:3] == ("docker", "compose", "up") for call in runner.calls)
+    assert not any(call[:3] == ("docker", "compose", "down") for call in runner.calls)
+
+
+def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
+    runner = _running_stack_runner(
+        _ps_json(step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE)
     )
     runner.when(
         lambda a: a[:4] == ("docker", "compose", "port", "auto-magic-calib-ui"),
