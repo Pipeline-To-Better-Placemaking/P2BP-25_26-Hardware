@@ -871,9 +871,19 @@ def test_render_tracker_and_app_config(templates):
     tracker = step4.render_tracker_yaml(
         (templates / step4.TRACKER_YAML_TEMPLATE_NAME).read_text(encoding="utf-8"),
         camera_model_files=["/m/camInfo_00.yml", "/m/camInfo_01.yml"],
+        deepstream_dir="/srv/mv3dt/deepstream",
     )
     assert "${" not in tracker
     parsed = step4._parse_tracker_yaml(tracker)
+    assert parsed["PoseEstimator"]["onnxFile"] == (
+        "/srv/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"
+    )
+    assert parsed["Communicator"]["pubSubInfoConfigPath"] == (
+        "/srv/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml"
+    )
+    assert parsed["Communicator"]["mqttProtoAdaptorConfigPath"] == (
+        "/srv/mv3dt/deepstream/mv3dt/config_mqtt.txt"
+    )
     projection = parsed["ObjectModelProjection"]
     assert projection["cameraModelFilepath"] == ["/m/camInfo_00.yml", "/m/camInfo_01.yml"]
     assert projection["outputFootLocation"] == 1
@@ -889,6 +899,27 @@ def test_render_tracker_and_app_config(templates):
     )
     assert "uri=rtsp://operator:pw@10.0.0.8:554/stream" in app_text
     assert "topic=mv3dt/site-42/sv3d" in app_text
+
+
+def test_render_tracker_rejects_an_unknown_placeholder(templates):
+    template = (templates / step4.TRACKER_YAML_TEMPLATE_NAME).read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\$\{UNKNOWN_DIR\}"):
+        step4.render_tracker_yaml(
+            template + "Extra:\n  path: ${UNKNOWN_DIR}/x\n",
+            camera_model_files=["/m/camInfo_00.yml"],
+            deepstream_dir="/srv/mv3dt/deepstream",
+        )
+
+
+def test_verify_rejects_a_tracker_with_a_placeholder(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    tracker = _tracker_path(ctx)
+    tracker.write_text(tracker.read_text() + "Extra:\n  path: ${DEEPSTREAM_DIR}/x\n")
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "placeholder" in result.message
 
 
 def _source_enable(text, index):
@@ -1909,22 +1940,21 @@ def test_bodypose_source_matches_the_live_model():
 def test_golden_render_matches_live_workstation(tmp_path, templates, monkeypatch):
     """Render the full config set for the live two-camera layout with the
     viewer on and compare it to a sanitized copy of the live files, apart
-    from comments, camera URIs and the install-dir prefix."""
+    from comments and camera URIs. The live install dir is /opt/mv3dt; the
+    rendered paths must carry this test's install dir instead."""
     rectification = json.loads(
         (LIVE_FIXTURE_DIR / "rectification_cameras.json").read_text()
     )
     ctx = _two_camera_ctx(tmp_path, templates, viewer="on", rectification=rectification)
     assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
     deepstream = ctx.install_dir / "deepstream"
-    live_prefix = "/opt/mv3dt"
 
     def rendered(name):
-        return (deepstream / name).read_text(encoding="utf-8").replace(
-            str(ctx.install_dir), live_prefix
-        )
+        return (deepstream / name).read_text(encoding="utf-8")
 
     def live(name):
-        return (LIVE_FIXTURE_DIR / name).read_text(encoding="utf-8")
+        text = (LIVE_FIXTURE_DIR / name).read_text(encoding="utf-8")
+        return text.replace("/opt/mv3dt/", f"{ctx.install_dir}/")
 
     def without_uris(sections):
         return [
@@ -1941,9 +1971,12 @@ def test_golden_render_matches_live_workstation(tmp_path, templates, monkeypatch
         "rtsp://user:password@192.0.2.11:554/Streaming/Channels/101",
     ]
 
-    assert step4._parse_tracker_yaml(
-        rendered(step4.TRACKER_YAML_TEMPLATE_NAME)
-    ) == step4._parse_tracker_yaml(live(step4.TRACKER_YAML_TEMPLATE_NAME))
+    tracker = step4._parse_tracker_yaml(rendered(step4.TRACKER_YAML_TEMPLATE_NAME))
+    assert tracker == step4._parse_tracker_yaml(live(step4.TRACKER_YAML_TEMPLATE_NAME))
+    assert tracker["PoseEstimator"]["onnxFile"].startswith(f"{deepstream}/models/")
+    assert tracker["Communicator"]["pubSubInfoConfigPath"] == str(
+        deepstream / step4.MV3DT_DIR_NAME / step4.PUB_SUB_CONFIG_NAME
+    )
     assert _sections(rendered(step4.INFER_PRIMARY_TEMPLATE_NAME)) == _sections(
         live(step4.INFER_PRIMARY_TEMPLATE_NAME)
     )

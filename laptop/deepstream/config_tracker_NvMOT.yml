@@ -176,8 +176,8 @@ PoseEstimator:
   colorFormat: 0  # Input color format (RGB=0, BGR=1)
   offsets: [123.6750, 116.2800, 103.5300]  # Channel-wise mean subtraction values
   netScaleFactor: 0.00392156  # Scaling factor for input normalization
-  onnxFile: "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"  # Path to the ONNX model file
-  modelEngineFile: "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx_b1_gpu0_fp16.engine"  # Path to the engine file
+  onnxFile: "${DEEPSTREAM_DIR}/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"  # Path to the ONNX model file
+  modelEngineFile: "${DEEPSTREAM_DIR}/models/bodypose3dnet/bodypose3dnet_accuracy.onnx_b1_gpu0_fp16.engine"  # Path to the engine file
   poseInferenceInterval: 5  #  Pose inference frame interval. -1 means only for the first frame of each target and use it to determine the target height.
 
 MultiViewAssociator:
@@ -198,5 +198,5 @@ MultiViewAssociator:
 
 Communicator:
   communicatorType: 2  # MQTT
-  pubSubInfoConfigPath: /opt/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml
-  mqttProtoAdaptorConfigPath: /opt/mv3dt/deepstream/mv3dt/config_mqtt.txt
+  pubSubInfoConfigPath: ${DEEPSTREAM_DIR}/mv3dt/pub_sub_info_config.yml
+  mqttProtoAdaptorConfigPath: ${DEEPSTREAM_DIR}/mv3dt/config_mqtt.txt

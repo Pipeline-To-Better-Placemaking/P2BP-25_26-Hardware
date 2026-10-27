@@ -620,9 +620,18 @@ _CAMERA_MODEL_PLACEHOLDER_RE = re.compile(
 )
 
 
-def render_tracker_yaml(template_text: str, *, camera_model_files: list) -> str:
+_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def render_tracker_yaml(
+    template_text: str,
+    *,
+    camera_model_files: list,
+    deepstream_dir: "pathlib.Path | str",
+) -> str:
     """Expand the `- ${CAMERA_MODEL_FILEPATH}` line into one list entry per
-    camera model, in source order."""
+    camera model, in source order, and `${DEEPSTREAM_DIR}` into
+    `<install_dir>/deepstream`. Fails if any `${...}` placeholder remains."""
 
     def expand(match: "re.Match[str]") -> str:
         indent = match.group(1)
@@ -631,6 +640,10 @@ def render_tracker_yaml(template_text: str, *, camera_model_files: list) -> str:
     text, count = _CAMERA_MODEL_PLACEHOLDER_RE.subn(expand, template_text, count=1)
     if count != 1:
         raise ValueError("tracker template has no ${CAMERA_MODEL_FILEPATH} entry")
+    text = text.replace("${DEEPSTREAM_DIR}", str(deepstream_dir))
+    leftover = _PLACEHOLDER_RE.search(text)
+    if leftover:
+        raise ValueError(f"tracker template has an unknown placeholder {leftover.group(0)}")
     return text
 
 
@@ -1141,6 +1154,7 @@ def _render_configs(
     tracker_text = render_tracker_yaml(
         tracker_template_path.read_text(encoding="utf-8"),
         camera_model_files=[str(path) for path in camera_model_files],
+        deepstream_dir=deepstream_dir,
     )
     _write_text_report(
         ctx,
@@ -1693,7 +1707,13 @@ class Step4CalibOutputWiring:
             return StepResult(
                 status=StepStatus.FAILED, message=f"missing {tracker_path}"
             )
-        tracker = _parse_tracker_yaml(tracker_path.read_text(encoding="utf-8"))
+        tracker_text = tracker_path.read_text(encoding="utf-8")
+        if _PLACEHOLDER_RE.search(tracker_text):
+            return StepResult(
+                status=StepStatus.FAILED,
+                message=f"{tracker_path} still has a ${{...}} placeholder",
+            )
+        tracker = _parse_tracker_yaml(tracker_text)
         if tracker is None:
             return StepResult(
                 status=StepStatus.FAILED,
