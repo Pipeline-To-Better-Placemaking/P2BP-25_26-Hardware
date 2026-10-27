@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import pathlib
@@ -33,6 +34,7 @@ from mv3dt_installer.steps import step4_calib_output_wiring as step4  # noqa: E4
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 REAL_TEMPLATES_DIR = REPO_ROOT / "laptop" / "deepstream"
+FAKE_BODYPOSE = b"bodypose3dnet-onnx"
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +43,10 @@ def _isolate_globals(monkeypatch, tmp_path):
     monkeypatch.setattr(systemd, "UNIT_DIR", tmp_path / "units")
     monkeypatch.setattr(
         managed_files, "DEFAULT_MANIFEST_PATH", tmp_path / "state" / "managed-files.json"
+    )
+    monkeypatch.setattr(step4, "BODYPOSE_MODEL_SIZE", len(FAKE_BODYPOSE))
+    monkeypatch.setattr(
+        step4, "BODYPOSE_MODEL_SHA256", hashlib.sha256(FAKE_BODYPOSE).hexdigest()
     )
     yield
     logs._transcript_path = None
@@ -126,6 +132,9 @@ class Runner:
         disable_rc=0,
         enabled_units=None,
         reid_rc=0,
+        bodypose_rc=0,
+        bodypose_bytes=None,
+        rectification=None,
     ):
         self.states = list(states or ["COMPLETED"])
         self.archive = archive if archive is not None else _zip_bytes()
@@ -137,6 +146,10 @@ class Runner:
         self.disable_rc = disable_rc
         self.enabled_units = enabled_units
         self.reid_rc = reid_rc
+        self.bodypose_rc = bodypose_rc
+        self.bodypose_bytes = bodypose_bytes
+        # None: the endpoint answers 404, as an AMC without rectification.
+        self.rectification = rectification
         self.calls = []
 
     def __call__(self, *args, **kwargs):
@@ -148,6 +161,23 @@ class Runner:
                     return subprocess.CompletedProcess(args, self.reid_rc, "", "reid fetch failed")
                 pathlib.Path(args[args.index("-o") + 1]).write_bytes(b"etlt-model")
                 return subprocess.CompletedProcess(args, 0, "", "")
+            if url == step4.BODYPOSE_MODEL_URL:
+                if self.bodypose_rc:
+                    return subprocess.CompletedProcess(
+                        args, self.bodypose_rc, "", "bodypose fetch failed"
+                    )
+                pathlib.Path(args[args.index("-o") + 1]).write_bytes(
+                    FAKE_BODYPOSE if self.bodypose_bytes is None else self.bodypose_bytes
+                )
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if "/rectification/" in url:
+                if self.rectification is None:
+                    return subprocess.CompletedProcess(
+                        args, 22, "", "The requested URL returned error: 404"
+                    )
+                return subprocess.CompletedProcess(
+                    args, 0, json.dumps(self.rectification), ""
+                )
             if "/get_project_info/" in url:
                 if self.status_rc:
                     return subprocess.CompletedProcess(
@@ -841,9 +871,19 @@ def test_render_tracker_and_app_config(templates):
     tracker = step4.render_tracker_yaml(
         (templates / step4.TRACKER_YAML_TEMPLATE_NAME).read_text(encoding="utf-8"),
         camera_model_files=["/m/camInfo_00.yml", "/m/camInfo_01.yml"],
+        deepstream_dir="/srv/mv3dt/deepstream",
     )
     assert "${" not in tracker
     parsed = step4._parse_tracker_yaml(tracker)
+    assert parsed["PoseEstimator"]["onnxFile"] == (
+        "/srv/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"
+    )
+    assert parsed["Communicator"]["pubSubInfoConfigPath"] == (
+        "/srv/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml"
+    )
+    assert parsed["Communicator"]["mqttProtoAdaptorConfigPath"] == (
+        "/srv/mv3dt/deepstream/mv3dt/config_mqtt.txt"
+    )
     projection = parsed["ObjectModelProjection"]
     assert projection["cameraModelFilepath"] == ["/m/camInfo_00.yml", "/m/camInfo_01.yml"]
     assert projection["outputFootLocation"] == 1
@@ -859,6 +899,27 @@ def test_render_tracker_and_app_config(templates):
     )
     assert "uri=rtsp://operator:pw@10.0.0.8:554/stream" in app_text
     assert "topic=mv3dt/site-42/sv3d" in app_text
+
+
+def test_render_tracker_rejects_an_unknown_placeholder(templates):
+    template = (templates / step4.TRACKER_YAML_TEMPLATE_NAME).read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\$\{UNKNOWN_DIR\}"):
+        step4.render_tracker_yaml(
+            template + "Extra:\n  path: ${UNKNOWN_DIR}/x\n",
+            camera_model_files=["/m/camInfo_00.yml"],
+            deepstream_dir="/srv/mv3dt/deepstream",
+        )
+
+
+def test_verify_rejects_a_tracker_with_a_placeholder(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    tracker = _tracker_path(ctx)
+    tracker.write_text(tracker.read_text() + "Extra:\n  path: ${DEEPSTREAM_DIR}/x\n")
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "placeholder" in result.message
 
 
 def _source_enable(text, index):
@@ -1447,7 +1508,9 @@ def _deepstream_files(ctx):
     return {
         path: path.stat().st_mtime_ns
         for path in root.rglob("*")
-        if path.is_file() and step4.REID_MODEL_NAME not in path.name
+        if path.is_file()
+        and step4.REID_MODEL_NAME not in path.name
+        and step4.BODYPOSE_MODEL_NAME not in path.name
     }
 
 
@@ -1466,6 +1529,8 @@ def test_first_install_writes_and_records_every_rendered_file(tmp_path, template
         deepstream / step4.INFER_PRIMARY_TEMPLATE_NAME,
         deepstream / step4.MSGCONV_TEMPLATE_NAME,
         deepstream / step4.CAMERA_MODEL_DIR_NAME / "camInfo_00.yml",
+        deepstream / step4.MV3DT_DIR_NAME / step4.PUB_SUB_CONFIG_NAME,
+        deepstream / step4.MV3DT_DIR_NAME / step4.MQTT_CONFIG_NAME,
     }
     assert {pathlib.Path(p) for p in recorded} == expected
     assert all(value is not None for value in recorded.values())
@@ -1570,3 +1635,365 @@ def test_operator_edit_without_new_render_gets_no_pending(tmp_path, templates):
     assert step.run(ctx).status is StepStatus.COMPLETE
     assert tracker.read_text() == edited
     assert not managed_files.pending_path(tracker).exists()
+
+
+# -- generated per-install files: fusion, dewarpers, viewer, pose model -------
+
+LIVE_FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "live_baseline"
+
+
+def _radial(camera_id, k1, k2, *, model="radial"):
+    return {
+        "camera_id": camera_id,
+        "width": 1920,
+        "height": 1080,
+        "cx": 960.0,
+        "cy": 540.0,
+        "committed": {"model": model, "k1": k1, "k2": k2},
+    }
+
+
+def _two_camera_conf(tmp_path, *, viewer="off", location="site-42"):
+    conf = _conf(tmp_path)
+    pathlib.Path(conf[config_mod.CAMERAS_FILE_KEY]).write_text(
+        "cameras:\n"
+        "  - id: cam1\n"
+        "    ip: 192.0.2.10\n"
+        "    rtsp_path: /Streaming/Channels/101\n"
+        "    enabled: true\n"
+        "  - id: cam2\n"
+        "    ip: 192.0.2.11\n"
+        "    rtsp_path: /Streaming/Channels/101\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    conf[step4.CONF_LOCATION_ID_KEY] = location
+    conf[step4.CONF_PROJECT_NAME_KEY] = location
+    conf[step4.CONF_CAM_USER_KEY] = "user"
+    conf[step4.CONF_CAM_PASSWORD_KEY] = "password"
+    conf[config_mod.GATE_VIEWER_STREAM] = viewer
+    return conf
+
+
+def _two_camera_archive():
+    return _zip_bytes(
+        {
+            "transforms.yml": "transforms: []\n",
+            "camInfo/camInfo_00.yml": AMC_CAMINFO,
+            "camInfo/camInfo_01.yml": AMC_CAMINFO,
+        }
+    )
+
+
+def _two_camera_ctx(tmp_path, templates, *, viewer="off", rectification=None):
+    runner = Runner(archive=_two_camera_archive(), rectification=rectification)
+    return _ctx(
+        tmp_path,
+        templates,
+        runner=runner,
+        conf=_two_camera_conf(tmp_path, viewer=viewer),
+        non_interactive=True,
+    )
+
+
+def _sections(text):
+    """[(section, [(key, value), ...]), ...] of an INI-style DeepStream
+    config, ignoring comments and blank lines."""
+    sections = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            sections.append((line[1:-1], []))
+            continue
+        key, _, value = line.partition("=")
+        sections[-1][1].append((key.strip(), value.strip()))
+    return sections
+
+
+@pytest.mark.parametrize(
+    "k1, k2, expected",
+    [
+        # Live cam0. AMC's API shows k2 rounded to 1.0097e-13, which gives
+        # 0.66172; the live file's 0.66173 came from the unrounded value.
+        (-3.2126e-07, 1.0097e-13, "-0.82243;0.66172;0;0;0"),
+        (-3.2126e-07, 1.00972e-13, "-0.82243;0.66173;0;0;0"),
+        # Live cam1.
+        (-2.9989e-07, 9.0769e-14, "-0.76772;0.59486;0;0;0"),
+        (0.0, 0.0, "0;0;0;0;0"),
+    ],
+)
+def test_dewarper_distortion_normalizes_by_focal_length(k1, k2, expected):
+    assert step4.dewarper_distortion(k1, k2) == expected
+
+
+def test_render_dewarper_config_matches_live_format():
+    text = step4.render_dewarper_config(_radial("cam_01", -2.9989e-07, 9.0769e-14))
+    assert text == (LIVE_FIXTURE_DIR / "dewarper" / "dewarper_cam1.txt").read_text()
+
+
+def test_render_dewarper_config_keeps_fractional_principal_point():
+    camera = _radial("cam_00", -3.2126e-07, 1.0097e-13)
+    camera["cx"] = 961.5
+    assert "src-x0=961.5\n" in step4.render_dewarper_config(camera)
+
+
+@pytest.mark.parametrize(
+    "camera",
+    [
+        {"camera_id": "cam_00", "width": 1920, "height": 1080, "cx": 960, "cy": 540},
+        _radial("cam_00", 1e-7, 1e-13, model="fisheye"),
+        {"camera_id": "cam_00", "committed": {"model": "radial", "k1": 1e-7}},
+    ],
+)
+def test_render_dewarper_config_rejects_unusable_entries(camera):
+    with pytest.raises(ValueError):
+        step4.render_dewarper_config(camera)
+
+
+def test_pub_sub_config_subscribes_every_camera_to_its_peers():
+    data = step4.yaml.safe_load(step4.render_pub_sub_config(3))
+    topic = "127.0.0.1:1883;/trck/cam{}".format
+    assert data["pubBrokerTopicStr"] == [topic(1), topic(2), topic(3)]
+    assert data["subPeerBrokerTopicStrs"] == [
+        [topic(2), topic(3)],
+        [topic(1), topic(3)],
+        [topic(1), topic(2)],
+    ]
+
+
+def test_pub_sub_config_for_two_cameras_matches_live():
+    rendered = step4.render_pub_sub_config(2)
+    live = (LIVE_FIXTURE_DIR / "mv3dt" / step4.PUB_SUB_CONFIG_NAME).read_text()
+    assert step4.yaml.safe_load(rendered) == step4.yaml.safe_load(live)
+
+
+def test_mqtt_config_is_the_anonymous_sample_with_threading_off():
+    lines = step4.MQTT_CONFIG_TEXT.splitlines()
+    assert lines[0] == "[message-broker]"
+    assert "set-threaded = 0" in lines
+    assert "username = user" in lines
+    assert "password = password" in lines
+
+
+@pytest.mark.parametrize(
+    "count, expected",
+    [
+        (1, (1, 1, 1920, 540)),
+        (2, (1, 2, 1920, 540)),
+        (3, (1, 3, 1920, 360)),
+        (4, (1, 4, 1920, 270)),
+        (6, (2, 4, 1920, 540)),
+        (8, (2, 4, 1920, 540)),
+    ],
+)
+def test_tiled_display_grid(count, expected):
+    assert step4.tiled_display_grid(count) == expected
+
+
+def _render_app(templates, **kwargs):
+    return step4.render_app_config(
+        (templates / step4.APP_CONFIG_TEMPLATE_NAME).read_text(encoding="utf-8"),
+        cam_user="u",
+        cam_password="p",
+        location_id="site-42",
+        cameras=[
+            SimpleNamespace(ip="192.0.2.10", rtsp_path="/s"),
+            SimpleNamespace(ip="192.0.2.11", rtsp_path="/s"),
+        ],
+        template_path="template",
+        calibration_dir="calibration/site-42",
+        **kwargs,
+    )
+
+
+def test_viewer_off_adds_no_viewer_sections(templates):
+    sections = dict(_sections(_render_app(templates)))
+    assert sections["tiled-display"] == [("enable", "0")]
+    assert "osd" not in sections and "sink2" not in sections
+    assert not any(name.startswith("dewarper") for name in sections)
+
+
+def test_viewer_on_adds_tiled_display_osd_and_rtsp_sink(templates):
+    sections = dict(_sections(_render_app(templates, viewer_stream=True)))
+    assert sections["tiled-display"] == [
+        ("enable", "1"),
+        ("rows", "1"),
+        ("columns", "2"),
+        ("width", "1920"),
+        ("height", "540"),
+    ]
+    assert dict(sections["sink2"]) == {
+        "enable": "1",
+        "type": "4",
+        "codec": "1",
+        "enc-type": "0",
+        "sync": "0",
+        "bitrate": "4000000",
+        "rtsp-port": "8554",
+        "udp-port": "5400",
+    }
+    assert dict(sections["osd"])["enable"] == "1"
+
+
+def test_run_writes_fusion_files_and_no_dewarper_without_rectification(
+    tmp_path, templates, capsys
+):
+    ctx = _two_camera_ctx(tmp_path, templates)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    deepstream = ctx.install_dir / "deepstream"
+    pub_sub = step4.yaml.safe_load(
+        (deepstream / step4.MV3DT_DIR_NAME / step4.PUB_SUB_CONFIG_NAME).read_text()
+    )
+    assert len(pub_sub["pubBrokerTopicStr"]) == 2
+    assert (
+        deepstream / step4.MV3DT_DIR_NAME / step4.MQTT_CONFIG_NAME
+    ).read_text() == step4.MQTT_CONFIG_TEXT
+    assert not (deepstream / step4.DEWARPER_DIR_NAME).exists()
+    rendered = (deepstream / step4.RENDERED_APP_CONFIG_NAME).read_text()
+    assert "[dewarper" not in rendered and "[sink2]" not in rendered
+    assert "rendering no dewarpers" in capsys.readouterr().err
+
+
+def test_run_skips_dewarper_for_a_camera_without_radial_model(
+    tmp_path, templates, capsys
+):
+    rectification = {
+        "cameras": [
+            _radial("cam_00", -3.2126e-07, 1.0097e-13),
+            {"camera_id": "cam_01", "width": 1920, "height": 1080, "committed": None},
+        ]
+    }
+    ctx = _two_camera_ctx(tmp_path, templates, rectification=rectification)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    dewarper_dir = ctx.install_dir / "deepstream" / step4.DEWARPER_DIR_NAME
+    assert sorted(p.name for p in dewarper_dir.iterdir()) == ["dewarper_cam0.txt"]
+    sections = dict(
+        _sections(
+            (ctx.install_dir / "deepstream" / step4.RENDERED_APP_CONFIG_NAME).read_text()
+        )
+    )
+    assert dict(sections["dewarper0"])["config-file"] == str(
+        dewarper_dir / "dewarper_cam0.txt"
+    )
+    assert "dewarper1" not in sections
+    assert "cam_01: no committed rectification" in capsys.readouterr().err
+
+
+def test_rectification_request_uses_project_endpoint(tmp_path, templates):
+    ctx = _two_camera_ctx(tmp_path, templates)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    urls = [args[-1] for args, _ in ctx.runner.calls if args and args[0] == "curl"]
+    assert "http://localhost:8000/v1/rectification/project-123/cameras" in urls
+
+
+def test_run_downloads_bodypose_model_once(tmp_path, templates):
+    runner = Runner()
+    ctx = _ctx(tmp_path, templates, runner=runner, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    model = ctx.install_dir / step4.BODYPOSE_RELATIVE_DIR / step4.BODYPOSE_MODEL_NAME
+    assert model.read_bytes() == FAKE_BODYPOSE
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    fetches = [
+        a for a, _ in runner.calls if a and a[0] == "curl" and a[-1] == step4.BODYPOSE_MODEL_URL
+    ]
+    assert len(fetches) == 1
+
+
+@pytest.mark.parametrize(
+    "runner_kwargs, message",
+    [
+        ({"bodypose_rc": 22}, "BodyPose3DNet model download failed"),
+        ({"bodypose_bytes": b"short"}, "expected"),
+        ({"bodypose_bytes": b"x" * len(FAKE_BODYPOSE)}, "SHA-256"),
+    ],
+)
+def test_bodypose_download_is_validated(tmp_path, templates, runner_kwargs, message):
+    ctx = _ctx(tmp_path, templates, runner=Runner(**runner_kwargs), non_interactive=True)
+    result = step4.Step4CalibOutputWiring().run(ctx)
+    assert result.status is StepStatus.FAILED
+    assert message in result.message
+    model_dir = ctx.install_dir / step4.BODYPOSE_RELATIVE_DIR
+    assert not any(model_dir.iterdir())
+
+
+def test_verify_requires_bodypose_model(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    (ctx.install_dir / step4.BODYPOSE_RELATIVE_DIR / step4.BODYPOSE_MODEL_NAME).unlink()
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "BodyPose3DNet" in result.message
+
+
+def test_bodypose_source_matches_the_live_model():
+    """The live file is 70575749 bytes: NGC version
+    deployable_accuracy_onnx_1.0 (deployable_accuracy_v1.0 is 20 bytes
+    larger)."""
+    assert "/versions/deployable_accuracy_onnx_1.0/" in step4.BODYPOSE_MODEL_URL
+    assert step4.BODYPOSE_MODEL_URL.endswith("/" + step4.BODYPOSE_MODEL_NAME)
+
+
+def test_golden_render_matches_live_workstation(tmp_path, templates, monkeypatch):
+    """Render the full config set for the live two-camera layout with the
+    viewer on and compare it to a sanitized copy of the live files, apart
+    from comments and camera URIs. The live install dir is /opt/mv3dt; the
+    rendered paths must carry this test's install dir instead."""
+    rectification = json.loads(
+        (LIVE_FIXTURE_DIR / "rectification_cameras.json").read_text()
+    )
+    ctx = _two_camera_ctx(tmp_path, templates, viewer="on", rectification=rectification)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    deepstream = ctx.install_dir / "deepstream"
+
+    def rendered(name):
+        return (deepstream / name).read_text(encoding="utf-8")
+
+    def live(name):
+        text = (LIVE_FIXTURE_DIR / name).read_text(encoding="utf-8")
+        return text.replace("/opt/mv3dt/", f"{ctx.install_dir}/")
+
+    def without_uris(sections):
+        return [
+            (name, [(k, "<uri>" if k == "uri" else v) for k, v in pairs])
+            for name, pairs in sections
+        ]
+
+    app_rendered = _sections(rendered(step4.RENDERED_APP_CONFIG_NAME))
+    app_live = _sections(live(step4.RENDERED_APP_CONFIG_NAME))
+    assert without_uris(app_rendered) == without_uris(app_live)
+    uris = [dict(pairs).get("uri") for name, pairs in app_rendered[:4] if name.startswith("source")]
+    assert uris[:2] == [
+        "rtsp://user:password@192.0.2.10:554/Streaming/Channels/101",
+        "rtsp://user:password@192.0.2.11:554/Streaming/Channels/101",
+    ]
+
+    tracker = step4._parse_tracker_yaml(rendered(step4.TRACKER_YAML_TEMPLATE_NAME))
+    assert tracker == step4._parse_tracker_yaml(live(step4.TRACKER_YAML_TEMPLATE_NAME))
+    assert tracker["PoseEstimator"]["onnxFile"].startswith(f"{deepstream}/models/")
+    assert tracker["Communicator"]["pubSubInfoConfigPath"] == str(
+        deepstream / step4.MV3DT_DIR_NAME / step4.PUB_SUB_CONFIG_NAME
+    )
+    assert _sections(rendered(step4.INFER_PRIMARY_TEMPLATE_NAME)) == _sections(
+        live(step4.INFER_PRIMARY_TEMPLATE_NAME)
+    )
+
+    pub_sub = f"{step4.MV3DT_DIR_NAME}/{step4.PUB_SUB_CONFIG_NAME}"
+    assert step4.yaml.safe_load(rendered(pub_sub)) == step4.yaml.safe_load(live(pub_sub))
+
+    # The snapshot's password value is the collector's redaction marker.
+    mqtt = f"{step4.MV3DT_DIR_NAME}/{step4.MQTT_CONFIG_NAME}"
+    mqtt_rendered = rendered(mqtt).splitlines()
+    mqtt_live = live(mqtt).splitlines()
+    assert [l for l in mqtt_rendered if not l.startswith("password")] == [
+        l for l in mqtt_live if not l.startswith("password")
+    ]
+    assert sum(l.startswith("password = ") for l in mqtt_rendered) == 1
+    assert "username = user" in mqtt_rendered and "set-threaded = 0" in mqtt_rendered
+
+    for index in (0, 1):
+        name = f"{step4.DEWARPER_DIR_NAME}/dewarper_cam{index}.txt"
+        assert rendered(name) == live(name)

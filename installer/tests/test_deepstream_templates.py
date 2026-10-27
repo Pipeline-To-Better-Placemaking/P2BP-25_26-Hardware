@@ -103,7 +103,7 @@ def test_tracker_baseline_matches_the_live_tuned_workstation():
     pose = sections["PoseEstimator"]
     assert any(line.startswith("poseEstimatorType: 1") for line in pose)
     assert any(line.startswith("poseInferenceInterval: 5") for line in pose)
-    bodypose = "/opt/mv3dt/deepstream/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"
+    bodypose = "${DEEPSTREAM_DIR}/models/bodypose3dnet/bodypose3dnet_accuracy.onnx"
     assert any(line.startswith(f'onnxFile: "{bodypose}"') for line in pose)
     engine = f'modelEngineFile: "{bodypose}_b1_gpu0_fp16.engine"'
     assert any(line.startswith(engine) for line in pose)
@@ -119,11 +119,11 @@ def test_tracker_baseline_matches_the_live_tuned_workstation():
     communicator = sections["Communicator"]
     assert any(line.startswith("communicatorType: 2") for line in communicator)
     assert (
-        "pubSubInfoConfigPath: /opt/mv3dt/deepstream/mv3dt/pub_sub_info_config.yml"
+        "pubSubInfoConfigPath: ${DEEPSTREAM_DIR}/mv3dt/pub_sub_info_config.yml"
         in communicator
     )
     assert (
-        "mqttProtoAdaptorConfigPath: /opt/mv3dt/deepstream/mv3dt/config_mqtt.txt"
+        "mqttProtoAdaptorConfigPath: ${DEEPSTREAM_DIR}/mv3dt/config_mqtt.txt"
         in communicator
     )
 

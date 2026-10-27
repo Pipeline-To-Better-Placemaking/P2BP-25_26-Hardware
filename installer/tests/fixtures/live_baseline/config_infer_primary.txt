@@ -1,0 +1,36 @@
+# Sanitized copy of the live workstation file (2026-10-26 snapshot) for the
+# Step 4 golden render test. Comments dropped; camera URIs use RFC 5737
+# documentation addresses and placeholder credentials; location renamed.
+
+[property]
+gpu-id=0
+
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+
+onnx-file=models/peoplenet/resnet34_peoplenet.onnx
+labelfile-path=models/peoplenet/labels.txt
+
+model-engine-file=models/peoplenet/resnet34_peoplenet.onnx_b8_gpu0_fp16.engine
+
+infer-dims=3;544;960
+output-blob-names=output_cov/Sigmoid:0;output_bbox/BiasAdd:0
+
+batch-size=8
+
+network-mode=2
+
+num-detected-classes=3
+filter-out-class-ids=1;2
+interval=0
+gie-unique-id=1
+process-mode=1
+network-type=0
+cluster-mode=2
+
+maintain-aspect-ratio=1
+
+[class-attrs-all]
+pre-cluster-threshold=0.4
+nms-iou-threshold=0.5
+topk=20

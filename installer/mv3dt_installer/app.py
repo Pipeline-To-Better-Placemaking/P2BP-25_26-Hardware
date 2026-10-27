@@ -228,6 +228,17 @@ def build_parser() -> argparse.ArgumentParser:
         "Overrides an already-persisted value.",
     )
     parser.add_argument(
+        "--viewer-stream",
+        choices=config_mod.GATE_CHOICES[config_mod.GATE_VIEWER_STREAM],
+        default=None,
+        help="Set the viewer-stream gate (MV3DT_VIEWER_STREAM in "
+        "installer.conf): when on, Step 4 renders the tiled view, on-screen "
+        "display and RTSP viewer sink on port 8554. "
+        "Overrides an already-persisted value. On an installed box the "
+        "change takes effect on the next Step 4 render: reset Step 4, or "
+        "run ingest after an AMC change.",
+    )
+    parser.add_argument(
         "--scan-cameras",
         action="store_true",
         help="Discover the camera fleet by MAC OUI, probe RTSP, run the "
@@ -881,6 +892,10 @@ def _read_only_subcommand_config(
             config_mod.GATE_TRACKING_HISTORY,
             config_mod.GATE_DEFAULTS[config_mod.GATE_TRACKING_HISTORY],
         ),
+        viewer_stream=values.get(
+            config_mod.GATE_VIEWER_STREAM,
+            config_mod.GATE_DEFAULTS[config_mod.GATE_VIEWER_STREAM],
+        ),
         values=values,
     )
 
@@ -1018,6 +1033,7 @@ _GATE_KEY_TO_ARG_DEST: dict[str, str] = {
     config_mod.GATE_REMOTE_SUPERVISION: "remote_supervision",
     config_mod.GATE_WEBAPP_INTEGRATION: "webapp_integration",
     config_mod.GATE_TRACKING_HISTORY: "tracking_history",
+    config_mod.GATE_VIEWER_STREAM: "viewer_stream",
 }
 
 

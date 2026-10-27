@@ -1,0 +1,13 @@
+[property]
+output-width=1920
+output-height=1080
+num-batch-buffers=1
+
+[surface0]
+projection-type=3
+width=1920
+height=1080
+focal-length=1600
+distortion=-0.82243;0.66173;0;0;0
+src-x0=960
+src-y0=540
