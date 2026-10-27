@@ -28,6 +28,7 @@ from mv3dt_installer import app as app_mod
 from mv3dt_installer import cameras as cameras_mod
 from mv3dt_installer import config as config_mod
 from mv3dt_installer import footage as footage_mod
+from mv3dt_installer import managed_files
 from mv3dt_installer import systemd, waitui
 from mv3dt_installer.steps import StepResult, StepStatus, UserAction, register
 from mv3dt_installer.steps import step3_amc_launcher as step3_mod
@@ -702,17 +703,28 @@ def _source_block(text: str, index: int) -> str:
 
 def _write_text_report(
     ctx: "Context", path: pathlib.Path, text: str, *, label: str
-) -> None:
-    changed = not path.exists() or path.read_text(encoding="utf-8") != text
+) -> managed_files.Outcome:
+    """Write one rendered file through the edit protection in
+    `managed_files`: an operator-edited file is kept and the new version
+    lands beside it as `<path>.installer-new`."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    outcome = managed_files.write_managed(
+        path, text, manifest=managed_files.Manifest(), label=label
+    )
+    written = (
+        managed_files.pending_path(path)
+        if outcome is managed_files.Outcome.KEPT_MODIFIED
+        else path
+    )
     try:
-        os.chown(path, ctx.user.uid, ctx.user.gid)
+        os.chown(written, ctx.user.uid, ctx.user.gid)
     except OSError:
         pass
-    (ctx.report_installed if changed else ctx.report_already_installed)(
-        label, str(path)
-    )
+    if outcome is managed_files.Outcome.WRITTEN:
+        ctx.report_installed(label, str(path))
+    elif outcome is managed_files.Outcome.UNCHANGED:
+        ctx.report_already_installed(label, str(path))
+    return outcome
 
 
 def _load_enabled_cameras(ctx: "Context") -> list:
@@ -1121,9 +1133,43 @@ def _delete_footage_after_ingest(ctx: "Context", inputs: ProjectInputs) -> None:
         ctx.log.warn(f"Could not delete calibration footage: {exc}")
 
 
+def _render_targets_exist(ctx: "Context", calibration_dir: pathlib.Path) -> bool:
+    """Whether every file a render would write is already present: one
+    camera model per enabled camera plus the DeepStream configs."""
+    deepstream_dir = ctx.install_dir / "deepstream"
+    sources = sorted((calibration_dir / AMC_CAMERA_MODEL_DIR).glob("camInfo_*.yml"))
+    try:
+        camera_count = len(_load_enabled_cameras(ctx))
+    except OSError:
+        return False
+    if len(sources) != camera_count:
+        return False
+    targets = [deepstream_dir / CAMERA_MODEL_DIR_NAME / s.name for s in sources]
+    targets += [
+        deepstream_dir / name
+        for name in (
+            TRACKER_YAML_TEMPLATE_NAME,
+            RENDERED_APP_CONFIG_NAME,
+            INFER_PRIMARY_TEMPLATE_NAME,
+            MSGCONV_TEMPLATE_NAME,
+        )
+    ]
+    return all(target.is_file() for target in targets)
+
+
 def _wire_download(
-    ctx: "Context", inputs: ProjectInputs, *, allow_prompt: bool
+    ctx: "Context",
+    inputs: ProjectInputs,
+    *,
+    allow_prompt: bool,
+    skip_unchanged: bool = False,
 ) -> StepResult:
+    """Ingest the AMC result and render from it.
+
+    `skip_unchanged` is the timer-driven `ingest` path: when the archive is
+    the one already installed and every render target exists, nothing is
+    re-rendered. The step's own run always renders, so a new installer
+    release still offers its new templates."""
     dest = _resolve_calibration_dir(ctx, inputs, allow_prompt=allow_prompt)
     existed = dest.is_dir() and (dest / TRANSFORMS_NAME).is_file()
     try:
@@ -1143,6 +1189,13 @@ def _wire_download(
     reid_failure = _ensure_reid_model(ctx)
     if reid_failure is not None:
         return StepResult(status=StepStatus.FAILED, message=reid_failure)
+    if skip_unchanged and not outcome.changed and _render_targets_exist(ctx, dest):
+        ctx.log.info(
+            f"AMC result for {inputs.project_name} is unchanged and the rendered "
+            "configs exist; nothing to render"
+        )
+        _delete_footage_after_ingest(ctx, inputs)
+        return StepResult(status=StepStatus.COMPLETE)
     try:
         camera_model_files = _write_camera_models(
             ctx, dest, len(_load_enabled_cameras(ctx))
@@ -1415,7 +1468,7 @@ def handle_ingest_subcommand(argv: list, ctx: "Context") -> int:
             f"ingest: AMC project {inputs.project_id} is {state_name}; nothing to ingest"
         )
         return 0
-    result = _wire_download(ctx, inputs, allow_prompt=False)
+    result = _wire_download(ctx, inputs, allow_prompt=False, skip_unchanged=True)
     if result.status is not StepStatus.COMPLETE:
         ctx.log.error(f"ingest: {result.message}")
         return 1

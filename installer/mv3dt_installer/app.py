@@ -70,6 +70,7 @@ from typing import Any, Callable, Optional
 from mv3dt_installer import __version__, build_stamp
 from mv3dt_installer import camera_credentials
 from mv3dt_installer import cameras as cameras_mod
+from mv3dt_installer import managed_files
 from mv3dt_installer import config as config_mod
 from mv3dt_installer import ngc as ngc_mod
 from mv3dt_installer import onboarding
@@ -825,6 +826,17 @@ def register_subcommand(
     SUBCOMMAND_REGISTRY[name] = _SubcommandRegistration(
         handler=handler, requires_root=requires_root
     )
+
+
+# `mv3dt-installer configs status|diff [PATH]|accept PATH|accept-all`: review
+# and take the `.installer-new` versions the edit protection in
+# `managed_files` leaves beside operator-edited files. `status`/`diff` only
+# read; `accept`/`accept-all` write as root, like Step 4's own render.
+register_subcommand(
+    "configs",
+    managed_files.handle_configs_subcommand,
+    requires_root=managed_files.configs_requires_root,
+)
 
 
 def _read_only_subcommand_config(
