@@ -235,7 +235,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set the viewer-stream gate (MV3DT_VIEWER_STREAM in "
         "installer.conf): when on, Step 4 renders the tiled view, on-screen "
         "display and RTSP viewer sink on port 8554. "
-        "Overrides an already-persisted value.",
+        "Overrides an already-persisted value. On an installed box the "
+        "change takes effect on the next Step 4 render: reset Step 4, or "
+        "run ingest after an AMC change.",
     )
     parser.add_argument(
         "--auto-ingest",
