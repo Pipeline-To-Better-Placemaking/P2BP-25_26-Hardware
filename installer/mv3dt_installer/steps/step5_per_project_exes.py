@@ -860,6 +860,14 @@ def _start_pipeline_foreground(
     return 0  # pragma: no cover -- execv never returns on success
 
 
+def _viewer_stream_on(ctx: "Context") -> bool:
+    """`MV3DT_VIEWER_STREAM`, read from installer.conf (`ctx.conf`) and, when
+    absent there, from the environment the unit's `EnvironmentFile=` sets."""
+    key = config_mod.GATE_VIEWER_STREAM
+    value = ctx.conf.get(key) or os.environ.get(key) or "off"
+    return value.strip().lower() == "on"
+
+
 def _start_pipeline_service_exec(
     ctx: "Context",
     entry: ProjectEntry,
@@ -886,6 +894,9 @@ def _start_pipeline_service_exec(
     env_overlay = source_deepstream_env(ctx)
 
     argv = [DEEPSTREAM_APP, "-c", str(config_path)]
+    if _viewer_stream_on(ctx):
+        # Tiled view labels for the VLC viewer stream Step 4 renders.
+        argv.insert(1, "-t")
     if dry_run:
         ctx.log.info(f"[dry-run] cd {config_path.parent} && {' '.join(argv)}")
         return 0

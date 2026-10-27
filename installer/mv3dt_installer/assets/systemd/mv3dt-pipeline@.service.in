@@ -48,8 +48,9 @@ Environment=PYTHONUNBUFFERED=1
 
 StandardOutput=journal
 StandardError=journal
-LogRateLimitIntervalSec=30s
-LogRateLimitBurst=200
+# No journal rate limit: the MQTT publish callback logging otherwise exhausts
+# it and drops the **PERF lines mv3dt-watchdog@%i reads.
+LogRateLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

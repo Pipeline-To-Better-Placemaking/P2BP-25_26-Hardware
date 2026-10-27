@@ -437,6 +437,42 @@ def test_pipeline_execs_deepstream_test5_app(tmp_path, monkeypatch):
     assert calls and calls[0][0] == "deepstream-test5-app"
 
 
+def _service_exec_argv(tmp_path, monkeypatch, conf):
+    monkeypatch.delenv(config_mod.GATE_VIEWER_STREAM, raising=False)
+    ctx = FakeContext(tmp_path, conf=conf)
+    entry = _make_entry(ctx.install_dir)
+    monkeypatch.setattr(step5, "ensure_mosquitto", lambda ctx_: None)
+    monkeypatch.setattr(step5, "source_deepstream_env", lambda ctx_: {})
+    monkeypatch.setattr(step5.os, "chdir", lambda path: None)
+    calls = []
+    rc = step5._start_pipeline_service_exec(
+        ctx, entry, execv=lambda binary, argv: calls.append(argv)
+    )
+    assert rc == 0
+    return calls[0], entry
+
+
+def test_service_exec_passes_t_when_viewer_stream_on(tmp_path, monkeypatch):
+    argv, entry = _service_exec_argv(
+        tmp_path, monkeypatch, {config_mod.GATE_VIEWER_STREAM: "on"}
+    )
+    assert argv == ["deepstream-test5-app", "-t", "-c", entry.rendered_config]
+
+
+@pytest.mark.parametrize("conf", [{}, {config_mod.GATE_VIEWER_STREAM: "off"}])
+def test_service_exec_omits_t_when_viewer_stream_off(tmp_path, monkeypatch, conf):
+    argv, entry = _service_exec_argv(tmp_path, monkeypatch, conf)
+    assert argv == ["deepstream-test5-app", "-c", entry.rendered_config]
+
+
+def test_service_exec_reads_viewer_stream_from_environment(tmp_path, monkeypatch):
+    ctx = FakeContext(tmp_path, conf={})
+    monkeypatch.setenv(config_mod.GATE_VIEWER_STREAM, "on")
+    assert step5._viewer_stream_on(ctx) is True
+    ctx.conf[config_mod.GATE_VIEWER_STREAM] = "off"
+    assert step5._viewer_stream_on(ctx) is False
+
+
 def test_pipeline_process_name_is_truncated_for_pgrep():
     assert step5.DEEPSTREAM_APP == "deepstream-test5-app"
     assert step5.DEEPSTREAM_APP_PROCESS == "deepstream-test"

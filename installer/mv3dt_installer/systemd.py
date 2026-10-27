@@ -57,7 +57,7 @@ import shlex
 import subprocess
 from typing import Any, Callable, Iterable, Mapping
 
-from . import shellout
+from . import managed_files, shellout
 from .logs import log
 
 #: Where systemd looks for locally-installed units.
@@ -246,6 +246,36 @@ def install_unit(
     target.chmod(UNIT_MODE)
     log.info(f"wrote unit {name} to {target}")
     return True
+
+
+def install_managed_unit(
+    name: str,
+    content: str,
+    *,
+    unit_dir: pathlib.Path | None = None,
+    manifest: managed_files.Manifest | None = None,
+) -> managed_files.Outcome:
+    """`install_unit` with the edit protection of `managed_files`.
+
+    A unit file still exactly as the installer last wrote it (or missing) is
+    written; one an operator edited, or one that predates the manifest, is
+    kept and the new version lands beside it as ``<name>.installer-new``,
+    which systemd ignores because it has no unit suffix. Only
+    ``Outcome.WRITTEN`` changes what systemd would load, so it is the only
+    outcome that needs a `daemon-reload`.
+
+    ``unit_dir`` defaults to `UNIT_DIR` looked up at call time, so a test
+    that points the module constant at a tmp dir is honored.
+    """
+    directory = unit_dir if unit_dir is not None else UNIT_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    return managed_files.write_managed(
+        directory / name,
+        content,
+        manifest=manifest if manifest is not None else managed_files.Manifest(),
+        mode=UNIT_MODE,
+        label=f"unit {name}",
+    )
 
 
 # ---------------------------------------------------------------------------

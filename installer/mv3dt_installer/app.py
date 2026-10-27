@@ -79,6 +79,7 @@ from mv3dt_installer import progress as progress_mod
 from mv3dt_installer import reboot as reboot_mod
 from mv3dt_installer import report
 from mv3dt_installer import shellout
+from mv3dt_installer import watchdog as watchdog_mod
 from mv3dt_installer import webapp as webapp_mod
 from mv3dt_installer.logs import log, open_transcript, set_colour, transcript
 from mv3dt_installer.privilege import InvokingUser
@@ -237,6 +238,15 @@ def build_parser() -> argparse.ArgumentParser:
         "Overrides an already-persisted value. On an installed box the "
         "change takes effect on the next Step 4 render: reset Step 4, or "
         "run ingest after an AMC change.",
+    )
+    parser.add_argument(
+        "--auto-ingest",
+        choices=config_mod.GATE_CHOICES[config_mod.GATE_AUTO_INGEST],
+        default=None,
+        help="Set the auto-ingest gate (MV3DT_AUTO_INGEST in installer.conf): "
+        "when on, Step 4 enables the timer that re-ingests a new AMC result "
+        "every minute; when off, re-ingest is `mv3dt-installer ingest`. "
+        "Overrides an already-persisted value.",
     )
     parser.add_argument(
         "--scan-cameras",
@@ -849,6 +859,15 @@ register_subcommand(
     requires_root=managed_files.configs_requires_root,
 )
 
+# `mv3dt-installer watchdog --project-slug <slug>`: the pipeline hang
+# watchdog `mv3dt-watchdog@.service` runs as root. Registered with
+# `requires_root=False` only so the bootstrap reads installer.conf instead
+# of rewriting it and opens no transcript on every start; the handler itself
+# refuses to run unless it is root.
+register_subcommand(
+    "watchdog", watchdog_mod.handle_watchdog_subcommand, requires_root=False
+)
+
 
 def _read_only_subcommand_config(
     known: argparse.Namespace, sm: StateMachine
@@ -895,6 +914,10 @@ def _read_only_subcommand_config(
         viewer_stream=values.get(
             config_mod.GATE_VIEWER_STREAM,
             config_mod.GATE_DEFAULTS[config_mod.GATE_VIEWER_STREAM],
+        ),
+        auto_ingest=values.get(
+            config_mod.GATE_AUTO_INGEST,
+            config_mod.GATE_DEFAULTS[config_mod.GATE_AUTO_INGEST],
         ),
         values=values,
     )
@@ -1034,6 +1057,7 @@ _GATE_KEY_TO_ARG_DEST: dict[str, str] = {
     config_mod.GATE_WEBAPP_INTEGRATION: "webapp_integration",
     config_mod.GATE_TRACKING_HISTORY: "tracking_history",
     config_mod.GATE_VIEWER_STREAM: "viewer_stream",
+    config_mod.GATE_AUTO_INGEST: "auto_ingest",
 }
 
 
