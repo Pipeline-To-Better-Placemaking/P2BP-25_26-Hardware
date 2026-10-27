@@ -1594,6 +1594,18 @@ def test_ingest_unchanged_archive_renders_missing_targets(tmp_path, templates):
     assert _tracker_path(ctx).is_file()
 
 
+def test_operator_edit_without_new_render_gets_no_pending(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    tracker = _tracker_path(ctx)
+    edited = tracker.read_text() + "# operator tuning\n"
+    tracker.write_text(edited)
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert tracker.read_text() == edited
+    assert not managed_files.pending_path(tracker).exists()
+
+
 # -- generated per-install files: fusion, dewarpers, viewer, pose model -------
 
 LIVE_FIXTURE_DIR = pathlib.Path(__file__).resolve().parent / "fixtures" / "live_baseline"
