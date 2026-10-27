@@ -298,7 +298,7 @@ def _install_units(ctx: "Context", units: dict[str, str]) -> bool:
             ctx.report_installed(name, __version__)
         elif outcome is managed_files.Outcome.UNCHANGED:
             ctx.report_already_installed(name, __version__)
-        else:
+        elif managed_files.pending_path(systemd_mod.UNIT_DIR / name).exists():
             ctx.log.warn(
                 f"kept the existing {name}; review the new version with "
                 "`mv3dt-installer configs diff` and take it with "
