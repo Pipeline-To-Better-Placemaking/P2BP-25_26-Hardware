@@ -19,12 +19,16 @@ wrote itself, so ``configs status`` can still list it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import difflib
 import enum
+import fcntl
 import hashlib
+import io
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import tempfile
@@ -32,7 +36,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
 from mv3dt_installer.logs import log
-from mv3dt_installer.state import write_json_atomic
 
 if TYPE_CHECKING:  # pragma: no cover
     from mv3dt_installer.app import Context
@@ -50,6 +53,8 @@ __all__ = [
     "diff",
     "accept",
     "accept_all",
+    "UnsafeFileError",
+    "redact",
     "handle_configs_subcommand",
     "configs_requires_root",
 ]
@@ -59,6 +64,7 @@ __all__ = [
 DEFAULT_MANIFEST_PATH = pathlib.Path("/var/lib/mv3dt-installer/managed-files.json")
 NEW_SUFFIX = ".installer-new"
 CORRUPT_SUFFIX = ".corrupt"
+LOCK_SUFFIX = ".lock"
 DEFAULT_MODE = 0o644
 _MANIFEST_VERSION = 1
 
@@ -94,6 +100,40 @@ def pending_path(path: PathLike) -> pathlib.Path:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+class UnsafeFileError(OSError):
+    """A managed path or its pending copy is not a file the installer may
+    read or replace as root (a symlink, a non-regular file, or a file owned
+    by someone other than root or the target's owner)."""
+
+
+def _is_link(path: pathlib.Path) -> bool:
+    return os.path.islink(path)
+
+
+def _read_regular(path: pathlib.Path, *, allowed_uids: Optional[set] = None) -> bytes:
+    """Read `path` without following a symlink at its last component, and
+    only when it is a regular file (owned by one of `allowed_uids`, when
+    given). FileNotFoundError when it does not exist."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError):
+            raise
+        if _is_link(path):
+            raise UnsafeFileError(f"{path} is a symlink; refusing to follow it") from exc
+        raise
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafeFileError(f"{path} is not a regular file; refusing to read it")
+        if allowed_uids is not None and info.st_uid not in allowed_uids:
+            raise UnsafeFileError(
+                f"{path} is owned by uid {info.st_uid}, not root or the owner of "
+                "the file it would replace; refusing to use it"
+            )
+        return handle.read()
 
 
 class Manifest:
@@ -138,30 +178,44 @@ class Manifest:
             )
 
     def save(self, files: dict[str, Optional[str]]) -> None:
-        write_json_atomic(self.path, {"version": _MANIFEST_VERSION, "files": files})
+        data = json.dumps(
+            {"version": _MANIFEST_VERSION, "files": files}, indent=2, sort_keys=True
+        )
+        _atomic_write(self.path, (data + "\n").encode("utf-8"), mode=0o644)
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Exclusive lock around one load, modify, save, shared by every
+        process (Step 4, the ingest timer, `configs accept`)."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_name(self.path.name + LOCK_SUFFIX)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
         try:
-            self.path.chmod(0o644)
-        except OSError:
-            pass
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
     def get(self, path: PathLike) -> Optional[str]:
         return self.load().get(_key(path))
 
     def record(self, path: PathLike, digest: Optional[str]) -> None:
-        files = self.load()
-        key = _key(path)
-        if key in files and files[key] == digest:
-            return
-        files[key] = digest
-        self.save(files)
+        with self._locked():
+            files = self.load()
+            key = _key(path)
+            if key in files and files[key] == digest:
+                return
+            files[key] = digest
+            self.save(files)
 
     def track(self, path: PathLike) -> None:
         """List `path` without claiming the installer wrote its content."""
-        files = self.load()
-        key = _key(path)
-        if key not in files:
-            files[key] = None
-            self.save(files)
+        with self._locked():
+            files = self.load()
+            key = _key(path)
+            if key not in files:
+                files[key] = None
+                self.save(files)
 
 
 def _atomic_write(
@@ -180,7 +234,10 @@ def _atomic_write(
         if candidate is None:
             continue
         try:
-            reference = candidate.stat()
+            reference = os.lstat(candidate)
+            if stat.S_ISLNK(reference.st_mode):
+                reference = None
+                continue
             break
         except OSError:
             continue
@@ -218,15 +275,36 @@ def write_managed(
     - missing, or still exactly what the installer last wrote: write it
       (WRITTEN);
     - already equal to `text`: record it (UNCHANGED);
-    - anything else: leave it, write ``<path>.installer-new`` and warn
-      (KEPT_MODIFIED).
+    - edited, and `text` is what the installer last wrote (nothing new to
+      offer): leave it, remove any stale ``.installer-new`` (KEPT_MODIFIED);
+    - edited or never recorded, and `text` is new: leave it, write
+      ``<path>.installer-new`` and warn (KEPT_MODIFIED).
+
+    A symlink at `path` is operator-managed: it is never replaced, only
+    offered a ``.installer-new`` when its content differs.
     """
     target = pathlib.Path(_key(path))
     data = text.encode("utf-8")
     new_digest = _sha256(data)
     pending = pending_path(target)
+    name = label or target.name
+    if _is_link(target):
+        try:
+            linked = target.read_bytes()
+        except OSError:
+            linked = None
+        manifest.track(target)
+        if linked is not None and _sha256(linked) == new_digest:
+            pending.unlink(missing_ok=True)
+            return Outcome.UNCHANGED
+        _write_pending(pending, data, mode=mode, like=target)
+        log.warn(
+            f"kept {name} at {target} (operator-managed symlink), "
+            f"new version at {pending}"
+        )
+        return Outcome.KEPT_MODIFIED
     try:
-        current = target.read_bytes()
+        current = _read_regular(target)
     except FileNotFoundError:
         current = None
     if current is None or _sha256(current) == new_digest:
@@ -243,25 +321,32 @@ def write_managed(
         manifest.record(target, new_digest)
         pending.unlink(missing_ok=True)
         return Outcome.WRITTEN
+    if recorded is not None and recorded == new_digest:
+        pending.unlink(missing_ok=True)
+        log.info(f"kept {name} at {target} (operator edited); no new installer version")
+        return Outcome.KEPT_MODIFIED
+    _write_pending(pending, data, mode=mode, like=target)
+    manifest.track(target)
+    log.warn(f"kept {name} at {target} (operator edited), new version at {pending}")
+    return Outcome.KEPT_MODIFIED
+
+
+def _write_pending(
+    pending: pathlib.Path, data: bytes, *, mode: Optional[int], like: pathlib.Path
+) -> None:
     try:
-        stale = pending.read_bytes() != data
-    except FileNotFoundError:
+        stale = _read_regular(pending) != data
+    except OSError:
         stale = True
     if stale:
-        _atomic_write(pending, data, mode=mode, like=target)
-    manifest.track(target)
-    log.warn(
-        f"kept {label or target.name} at {target} (operator edited), "
-        f"new version at {pending}"
-    )
-    return Outcome.KEPT_MODIFIED
+        _atomic_write(pending, data, mode=mode, like=like)
 
 
 def status(manifest: Manifest) -> list[ManagedStatus]:
     result = []
     for key, recorded in sorted(manifest.load().items()):
         path = pathlib.Path(key)
-        if pending_path(path).exists():
+        if os.path.lexists(pending_path(path)):
             state = FileState.PENDING_NEW
         elif not path.exists():
             state = FileState.MISSING
@@ -275,38 +360,78 @@ def status(manifest: Manifest) -> list[ManagedStatus]:
     return result
 
 
+_URI_CREDENTIALS_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/@\s]+@")
+_SECRET_VALUE_RE = re.compile(
+    r"(?im)^([+\- ]?[ \t]*[\w.-]*(?:password|passwd|secret|token)[\w.-]*"
+    r"[ \t]*[:=][ \t]*)\S.*$"
+)
+
+
+def redact(text: str) -> str:
+    """Hide URI credentials and password/secret/token values."""
+    text = _URI_CREDENTIALS_RE.sub(r"\1***@", text)
+    return _SECRET_VALUE_RE.sub(r"\1***", text)
+
+
 def diff(path: PathLike) -> str:
-    """Unified diff from the current file to its ``.installer-new``; empty
-    when there is no pending version."""
+    """Unified diff from the current file to its ``.installer-new``, with
+    credentials redacted; empty when there is no pending version. Neither
+    file is read through a symlink."""
     target = pathlib.Path(_key(path))
     pending = pending_path(target)
-    if not pending.exists():
+    if not os.path.lexists(pending):
         return ""
+    if _is_link(target):
+        raise UnsafeFileError(f"{target} is a symlink; compare it by hand")
     try:
-        current = target.read_text(encoding="utf-8").splitlines(keepends=True)
+        current = _read_regular(target).decode("utf-8").splitlines(keepends=True)
     except FileNotFoundError:
         current = []
-    new = pending.read_text(encoding="utf-8").splitlines(keepends=True)
-    return "".join(
-        difflib.unified_diff(current, new, fromfile=str(target), tofile=str(pending))
+    new = _read_regular(pending).decode("utf-8").splitlines(keepends=True)
+    return redact(
+        "".join(
+            difflib.unified_diff(
+                current, new, fromfile=str(target), tofile=str(pending)
+            )
+        )
     )
 
 
 def accept(path: PathLike, *, manifest: Manifest) -> None:
-    """Replace `path` with its ``.installer-new`` and record it."""
+    """Replace `path` with its ``.installer-new`` and record it.
+
+    Refuses (UnsafeFileError) a symlinked target, and a pending copy that is
+    a symlink, not a regular file, or owned by anyone but root or the
+    target's owner: run as root, following either would copy an arbitrary
+    file into place."""
     target = pathlib.Path(_key(path))
     pending = pending_path(target)
-    data = pending.read_bytes()  # FileNotFoundError when nothing is pending
-    _atomic_write(target, data, mode=None, like=target if target.exists() else pending)
+    try:
+        target_info = os.lstat(target)
+    except FileNotFoundError:
+        target_info = None
+    if target_info is not None and not stat.S_ISREG(target_info.st_mode):
+        raise UnsafeFileError(
+            f"{target} is not a regular file (operator-managed symlink?); "
+            "refusing to replace it"
+        )
+    owner = target_info.st_uid if target_info is not None else os.geteuid()
+    data = _read_regular(pending, allowed_uids={0, owner})
+    _atomic_write(target, data, mode=None, like=target if target_info else pending)
     manifest.record(target, _sha256(data))
     pending.unlink(missing_ok=True)
 
 
 def accept_all(manifest: Manifest) -> list[pathlib.Path]:
+    """Accept every pending version; a refused one is logged and skipped."""
     accepted = []
     for entry in status(manifest):
         if entry.state is FileState.PENDING_NEW:
-            accept(entry.path, manifest=manifest)
+            try:
+                accept(entry.path, manifest=manifest)
+            except UnsafeFileError as exc:
+                log.error(f"configs: {exc}")
+                continue
             accepted.append(entry.path)
     return accepted
 
@@ -332,10 +457,16 @@ def _build_configs_parser() -> argparse.ArgumentParser:
 
 def configs_requires_root(argv: list) -> bool:
     """`status` and `diff` only read; `accept`/`accept-all` rewrite the
-    managed files and the root-owned manifest, as Step 4 does. Anything
-    unrecognised asks for root, the safe default."""
-    action = next((a for a in argv if a in _ACTIONS), None)
-    return action not in _READ_ONLY_ACTIONS
+    managed files and the root-owned manifest, as Step 4 does. The action
+    comes from the same parser the handler uses, so the two always agree;
+    anything it cannot parse asks for root."""
+    sink = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            known, _ = _build_configs_parser().parse_known_args(argv)
+    except SystemExit:
+        return True
+    return known.action not in _READ_ONLY_ACTIONS
 
 
 def handle_configs_subcommand(
@@ -365,7 +496,11 @@ def handle_configs_subcommand(
                 if entry.state is FileState.PENDING_NEW
             ]
         for target in targets:
-            text = diff(target)
+            try:
+                text = diff(target)
+            except UnsafeFileError as exc:
+                ctx.log.error(f"configs: {exc}")
+                return 1
             if not text and args.path:
                 ctx.log.error(f"configs: no {NEW_SUFFIX} version pending for {target}")
                 return 1
@@ -377,6 +512,9 @@ def handle_configs_subcommand(
             return 2
         try:
             accept(args.path, manifest=manifest)
+        except UnsafeFileError as exc:
+            ctx.log.error(f"configs: {exc}")
+            return 1
         except FileNotFoundError:
             ctx.log.error(
                 f"configs: no {NEW_SUFFIX} version pending for {_key(args.path)}"
@@ -384,9 +522,10 @@ def handle_configs_subcommand(
             return 1
         ctx.log.info(f"accepted installer version of {_key(args.path)}")
         return 0
+    pending = [e for e in status(manifest) if e.state is FileState.PENDING_NEW]
     accepted = accept_all(manifest)
     for path in accepted:
         ctx.log.info(f"accepted installer version of {path}")
-    if not accepted:
+    if not pending:
         ctx.log.info("no pending installer versions to accept")
-    return 0
+    return 0 if len(accepted) == len(pending) else 1

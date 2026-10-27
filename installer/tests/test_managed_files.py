@@ -261,3 +261,144 @@ def test_configs_accept_all(manifest, target):
     mf.write_managed(target, "new\n", manifest=manifest)
     assert _run(["accept-all", "--non-interactive"], manifest)[0] == 0
     assert target.read_text() == "new\n"
+
+
+# -- review hardening ---------------------------------------------------------
+
+
+def test_edited_file_with_nothing_new_gets_no_pending(manifest, target, capsys):
+    mf.write_managed(target, "v1\n", manifest=manifest)
+    target.write_text("operator\n")
+    mf.pending_path(target).write_text("stale\n")
+    capsys.readouterr()
+    assert mf.write_managed(target, "v1\n", manifest=manifest) is (
+        mf.Outcome.KEPT_MODIFIED
+    )
+    assert target.read_text() == "operator\n"
+    assert not mf.pending_path(target).exists()
+    assert manifest.get(target) == _sha("v1\n")
+    assert "[warn" not in capsys.readouterr().err
+    assert mf.status(manifest)[0].state is mf.FileState.MODIFIED
+    assert mf.accept_all(manifest) == []
+    assert target.read_text() == "operator\n"
+
+
+def test_symlinked_target_is_never_replaced(manifest, tmp_path, target):
+    real = tmp_path / "real.txt"
+    real.write_text("v1\n")
+    target.parent.mkdir(parents=True)
+    target.symlink_to(real)
+    assert mf.write_managed(target, "v1\n", manifest=manifest) is mf.Outcome.UNCHANGED
+    assert target.is_symlink()
+    assert mf.write_managed(target, "v2\n", manifest=manifest) is (
+        mf.Outcome.KEPT_MODIFIED
+    )
+    assert target.is_symlink() and real.read_text() == "v1\n"
+    assert mf.pending_path(target).read_text() == "v2\n"
+
+
+def test_accept_refuses_a_symlinked_target(manifest, tmp_path, target):
+    real = tmp_path / "real.txt"
+    real.write_text("v1\n")
+    target.parent.mkdir(parents=True)
+    target.symlink_to(real)
+    mf.write_managed(target, "v2\n", manifest=manifest)
+    with pytest.raises(mf.UnsafeFileError, match="not a regular file"):
+        mf.accept(target, manifest=manifest)
+    assert target.is_symlink() and real.read_text() == "v1\n"
+    assert mf.accept_all(manifest) == []
+
+
+def test_accept_refuses_a_symlinked_pending_copy(manifest, tmp_path, target):
+    secret = tmp_path / "shadow"
+    secret.write_text("root:hash\n")
+    target.parent.mkdir(parents=True)
+    target.write_text("live\n")
+    mf.write_managed(target, "new\n", manifest=manifest)
+    pending = mf.pending_path(target)
+    pending.unlink()
+    pending.symlink_to(secret)
+    with pytest.raises(mf.UnsafeFileError, match="symlink"):
+        mf.accept(target, manifest=manifest)
+    assert target.read_text() == "live\n"
+    assert mf.accept_all(manifest) == []
+    assert target.read_text() == "live\n"
+    with pytest.raises(mf.UnsafeFileError):
+        mf.diff(target)
+    rc, _ = _run(["accept-all"], manifest)
+    assert rc == 1
+    rc, _ = _run(["accept", str(target)], manifest)
+    assert rc == 1
+
+
+def test_accept_refuses_a_pending_copy_owned_by_someone_else(
+    manifest, target, monkeypatch
+):
+    target.parent.mkdir(parents=True)
+    target.write_text("live\n")
+    mf.write_managed(target, "new\n", manifest=manifest)
+    real_fstat = os.fstat
+
+    def foreign_fstat(fd):
+        info = real_fstat(fd)
+        return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink,
+                               4242, info.st_gid, info.st_size, info.st_atime,
+                               info.st_mtime, info.st_ctime))
+
+    monkeypatch.setattr(mf.os, "fstat", foreign_fstat)
+    with pytest.raises(mf.UnsafeFileError, match="owned by uid 4242"):
+        mf.accept(target, manifest=manifest)
+    assert target.read_text() == "live\n"
+
+
+@pytest.mark.parametrize(
+    "argv, needs_root",
+    [
+        (["--log-dir", "X", "status", "accept-all"], False),
+        (["--log-dir", "status", "accept-all"], True),
+        (["--install-dir", "diff", "accept", "/x"], True),
+        (["--install-dir", "/opt/mv3dt", "diff"], False),
+        (["bogus"], True),
+        (["--help"], True),
+    ],
+)
+def test_root_decision_matches_the_handler_parser(argv, needs_root):
+    assert mf.configs_requires_root(argv) is needs_root
+    if argv != ["--help"] and argv != ["bogus"]:
+        parsed = mf._build_configs_parser().parse_args(argv)
+        assert (parsed.action not in ("status", "diff")) is needs_root
+
+
+def test_concurrent_writers_do_not_corrupt_the_manifest(manifest, tmp_path):
+    import threading
+
+    def writer(n):
+        for i in range(25):
+            manifest.record(tmp_path / f"w{n}-{i}", f"{n}{i}")
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    files = json.loads(manifest.path.read_text())["files"]
+    assert len(files) == 150
+    assert not list(manifest.path.parent.glob("*.tmp"))
+    assert not manifest.path.with_name(manifest.path.name + mf.CORRUPT_SUFFIX).exists()
+
+
+def test_diff_redacts_credentials(manifest, target):
+    target.parent.mkdir(parents=True)
+    target.write_text("uri=rtsp://admin:old@10.0.0.1:554/s\npassword=hunter2\n")
+    mf.write_managed(
+        target,
+        "uri=rtsp://admin:s3cret@10.0.0.1:554/s\npassword=hunter3\napi_token: abc\n",
+        manifest=manifest,
+    )
+    text = mf.diff(target)
+    for secret in ("s3cret", "old@", "hunter2", "hunter3", "abc", "admin"):
+        assert secret not in text
+    assert "rtsp://***@10.0.0.1:554/s" in text
+    assert "+password=***" in text and "+api_token: ***" in text
+    rc, out = _run(["diff", str(target)], manifest)
+    assert rc == 0 and "s3cret" not in out
