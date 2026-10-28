@@ -2096,3 +2096,25 @@ def test_golden_render_matches_live_workstation(tmp_path, templates, monkeypatch
     for index in (0, 1):
         name = f"{step4.DEWARPER_DIR_NAME}/dewarper_cam{index}.txt"
         assert rendered(name) == live(name)
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_footage_skipped_when_the_prompt_is_hidden(tmp_path, templates, monkeypatch, capsys):
+    ctx = _footage_ctx(tmp_path, templates)
+    fake = FakeFootage(monkeypatch)
+    _complete_wait(monkeypatch)
+    _hide_prompts(monkeypatch)
+    assert step4.Step4CalibOutputWiring().preflight(ctx).status is StepStatus.COMPLETE
+    assert fake.prompts == [] and fake.record_calls == []
+    assert "not asking to record calibration footage" in capsys.readouterr().err

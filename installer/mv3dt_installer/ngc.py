@@ -66,7 +66,7 @@ import pathlib
 import tempfile
 from typing import Optional, Union
 
-from . import privilege
+from . import privilege, prompting
 from .logs import die, log
 
 __all__ = [
@@ -119,6 +119,14 @@ def capture_key(non_interactive: bool) -> str:
             "NGC API key is required but --non-interactive was passed with "
             "no NGC_API_KEY set in the environment; re-run with NGC_API_KEY "
             "exported (sudo -E) or without --non-interactive."
+        )
+    reason = prompting.prompt_unavailable_reason()
+    if reason is not None:
+        # The key has no safe default; fail rather than block on a prompt
+        # the operator may not be able to answer.
+        die(
+            f"NGC API key is required but cannot be asked for ({reason}). "
+            "Re-run without a pipe, or export NGC_API_KEY and run with sudo -E."
         )
 
     while True:

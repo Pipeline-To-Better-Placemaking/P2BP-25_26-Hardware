@@ -96,6 +96,7 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
 
+from mv3dt_installer import prompting
 from mv3dt_installer.logs import log
 from mv3dt_installer.state import DEFAULT_INSTALL_DIR, StateMachine
 
@@ -418,7 +419,7 @@ def load(
     non_interactive: bool = False,
     *,
     default_install_dir: str | os.PathLike[str] = DEFAULT_INSTALL_DIR,
-    prompt: Callable[[str], str] = input,
+    prompt: Callable[[str], str] | None = None,
     gate_overrides: dict[str, str] | None = None,
 ) -> Config:
     """Resolve the install directory, persist it, and return the parsed
@@ -437,7 +438,9 @@ def load(
             `/opt/mv3dt`.
         prompt: injectable stand-in for `input()`, for testability. Used
             both for the §11.1 install-dir question and for the §3.4 gate
-            questions.
+            questions. Left as `None`, the real `input()` is used, and only
+            then is the terminal checked first: a hidden prompt makes every
+            question take its default, as under `non_interactive`.
         gate_overrides: `{gate key: value}` from the matching CLI flags
             (`--remote-supervision`, `--webapp-integration`). Only keys the
             operator actually passed appear here -- `app.py` builds the map
@@ -453,6 +456,19 @@ def load(
     resolved, source = _resolve_install_dir(
         install_dir_override, state, default_install_dir
     )
+
+    if prompt is None:
+        prompt = input
+        # A hidden prompt blocks forever, so every question here takes its
+        # default, exactly as under --non-interactive.
+        reason = None if non_interactive else prompting.prompt_unavailable_reason()
+        if reason is not None:
+            log.warn(
+                f"{reason}: not asking configuration questions; using the "
+                "defaults (install directory and gates as already set, else "
+                "their defaults). Run without a pipe to be asked."
+            )
+            non_interactive = True
 
     if source == "default" and not non_interactive:
         resolved = _prompt_for_install_dir(resolved, prompt)

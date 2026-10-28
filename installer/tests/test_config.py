@@ -923,3 +923,32 @@ def test_auto_ingest_flag_maps_to_its_gate():
     args = app.parse_args(["--auto-ingest", "on"])
     assert app._gate_overrides_from_args(args) == {config.GATE_AUTO_INGEST: "on"}
     assert "auto_ingest" not in app._GATE_ORDER_TO_CONF_ATTR.values()
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_hidden_prompt_takes_every_default(tmp_path, monkeypatch, capsys):
+    """With the real input() and a prompt nobody can see, load() must not
+    block: the install directory and the gates take their defaults."""
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    default_dir = tmp_path / "default-install"
+
+    cfg = config.load(None, _state(tmp_path), default_install_dir=default_dir)
+
+    assert cfg.install_dir == default_dir
+    for key in config.GATE_KEYS:
+        assert cfg.values[key] == config.GATE_DEFAULTS[key]
+    assert "not asking configuration questions" in capsys.readouterr().err

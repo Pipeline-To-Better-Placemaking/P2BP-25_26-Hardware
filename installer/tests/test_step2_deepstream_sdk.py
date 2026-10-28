@@ -1178,3 +1178,25 @@ def test_report_logs_peoplenet_missing(tmp_path, capsys):
 
     captured = capsys.readouterr()
     assert "PeopleNet model: MISSING" in captured.err
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_resolve_method_hidden_prompt_takes_deb(tmp_path, monkeypatch, capsys):
+    ctx = _ambiguous_ctx(tmp_path, non_interactive=False)
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr(step2, "_INPUT", _no_prompt)
+    method, reason = step2._resolve_method(ctx)
+    assert method is step2.Method.DEB
+    assert "could not be shown" in reason
+    assert "using deb (the default)" in capsys.readouterr().err

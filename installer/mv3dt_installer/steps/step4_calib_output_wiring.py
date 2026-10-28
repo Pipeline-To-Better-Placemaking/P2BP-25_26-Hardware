@@ -31,6 +31,7 @@ from mv3dt_installer import cameras as cameras_mod
 from mv3dt_installer import config as config_mod
 from mv3dt_installer import footage as footage_mod
 from mv3dt_installer import managed_files
+from mv3dt_installer import prompting
 from mv3dt_installer import systemd, waitui
 from mv3dt_installer.steps import StepResult, StepStatus, UserAction, register
 from mv3dt_installer.steps import step3_amc_launcher as step3_mod
@@ -1428,6 +1429,15 @@ def _maybe_record_footage(
         ctx.log.info(
             "Skipping calibration footage recording under --non-interactive; "
             "recording needs someone walking through the scene."
+        )
+        return None
+    reason = prompting.prompt_unavailable_reason()
+    if reason is not None:
+        # The same outcome as --non-interactive: a hidden "Press Enter"
+        # prompt would block forever.
+        ctx.log.warn(
+            f"{reason}: not asking to record calibration footage; skipping it "
+            "for this run. Run the installer without a pipe to record."
         )
         return None
     ok, free, needed = footage_mod.has_room(project.parent, len(cameras))

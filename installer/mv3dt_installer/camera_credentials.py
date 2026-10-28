@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import Optional, Union
 
-from . import privilege
+from . import privilege, prompting
 from .logs import die, log
 
 __all__ = [
@@ -40,6 +40,15 @@ def capture_credentials(non_interactive: bool) -> Credentials:
             "Camera credentials are required but --non-interactive was passed "
             "without both CAM_USER and CAM_PASSWORD in the environment; re-run "
             "with both exported (sudo -E) or without --non-interactive."
+        )
+    reason = prompting.prompt_unavailable_reason()
+    if reason is not None:
+        # A secret has no safe default; fail rather than block on a prompt
+        # nobody can see.
+        die(
+            f"Camera credentials are required but cannot be asked for "
+            f"({reason}). Re-run without a pipe, or export CAM_USER and "
+            "CAM_PASSWORD and run with sudo -E."
         )
 
     while True:
