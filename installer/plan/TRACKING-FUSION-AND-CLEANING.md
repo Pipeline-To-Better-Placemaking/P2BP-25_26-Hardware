@@ -309,8 +309,9 @@ stream a 24 h window without loading it. The stages run in this order
       the shared-id pass.
 6. **Camera fusion**: per person per bucket, combine the sensors' positions
    as an inverse-variance weighted mean, using each sensor's `sigma_m` from
-   `offsets.json` when applied, else equal weights. Record the number of
-   sensors that contributed (`cameras`).
+   `offsets.json` when applied, else equal weights. Record which sensors
+   contributed to each bucket: their count per sample, and the person's
+   overall sorted sensor list.
 7. **Smoothing and post-merge speed gate**: rolling median over
    `smooth_window` buckets, then drop buckets that violate
    `vmax_mps * max(dt, bucket_ms / 1000) + speed_slack_m` against the last kept
@@ -382,6 +383,7 @@ same-id pairs**: samples of one `track_id` on two sensors in the same
 |---|---|
 | Path | `<install_dir>/tracking/offsets.json` |
 | Env var | `OFFSETS_FILE` |
+| Mode | `0644`, owned by the invoking user |
 | Reload | re-read when its mtime changes |
 
 ```json
@@ -440,7 +442,7 @@ lease and window limits are unchanged.
 
 | `mode` | Behavior |
 |---|---|
-| `fused` (default) | the engine of [section 5](#5-fusion-stages); each person carries `trackIds` and a per-sample `cameras` array |
+| `fused` (default) | the engine of [section 5](#5-fusion-stages); each person carries `trackIds`, a person-level `cameras` (sorted list of the sensors that contributed to that person) and a per-sample `n_cams` count |
 | `stitched` | alias of `fused` for one release, then removed; the response reports `"mode": "fused"` plus a top-level `deprecated` string |
 | `raw` | unchanged: each tracker id is its own person |
 
@@ -458,7 +460,7 @@ output rate (`5.0` at the strict 200 ms bucket). A fused response adds
 | `dropped` | object | every counter of [section 5.1](#51-drop-and-merge-counters-required): the drop counters, `zones` per zone name, `short_tracklet_samples`, `short_person_buckets` and the `*_joins` counters |
 | `offsets` | object | `enabled` (`offsets_apply`), `learned` (a valid file exists), `applied`, `needed`, `gain_m`, `learned_at_ms`, `error` |
 | `preset` | string | the active preset |
-| `config_error` | string or null | the last `cleaning.json` load error |
+| `config_error` | string or null | the last `cleaning.json` load error; names the file only, never its path |
 | `config_warnings` | array of strings | non-fatal load warnings, e.g. `"ignored unknown key foo"` |
 
 An invalid `offsets.json` means no correction: `applied` is `false` and
@@ -475,6 +477,10 @@ An invalid `offsets.json` means no correction: `applied` is `false` and
 | `fused` | one per person per bucket, streamed through `Fuser` in chunks, in per-person blocks as people become final ([section 5.2](#52-streaming)) | `ts_ms, person_id, x, y, cameras` |
 | `stitched` | alias of `fused` for one release | as `fused` |
 | `raw` | unchanged | unchanged |
+
+In the fused export, `cameras` is the per-sample list of contributing
+sensors joined with `;` (for example `camera1;camera2`). Per-sample sensor
+lists appear only there; `range` carries the `n_cams` count instead.
 
 The export's default `mode` stays what it is today; only the accepted
 values change.
