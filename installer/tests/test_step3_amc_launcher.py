@@ -12,6 +12,7 @@ the section 5 hold-until-closed logic is injected.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from mv3dt_installer import app  # noqa: E402
+from mv3dt_installer import prompting  # noqa: E402
 from mv3dt_installer import logs, report  # noqa: E402
 from mv3dt_installer.steps import STEP_REGISTRY, StepStatus  # noqa: E402
 from mv3dt_installer.steps import step2_deepstream_sdk as step2  # noqa: E402
@@ -842,6 +844,109 @@ def test_ensure_installer_binary_replaces_a_same_size_stale_copy(tmp_path, monke
     assert dest.read_bytes() == b"release-b"
 
 
+def _busy_target_open(monkeypatch, busy: pathlib.Path):
+    """Make opening `busy` for writing fail the way Linux does while a
+    process executes it (ETXTBSY), as `shutil.copy2` onto it did live."""
+    import builtins
+    import errno
+
+    real_open = builtins.open
+
+    def _open(file, mode="r", *args, **kwargs):
+        if pathlib.Path(file) == busy and any(c in mode for c in "wax+"):
+            raise OSError(errno.ETXTBSY, "Text file busy", str(file))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+
+
+def test_ensure_installer_binary_replaces_a_running_binary_by_rename(tmp_path, monkeypatch):
+    """The installed copy is executed by mv3dt-agent.service, so writing
+    into it fails with ETXTBSY; the update must land by rename instead."""
+    fake_exe = tmp_path / "fake-mv3dt-installer"
+    fake_exe.write_bytes(b"release-new")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe))
+    ctx = FakeContext(tmp_path)
+    dest = ctx.install_dir / "bin" / "mv3dt-installer"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"release-old")
+    dest.chmod(0o750)
+    old_inode = dest.stat().st_ino
+    _busy_target_open(monkeypatch, dest)
+
+    step3.ensure_installer_binary(ctx)
+
+    assert dest.read_bytes() == b"release-new"
+    assert dest.stat().st_ino != old_inode
+    assert (dest.stat().st_mode & 0o777) == 0o750 | 0o111
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["mv3dt-installer"]
+
+
+def test_replace_executable_preserves_owner(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    dest = tmp_path / "bin" / "mv3dt-installer"
+    dest.parent.mkdir()
+    dest.write_bytes(b"old")
+    st = dest.stat()
+    chowned = []
+    monkeypatch.setattr(step3.os, "chown", lambda path, uid, gid: chowned.append((uid, gid)))
+
+    step3.replace_executable(src, dest)
+
+    assert chowned == [(st.st_uid, st.st_gid)]
+    assert dest.read_bytes() == b"new"
+
+
+def test_replace_executable_first_install_is_0755(tmp_path):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    src.chmod(0o600)
+    dest = tmp_path / "mv3dt-installer"
+
+    step3.replace_executable(src, dest)
+
+    assert (dest.stat().st_mode & 0o777) == 0o755
+
+
+def test_replace_executable_replaces_a_symlink_target_and_keeps_the_link(tmp_path):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    real = tmp_path / "releases" / "mv3dt-installer-0.4.17"
+    real.parent.mkdir()
+    real.write_bytes(b"old")
+    link = tmp_path / "bin" / "mv3dt-installer"
+    link.parent.mkdir()
+    link.symlink_to(real)
+
+    step3.replace_executable(src, link)
+
+    assert link.is_symlink()
+    assert os.readlink(link) == str(real)
+    assert real.read_bytes() == b"new"
+    assert sorted(p.name for p in real.parent.iterdir()) == ["mv3dt-installer-0.4.17"]
+
+
+def test_replace_executable_failure_keeps_old_binary_and_removes_temp(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    dest = tmp_path / "bin" / "mv3dt-installer"
+    dest.parent.mkdir()
+    dest.write_bytes(b"old")
+
+    def _fail(_a, _b):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(step3.os, "replace", _fail)
+
+    with pytest.raises(OSError, match="rename failed"):
+        step3.replace_executable(src, dest)
+
+    assert dest.read_bytes() == b"old"
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["mv3dt-installer"]
+
+
 # ---------------------------------------------------------------------------
 # preflight() -- section 7.1
 # ---------------------------------------------------------------------------
@@ -1542,6 +1647,53 @@ def test_identity_defaults_project_to_location_and_persists(tmp_path, monkeypatc
     answers = iter(("site-42", ""))
     monkeypatch.setattr(step3, "_INPUT", lambda _prompt: next(answers))
     assert step3.resolve_project_identity(ctx) == ("site-42", "site-42")
+
+
+def _hide_prompts(monkeypatch, reason="stdout is not a terminal (is the output piped?)"):
+    monkeypatch.setattr(prompting, "prompt_unavailable_reason", lambda: reason)
+
+    def _boom(prompt):  # pragma: no cover -- must never be called
+        raise AssertionError(f"input() called for a hidden prompt: {prompt}")
+
+    monkeypatch.setattr(step3, "_INPUT", _boom)
+
+
+def test_identity_location_fails_fast_when_the_prompt_is_hidden(tmp_path, monkeypatch):
+    """No default exists for LOCATION_ID, so a hidden prompt must fail with
+    instructions instead of blocking the run."""
+    ctx = FakeContext(tmp_path, conf={step2.CONF_METHOD_KEY: "deb"}, non_interactive=False)
+    _hide_prompts(monkeypatch)
+    with pytest.raises(step3.AmcLaunchError) as excinfo:
+        step3.resolve_project_identity(ctx)
+    message = str(excinfo.value)
+    assert "stdout is not a terminal" in message
+    assert "LOCATION_ID=<id> in installer.conf" in message
+    assert "without a pipe" in message
+
+
+def test_identity_project_name_takes_location_when_the_prompt_is_hidden(
+    tmp_path, monkeypatch, capsys
+):
+    ctx = FakeContext(
+        tmp_path,
+        conf={step2.CONF_METHOD_KEY: "deb", step3.CONF_LOCATION_ID_KEY: "site-07"},
+        non_interactive=False,
+    )
+    _hide_prompts(monkeypatch)
+    assert step3.resolve_project_identity(ctx) == ("site-07", "site-07")
+    assert ctx.conf[step3.CONF_PROJECT_NAME_KEY] == "site-07"
+    assert "using LOCATION_ID (site-07), the default" in capsys.readouterr().err
+
+
+def test_confirm_launch_now_does_not_launch_when_the_prompt_is_hidden(
+    tmp_path, monkeypatch, capsys
+):
+    ctx = FakeContext(tmp_path, non_interactive=False)
+    _hide_prompts(monkeypatch)
+    assert step3._confirm_launch_now(ctx) is False
+    err = capsys.readouterr().err
+    assert "not launching (the default)" in err
+    assert "without a pipe" in err
 
 
 def test_amc_project_created_once_then_persisted(tmp_path):

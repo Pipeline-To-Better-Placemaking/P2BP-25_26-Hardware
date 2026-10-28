@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from .. import config as config_mod
 from .. import progress_exec
+from .. import prompting
 from ..logs import log
 from . import StepResult, StepStatus, UserAction, register
 
@@ -351,7 +352,16 @@ def _resolve_method(ctx: "Context") -> tuple[Method, str]:
     if method is not None:
         return method, reason
     if not ctx.non_interactive:
-        return _prompt_for_method(), "operator selection (ambiguous auto-detect)"
+        reason = prompting.prompt_unavailable_reason()
+        if reason is None:
+            return _prompt_for_method(), "operator selection (ambiguous auto-detect)"
+        # A hidden prompt blocks forever; take the documented default.
+        log.warn(
+            f"{reason}: not asking for the DeepStream install method; using "
+            f"{Method.DEB.value} (the default). Run the installer without a "
+            "pipe to be asked."
+        )
+        return Method.DEB, "default; the prompt could not be shown (ambiguous auto-detect)"
     return Method.DEB, "non-interactive default (ambiguous auto-detect)"
 
 

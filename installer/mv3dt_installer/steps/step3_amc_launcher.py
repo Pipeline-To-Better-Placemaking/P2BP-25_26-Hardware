@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import contextlib
 import filecmp
 import json
 import os
@@ -67,6 +68,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -77,6 +79,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from mv3dt_installer import app as app_mod
 from mv3dt_installer import config as config_mod
+from mv3dt_installer import prompting
 from mv3dt_installer import progress_exec
 from mv3dt_installer.steps import step2_deepstream_sdk as step2_mod
 from mv3dt_installer.steps import StepResult, StepStatus, register
@@ -359,12 +362,30 @@ def resolve_project_identity(
                 "LOCATION_ID is required in installer.conf or via --location-id "
                 "for a non-interactive AMC launch"
             )
+        reason = prompting.prompt_unavailable_reason()
+        if reason is not None:
+            # There is no default to fall back on, and a hidden prompt
+            # blocks forever.
+            raise AmcLaunchError(
+                f"LOCATION_ID is not set and cannot be asked for ({reason}). "
+                f"Set {CONF_LOCATION_ID_KEY}=<id> in installer.conf (then "
+                "--non-interactive also works), or run the installer without "
+                "a pipe to be asked."
+            )
         location = _INPUT("Location ID (3-50 letters, numbers, ._-): ")
     location = _validated_identity(location, CONF_LOCATION_ID_KEY)
 
     project_name = project or ctx.conf.get(CONF_PROJECT_NAME_KEY)
     if not project_name:
+        reason = None if ctx.non_interactive else prompting.prompt_unavailable_reason()
         if ctx.non_interactive:
+            project_name = location
+        elif reason is not None:
+            ctx.log.warn(
+                f"{reason}: not asking for the AMC project name; using "
+                f"LOCATION_ID ({location}), the default. Set "
+                f"{CONF_PROJECT_NAME_KEY} in installer.conf to choose another."
+            )
             project_name = location
         else:
             answer = _INPUT(f"AMC project name [{location}]: ").strip()
@@ -1205,6 +1226,56 @@ def execute_hold(
 # ---------------------------------------------------------------------------
 
 
+def replace_executable(src: pathlib.Path, dest: pathlib.Path) -> None:
+    """Install `src` at `dest` by writing a temp file beside `dest` and
+    renaming it over the target.
+
+    Writing into `dest` directly fails with ETXTBSY ("Text file busy")
+    while any process is executing it, and `mv3dt-agent.service` and the
+    pipeline units run this very binary. A rename only swaps the directory
+    entry: running processes keep the old inode, new ones get the new
+    file. The replacement keeps the old file's mode and owner (0755 and the
+    caller's owner for a first install). On any failure the old binary is
+    left untouched and the temp file is removed.
+
+    A symlinked `dest` is resolved first and its target replaced, so the
+    link survives, as it did when this was a `shutil.copy2` that wrote
+    through the link.
+    """
+    dest = pathlib.Path(os.path.realpath(dest))
+    mode = 0o755
+    owner: Optional[tuple[int, int]] = None
+    try:
+        st = dest.stat()
+    except FileNotFoundError:
+        pass
+    else:
+        mode = stat.S_IMODE(st.st_mode) | 0o111
+        owner = (st.st_uid, st.st_gid)
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=str(dest.parent))
+    tmp = pathlib.Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as source:
+            shutil.copyfileobj(source, out)
+            out.flush()
+            os.fsync(out.fileno())
+        shutil.copystat(src, tmp)
+        os.chmod(tmp, mode)
+        if owner is not None:
+            try:
+                os.chown(tmp, *owner)
+            except PermissionError:
+                # Only root can give a file away; a non-root caller keeps
+                # its own ownership, the same as the copy it replaces.
+                pass
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def ensure_installer_binary(ctx: "Context") -> pathlib.Path:
     """`<install_dir>/bin/mv3dt-installer` (section 6.1 step 1): a stable
     copy of the running executable, so the `amc` wrapper survives the
@@ -1226,8 +1297,7 @@ def ensure_installer_binary(ctx: "Context") -> pathlib.Path:
         if src.is_file() and (
             not dest.exists() or not filecmp.cmp(src, dest, shallow=False)
         ):
-            shutil.copy2(src, dest)
-            dest.chmod(0o755)
+            replace_executable(src, dest)
             ctx.log.info(f"updated {dest} from {src}")
     elif not dest.exists():
         ctx.log.warn(
@@ -1813,6 +1883,15 @@ def _confirm_launch_now(ctx: "Context") -> bool:
     so this module honors only `ctx.non_interactive`, consistent with how
     Step 2 makes the same decision)."""
     if ctx.non_interactive:
+        return False
+    reason = prompting.prompt_unavailable_reason()
+    if reason is not None:
+        # A hidden prompt blocks forever; take the documented default.
+        ctx.log.warn(
+            f"{reason}: not asking whether to launch AutoMagicCalib; not "
+            "launching (the default). Launch it later with the amc command, "
+            "or run the installer without a pipe to be asked."
+        )
         return False
     answer = _INPUT("Launch AutoMagicCalib now? [y/N]: ").strip().lower()
     return answer in ("y", "yes")
