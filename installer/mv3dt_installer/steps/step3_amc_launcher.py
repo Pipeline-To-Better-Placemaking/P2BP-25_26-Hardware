@@ -1237,8 +1237,12 @@ def replace_executable(src: pathlib.Path, dest: pathlib.Path) -> None:
     file. The replacement keeps the old file's mode and owner (0755 and the
     caller's owner for a first install). On any failure the old binary is
     left untouched and the temp file is removed.
+
+    A symlinked `dest` is resolved first and its target replaced, so the
+    link survives, as it did when this was a `shutil.copy2` that wrote
+    through the link.
     """
-    dest = pathlib.Path(dest)
+    dest = pathlib.Path(os.path.realpath(dest))
     mode = 0o755
     owner: Optional[tuple[int, int]] = None
     try:

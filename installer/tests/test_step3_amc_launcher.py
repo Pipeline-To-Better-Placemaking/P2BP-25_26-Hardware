@@ -12,6 +12,7 @@ the section 5 hold-until-closed logic is injected.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -907,6 +908,24 @@ def test_replace_executable_first_install_is_0755(tmp_path):
     step3.replace_executable(src, dest)
 
     assert (dest.stat().st_mode & 0o777) == 0o755
+
+
+def test_replace_executable_replaces_a_symlink_target_and_keeps_the_link(tmp_path):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    real = tmp_path / "releases" / "mv3dt-installer-0.4.17"
+    real.parent.mkdir()
+    real.write_bytes(b"old")
+    link = tmp_path / "bin" / "mv3dt-installer"
+    link.parent.mkdir()
+    link.symlink_to(real)
+
+    step3.replace_executable(src, link)
+
+    assert link.is_symlink()
+    assert os.readlink(link) == str(real)
+    assert real.read_bytes() == b"new"
+    assert sorted(p.name for p in real.parent.iterdir()) == ["mv3dt-installer-0.4.17"]
 
 
 def test_replace_executable_failure_keeps_old_binary_and_removes_temp(tmp_path, monkeypatch):
