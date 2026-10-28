@@ -33,13 +33,14 @@ def _track(tid, cam, t0, t1, pos, rng, hz=10.0, noise=0.03):
     return out
 
 
-def _churn(first_tid, cams, t0, t1, pos, rng, life=(1.0, 2.0), gap=0.3, noise=0.03):
-    """One target whose tracker id changes every 1-2 s, with short gaps."""
+def _churn(first_tid, cams, t0, t1, pos, rng, life=(1.0, 2.0), gap=0.3, noise=0.03, hz=10.0):
+    """One target whose tracker id changes every 1-2 s, after `gap` seconds
+    (0: the next id's first sample follows the last one's directly)."""
     out, tid, t = [], first_tid, t0
     while t < t1:
         end = min(t + rng.uniform(*life), t1)
         for cam in cams:
-            out += _track(tid, cam, t, end, pos, rng, noise=noise)
+            out += _track(tid, cam, t, end, pos, rng, noise=noise, hz=hz)
         tid += 1
         t = end + gap
     return out
@@ -288,10 +289,110 @@ def test_offsets_are_applied_and_weighted():
     assert plain.summary["people"] == 2 and plain.summary["max_at_once"] == 2
     corrected = fuse(rows, parse_config({}), offsets, ROOM)
     assert corrected.summary["people"] == 1
-    assert corrected.summary["offsets"] == {"applied": True, "needed": True, "gain_m": 1.9, "learned_at_ms": 5}
+    assert corrected.summary["offsets"] == {
+        "applied": True, "needed": True, "gain_m": 1.9, "learned_at_ms": 5, "error": None,
+    }
     p = corrected.people[0]
     assert set(p["n_cams"]) == {2}
     # cam1 lands at 2.9 with weight 1/0.1^2, cam2 at 3.1 with 1/0.2^2: 2.94, not 3.0.
     assert sum(p["x"]) / len(p["x"]) == pytest.approx(2.94, abs=0.015)
     toggled = fuse(rows, parse_config({"offsets_apply": False}), offsets, ROOM)
     assert toggled.summary["offsets"]["applied"] is False and toggled.summary["people"] == 2
+
+
+@pytest.mark.parametrize("through", ["speed", "short_tracklet"])
+def test_prefilter_matches_what_the_fuser_keeps(living_room, through):
+    from mv3dt_tracking.fuse import prefilter
+
+    cfg = parse_config({"zones": [TV]})
+    kept = prefilter(living_room, cfg, ROOM, through=through)
+    # Reference: which rows the Fuser itself put into tracklets, and which
+    # tracklets it kept, by running its stages and inspecting its state.
+    f = Fuser(cfg, room=ROOM)
+    f.feed(living_room)
+    f.finish()
+    d = f.dropped
+    removed = d["out_of_bounds"] + d["zone"] + d["speed"]
+    if through == "short_tracklet":
+        removed += d["short_tracklet_samples"]
+    assert len(kept) == len(living_room) - removed
+    assert kept == sorted(kept, key=lambda r: (r.ts_ms, r.sensor, r.track_id, r.x, r.y))
+    assert all(0 - 0.3 <= r.x <= 7.3 and -5.3 <= r.y <= 0.3 for r in kept)
+    assert not any(TV["rect"]["x"][0] <= r.x <= TV["rect"]["x"][1]
+                   and TV["rect"]["y"][0] <= r.y <= TV["rect"]["y"][1] and r.sensor == "cam2" for r in kept)
+    # Fusing the survivors drops nothing more at those stages.
+    again = Fuser(cfg, room=ROOM)
+    again.feed(kept)
+    again.finish()
+    assert again.dropped["out_of_bounds"] == again.dropped["zone"] == again.dropped["speed"] == 0
+    if through == "short_tracklet":
+        assert again.dropped["short_tracklet"] == 0
+    with pytest.raises(ValueError):
+        prefilter(living_room, cfg, through="association")
+
+
+@pytest.mark.parametrize("hz", [10.0, 30.0])
+def test_id_handoff_inside_one_bucket_is_stitched(hz):
+    rng = random.Random(21)
+    rows = _churn(1, ["cam1"], 0.0, 30.0, lambda t: (1.0 + 0.15 * t, -2.0), rng, life=(1.5, 1.5), gap=0.0, hz=hz)
+    res = fuse(rows, parse_config({}), room=ROOM)
+    assert res.summary["people"] == 1
+    assert res.summary["max_at_once"] == 1
+    assert len(res.people[0]["trackIds"]) == 20
+
+
+def test_crossing_walkers_with_zero_gap_handoffs_stay_two():
+    rng = random.Random(22)
+    rows = _churn(10, ["cam1"], 0.0, 40.0, lambda t: (0.5 + 0.15 * t, -1.0 - 0.06 * t), rng, gap=0.0)
+    rows += _churn(200, ["cam1"], 0.0, 40.0, lambda t: (6.5 - 0.15 * t, -1.0 - 0.06 * t), rng, gap=0.0)
+    res = fuse(rows, parse_config({}), room=ROOM)
+    assert res.summary["people"] == 2
+    assert res.summary["max_at_once"] == 2
+    # Identities may swap where the paths meet; the count and coverage may not.
+    assert all(p["duration_s"] > 35 for p in res.summary["persons"])
+    assert _max_step_speed(res.people) <= 3.0 * 1.2
+
+
+def test_seated_person_seen_by_two_cameras_apart_with_zero_gap_churn():
+    rng = random.Random(23)
+    rows = _churn(10, ["cam1"], 0.0, 120.0, _static(5.0, -3.0), rng, life=(0.8, 2.0), gap=0.0, noise=0.05)
+    rows += _churn(500, ["cam2"], 0.0, 120.0, _static(5.0, -4.2), rng, life=(0.8, 2.0), gap=0.0, noise=0.05)
+    res = fuse(rows, parse_config({}), room=ROOM)
+    assert 1 <= res.summary["people"] <= 2
+    assert res.summary["max_at_once"] <= 2
+    assert res.summary["persons"][0]["duration_s"] > 100
+
+
+def test_zero_gap_chunking_matches_one_shot():
+    rng = random.Random(24)
+    rows = _churn(1, ["cam1", "cam2"], 0.0, 60.0, _walk_loop(3.0, -2.5, 1.0, 12.0), rng, gap=0.0, hz=30.0)
+    rows += _churn(500, ["cam1"], 300.0, 330.0, _static(5.0, -4.0), rng, gap=0.0)
+    rows.sort(key=lambda r: (r.ts_ms, r.sensor, r.track_id))
+    cfg = parse_config({})
+    one = Fuser(cfg, room=ROOM)
+    expected = one.feed(rows) + one.finish()
+    for size in (1, 97, 3001):
+        f = Fuser(cfg, room=ROOM)
+        got = []
+        for chunk in _chunks(rows, size):
+            got += f.feed(chunk)
+        assert got + f.finish() == expected
+
+
+@pytest.mark.parametrize("entry", [
+    {"dx": 0.5, "dy": 0.0, "scale": 1.0},                                     # missing theta_deg
+    {"dx": 0.5, "dy": 0.0, "theta_deg": 0.0, "scale": "1"},
+    {"dx": float("nan"), "dy": 0.0, "theta_deg": 0.0, "scale": 1.0},
+    {"dx": 0.5, "dy": float("inf"), "theta_deg": 0.0, "scale": 1.0},
+    {"dx": 0.5, "dy": 0.0, "theta_deg": 0.0, "scale": 1.0, "sigma_m": None},
+    "not an object",
+])
+def test_invalid_offsets_are_not_applied_and_never_crash(entry):
+    rng = random.Random(25)
+    rows = _track(1, "cam1", 0.0, 10.0, lambda t: (2.0, -2.0), rng)
+    bad = {"needed": True, "sensors": {"cam1": entry}}
+    res = fuse(rows, parse_config({}), bad, ROOM)
+    assert res.summary["people"] == 1
+    assert res.summary["offsets"]["applied"] is False
+    assert res.summary["offsets"]["error"].startswith("sensors.cam1")
+    assert all(abs(x - 2.0) < 0.2 for x in res.people[0]["x"])

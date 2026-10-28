@@ -256,6 +256,10 @@ def parse_config(data) -> CleaningConfig:
             if key in _NON_NEGATIVE and num < 0:
                 raise CleaningConfigError(f"{key}: must be >= 0, got {value!r}")
             out[key] = num
+    if out["version"] != 1:
+        raise CleaningConfigError(f"version: only 1 is supported, got {out['version']!r}")
+    if out["smooth_window"] % 2 == 0:
+        raise CleaningConfigError(f"smooth_window: must be a positive odd number, got {out['smooth_window']!r}")
     if not 0 < out["dup_frac"] <= 1:
         raise CleaningConfigError(f"dup_frac: must be in (0, 1], got {out['dup_frac']!r}")
     return CleaningConfig(**out)

@@ -11,7 +11,15 @@ import random
 
 import pytest
 
-from mv3dt_tracking.offsets import MIN_PAIRS, apply_offsets, learn_offsets, load_offsets, save_offsets
+from mv3dt_tracking.offsets import (
+    MIN_PAIRS,
+    apply_offsets,
+    learn_offsets,
+    load_offsets,
+    read_offsets,
+    save_offsets,
+    validate_offsets,
+)
 from mv3dt_tracking.store import Detection
 
 T0 = 1_760_000_000_000
@@ -114,9 +122,6 @@ def test_save_load_round_trip_and_apply(tmp_path):
     assert [p.name for p in path.parent.iterdir()] == ["offsets.json"]
     assert load_offsets(tmp_path / "missing.json") is None
     assert load_offsets(None) is None
-    (tmp_path / "bad.json").write_text("[1, 2]")
-    with pytest.raises(ValueError):
-        load_offsets(tmp_path / "bad.json")
     # Unknown cameras and empty offsets leave points alone.
     assert apply_offsets((1.0, 2.0), "cam9", back) == (1.0, 2.0)
     assert apply_offsets((1.0, 2.0), "cam1", None) == (1.0, 2.0)
@@ -129,3 +134,45 @@ def test_default_gate_is_the_shared_id_gate():
     assert near["pairs"] == 600 and near["needed"] is True
     assert far["pairs"] == 0 and far["sensors"] == {}
     assert learn_offsets(_pairs(offset=(1.6, 0.0)), gate_m=2.0)["pairs"] == 600
+
+
+def test_three_cameras_get_the_zero_sum_least_squares_translations():
+    rng = random.Random(8)
+    true = {"cam1": 0.3, "cam2": 0.0, "cam3": -0.3}        # what each camera reads off in x
+    rows = []
+    for i in range(600):
+        t = i / 10
+        x, y = 0.5 + 0.1 * t, -2.0 + 0.5 * math.sin(t / 4)
+        for cam, off in true.items():
+            rows.append(Detection(T0 + i * 100, cam, 5, x + off + rng.gauss(0, 0.02), y + rng.gauss(0, 0.02)))
+    o = learn_offsets(rows)
+    for cam, off in true.items():
+        assert o["sensors"][cam]["dx"] == pytest.approx(-off, abs=0.01), cam
+        assert o["sensors"][cam]["dy"] == pytest.approx(0.0, abs=0.01), cam
+    assert sum(v["dx"] for v in o["sensors"].values()) == pytest.approx(0.0, abs=1e-6)
+    assert o["median_dist_after_m"] < 0.05
+
+
+@pytest.mark.parametrize("content, needle", [
+    ('[1]', "not a JSON object"),
+    ('{"sensors": []}', "sensors"),
+    ('{"sensors": {"cam1": {"dx": 0, "dy": 0, "scale": 1}}}', "sensors.cam1.theta_deg"),
+    ('{"sensors": {"cam1": {"dx": NaN, "dy": 0, "theta_deg": 0, "scale": 1}}}', "sensors.cam1.dx"),
+    ('{"sensors": {"cam1": {"dx": 0, "dy": Infinity, "theta_deg": 0, "scale": 1}}}', "sensors.cam1.dy"),
+    ('{"sensors": {"cam1": {"dx": 0, "dy": 0, "theta_deg": 0, "scale": 0}}}', "sensors.cam1.scale"),
+    ('{"sensors": {"cam1": {"dx": 0, "dy": 0, "theta_deg": 0, "scale": 1, "sigma_m": "x"}}}', "sigma_m"),
+    ('{not json', "invalid JSON"),
+])
+def test_invalid_offsets_files_are_rejected_with_a_reason(tmp_path, content, needle):
+    path = tmp_path / "offsets.json"
+    path.write_text(content)
+    with pytest.raises(ValueError, match=needle):
+        load_offsets(path)
+    data, error = read_offsets(path)
+    assert data is None and needle in error
+
+
+def test_valid_offsets_validate_and_read():
+    o = learn_offsets(_pairs(offset=(0.4, 0.0)))
+    assert validate_offsets(o) is None
+    assert read_offsets(None) == (None, None)
