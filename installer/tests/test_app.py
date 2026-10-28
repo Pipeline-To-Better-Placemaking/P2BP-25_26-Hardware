@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -809,7 +810,9 @@ def test_dispatch_halts_on_failed(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_dispatch_gate_off_autocompletes_and_never_runs_lifecycle(tmp_path, monkeypatch):
+def test_dispatch_gate_off_skips_without_completing_and_never_runs_lifecycle(
+    tmp_path, monkeypatch
+):
     sm = StateMachine(path=tmp_path / "state.json")
     ctx, cfg = _minimal_ctx(tmp_path)  # remote_supervision defaults to "off"
     step = _DummyStep("step6_remote_supervision", "Remote Supervision", 6)
@@ -818,10 +821,103 @@ def test_dispatch_gate_off_autocompletes_and_never_runs_lifecycle(tmp_path, monk
     rc = app._dispatch(sm, ctx, cfg)
 
     assert rc == 0
-    assert sm.status("step6_remote_supervision") is StepStatus.COMPLETE
+    # A skip is recorded as a skip, not as COMPLETE (see the gate-on test
+    # below for why that matters).
+    assert sm.status("step6_remote_supervision") is StepStatus.PENDING
+    assert sm.is_skipped_gate_off("step6_remote_supervision") is True
     # Gate-off skip never invokes the lifecycle, so report() is never
     # called (mirrors the "already complete" skip discipline exactly).
     assert step.report_calls == 0
+
+
+@pytest.mark.parametrize(
+    "step_id,title,order,gate_attr",
+    [
+        ("step7_webapp_integration", "Web-app Integration", 7, "webapp_integration"),
+        ("step8_tracking_history", "Tracking history", 8, "tracking_history"),
+    ],
+)
+def test_dispatch_gated_step_runs_once_its_gate_is_turned_on(
+    tmp_path, monkeypatch, capsys, step_id, title, order, gate_attr
+):
+    """Live regression: with the gate off a run logged "skipped (gate off)";
+    after the gate was turned on the next run said "already complete" and
+    the step never ran until --reset-step."""
+    sm = StateMachine(path=tmp_path / "state.json")
+    ctx, cfg = _minimal_ctx(tmp_path)
+    step = _DummyStep(step_id, title, order)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+    assert step.report_calls == 0
+
+    setattr(cfg, gate_attr, "on")
+    capsys.readouterr()
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert step.report_calls == 1
+    assert sm.status(step_id) is StepStatus.COMPLETE
+    assert sm.is_skipped_gate_off(step_id) is False
+    assert "already complete" not in capsys.readouterr().err
+
+
+def test_dispatch_all_complete_names_the_gated_off_steps(tmp_path, monkeypatch, capsys):
+    sm = StateMachine(path=tmp_path / "state.json")
+    for step_id in STEP_IDS[:5]:
+        sm.mark_complete(step_id)
+    ctx, cfg = _minimal_ctx(tmp_path)
+    monkeypatch.setattr(
+        app,
+        "STEP_REGISTRY",
+        [
+            _DummyStep("step6_remote_supervision", "Remote Supervision", 6),
+            _DummyStep("step7_webapp_integration", "Web-app Integration", 7),
+            _DummyStep("step8_tracking_history", "Tracking history", 8),
+        ],
+    )
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    err = capsys.readouterr().err
+    assert (
+        "all steps complete (skipped, gate off: step6_remote_supervision, "
+        "step7_webapp_integration, step8_tracking_history)"
+    ) in err
+
+
+def test_status_notes_a_skipped_step_whose_gate_is_now_on(tmp_path, capsys):
+    install_dir = tmp_path / "install"
+    install_dir.mkdir()
+    (install_dir / config_mod.CONF_FILENAME).write_text(
+        f"{config_mod.GATE_TRACKING_HISTORY}=on\n"
+    )
+    state_path = tmp_path / "state.json"
+    sm = StateMachine(path=state_path)
+    state = sm.load()
+    state.install_dir = str(install_dir)
+    sm.save(state)
+    sm.mark_skipped_gate_off("step8_tracking_history")
+    sm.mark_skipped_gate_off("step7_webapp_integration")
+
+    assert app.main(["--status"], state_path=state_path) == 0
+
+    out = capsys.readouterr().out
+    assert "step8_tracking_history: SKIPPED, gate now on: runs on next install run" in out
+    assert "step7_webapp_integration: SKIPPED (gate off" in out
+
+
+def test_status_shows_a_gate_off_skip(tmp_path, capsys):
+    state_path = tmp_path / "state.json"
+    sm = StateMachine(path=state_path)
+    for step_id in STEP_IDS[:-1]:
+        sm.mark_complete(step_id)
+    sm.mark_skipped_gate_off("step8_tracking_history")
+
+    assert app.main(["--status"], state_path=state_path) == 0
+
+    out = capsys.readouterr().out
+    assert "step8_tracking_history: SKIPPED (gate off" in out
+    assert "all complete: True" in out
 
 
 def test_dispatch_gate_on_runs_step7_normally(tmp_path, monkeypatch):
@@ -872,7 +968,8 @@ def test_dispatch_gate_off_skips_step6_explicitly(tmp_path, monkeypatch):
 
     assert rc == 0
     assert step.report_calls == 0
-    assert sm.status("step6_remote_supervision") is StepStatus.COMPLETE
+    assert sm.status("step6_remote_supervision") is StepStatus.PENDING
+    assert sm.is_skipped_gate_off("step6_remote_supervision") is True
 
 
 # ---------------------------------------------------------------------------
@@ -2375,3 +2472,97 @@ def test_main_settles_colour_from_the_parsed_flag(tmp_path, monkeypatch):
     seen.clear()
     app.main(["--status"], state_path=tmp_path / "state.json")
     assert seen == [True]
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C, SIGTERM and prompts nobody can see
+# ---------------------------------------------------------------------------
+
+
+class _InterruptingStep(_DummyStep):
+    """A step whose run() is stopped part way through by `interrupt`."""
+
+    def __init__(self, interrupt):
+        super().__init__("step5_per_project_exes", "Per-project executables", 5)
+        self._interrupt = interrupt
+
+    def run(self, ctx):
+        self._interrupt()
+        return StepResult(status=StepStatus.COMPLETE)
+
+
+def _run_main_with_step(tmp_path, monkeypatch, step):
+    monkeypatch.setattr(app.privilege, "require_root", lambda: None)
+    _bypass_onboarding(monkeypatch, tmp_path)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+    state_path = tmp_path / "var" / "state.json"
+    rc = app.main(
+        [
+            "--non-interactive",
+            "--install-dir",
+            str(tmp_path / "install"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+        state_path=state_path,
+    )
+    return rc, StateMachine(path=state_path)
+
+
+def test_main_ctrl_c_exits_130_with_a_message_and_leaves_the_step_incomplete(
+    tmp_path, monkeypatch, capsys
+):
+    def _ctrl_c():
+        raise KeyboardInterrupt
+
+    step = _InterruptingStep(_ctrl_c)
+    rc, sm = _run_main_with_step(tmp_path, monkeypatch, step)
+
+    assert rc == 130
+    assert sm.status(step.id) is not StepStatus.COMPLETE
+    assert step.report_calls == 0
+    err = capsys.readouterr().err
+    assert "interrupted (Ctrl-C)" in err
+    assert "not marked complete" in err
+
+
+def test_main_sigterm_while_blocked_exits_promptly(tmp_path, monkeypatch, capsys):
+    """Live regression: SIGTERM did not stop a run waiting at a prompt.
+    A real SIGTERM, sent from another thread while the step is blocked,
+    must end the run promptly with 143 and the step not complete."""
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def _block_until_signalled():
+        threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGTERM)).start()
+        time.sleep(10)
+        raise AssertionError("SIGTERM did not interrupt the blocked step")
+
+    step = _InterruptingStep(_block_until_signalled)
+    started = time.monotonic()
+    rc, sm = _run_main_with_step(tmp_path, monkeypatch, step)
+
+    assert time.monotonic() - started < 5
+    assert rc == 128 + signal.SIGTERM
+    assert sm.status(step.id) is not StepStatus.COMPLETE
+    assert "terminated (signal 15)" in capsys.readouterr().err
+    # The install flow's handler does not outlive it.
+    assert signal.getsignal(signal.SIGTERM) == previous
+
+
+def test_dispatch_cleanup_failure_does_not_mask_the_interrupt(tmp_path, monkeypatch):
+    """Once `| tail` has died, taking the live region down can raise
+    BrokenPipeError; the Ctrl-C must still be what propagates."""
+    sm = StateMachine(path=tmp_path / "state.json")
+    ctx, cfg = _minimal_ctx(tmp_path)
+
+    def _ctrl_c():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app, "STEP_REGISTRY", [_InterruptingStep(_ctrl_c)])
+
+    def _broken_pipe():
+        raise BrokenPipeError
+
+    monkeypatch.setattr(ctx.progress, "end_step", _broken_pipe)
+    with pytest.raises(KeyboardInterrupt):
+        app._dispatch(sm, ctx, cfg)

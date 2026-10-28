@@ -392,3 +392,31 @@ def test_redact_url_matches_exact_reference_implementation():
     cases = ["", "https://host", "https://host?a=1", "https://host/p?x=1&y=2", None]
     for case in cases:
         assert webapp.redact_url(case) == reference(case)
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_capture_credentials_hidden_prompt_keeps_stored_values(monkeypatch, capsys):
+    monkeypatch.setattr(
+        webapp,
+        "load_credentials",
+        lambda *a, **kw: webapp.Credentials(api_key="k", endpoint="https://e"),
+    )
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    monkeypatch.setattr(webapp.getpass, "getpass", _no_prompt)
+
+    creds = webapp.capture_credentials(non_interactive=False)
+
+    assert (creds.api_key, creds.endpoint) == ("k", "https://e")
+    assert "not asking for web-app credentials" in capsys.readouterr().err

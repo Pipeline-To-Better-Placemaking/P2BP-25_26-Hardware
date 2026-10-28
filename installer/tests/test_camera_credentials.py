@@ -53,3 +53,25 @@ def test_load_rejects_incomplete_file(tmp_path):
     path.write_text("CAM_USER=admin\n", encoding="utf-8")
 
     assert camera_credentials.load_credentials(tmp_path / "install") is None
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_capture_fails_fast_when_the_prompt_is_hidden(monkeypatch, capsys):
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    monkeypatch.setattr(camera_credentials.getpass, "getpass", _no_prompt)
+    with pytest.raises(SystemExit):
+        camera_credentials.capture_credentials(False)
+    err = capsys.readouterr().err
+    assert "cannot be asked for" in err and "without a pipe" in err

@@ -394,3 +394,24 @@ def test_source_only_uses_redacted_placeholder_literal_near_log_calls():
     # appears in source at all.
     assert "NGC_API_KEY=<redacted>" in text
     assert _FAKE_KEY not in text
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_capture_key_fails_fast_when_the_prompt_is_hidden(monkeypatch, capsys):
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr(ngc.getpass, "getpass", _no_prompt)
+    with pytest.raises(SystemExit):
+        ngc.capture_key(non_interactive=False)
+    err = capsys.readouterr().err
+    assert "cannot be asked for" in err and "NGC_API_KEY" in err

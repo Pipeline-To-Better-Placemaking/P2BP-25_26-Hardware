@@ -115,11 +115,17 @@ class StepEntry:
 
     status: StepStatus
     finished_utc: str | None = None
+    # Set when the dispatch loop passed over this step because its opt-in
+    # gate was off. The step stays PENDING, so it runs on the first launch
+    # after the gate is turned on, and `all_complete()` does not wait on it.
+    skipped_gate_off: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"status": self.status.value}
         if self.finished_utc is not None:
             d["finished_utc"] = self.finished_utc
+        if self.skipped_gate_off:
+            d["skipped"] = "gate off"
         return d
 
     @staticmethod
@@ -127,6 +133,7 @@ class StepEntry:
         return StepEntry(
             status=StepStatus(d.get("status", StepStatus.PENDING.value)),
             finished_utc=d.get("finished_utc"),
+            skipped_gate_off=d.get("skipped") == "gate off",
         )
 
 
@@ -265,7 +272,33 @@ class StateMachine:
             state.steps[step_id] = StepEntry(status=status)
         else:
             entry.status = status
+            entry.skipped_gate_off = False
         self.save(state)
+
+    def mark_skipped_gate_off(self, step_id: str) -> None:
+        """Record that `step_id` was passed over because its gate is off.
+
+        The step is left (or put back) at `PENDING`, never `COMPLETE`: a
+        skip is not an install, and recording it as one made the step say
+        "already complete" forever once the gate was turned on. A step that
+        had genuinely completed before its gate was turned off goes back to
+        `PENDING` too, so turning the gate on again re-runs it once, which
+        every step tolerates because each one is idempotent.
+        """
+        state = self.load()
+        entry = state.steps.get(step_id)
+        if entry is None:
+            entry = state.steps[step_id] = StepEntry(status=StepStatus.PENDING)
+        if entry.status is StepStatus.PENDING and entry.skipped_gate_off:
+            return
+        entry.status = StepStatus.PENDING
+        entry.finished_utc = None
+        entry.skipped_gate_off = True
+        self.save(state)
+
+    def is_skipped_gate_off(self, step_id: str) -> bool:
+        entry = self.load().steps.get(step_id)
+        return entry is not None and entry.skipped_gate_off
 
     def mark_complete(self, step_id: str) -> None:
         """Set `step_id` to `COMPLETE` and stamp `finished_utc` (doc 00 §6.3)."""
@@ -279,6 +312,7 @@ class StateMachine:
         else:
             entry.status = StepStatus.COMPLETE
             entry.finished_utc = finished
+            entry.skipped_gate_off = False
         self.save(state)
 
     def set_reboot_pending(self, step_id: str, boot_id: str) -> None:
@@ -297,13 +331,21 @@ class StateMachine:
         self.save(state)
 
     def all_complete(self) -> bool:
-        """True once every known step (`STEP_IDS`) is `COMPLETE`.
+        """True once every known step (`STEP_IDS`) is `COMPLETE` or was
+        skipped because its opt-in gate is off.
 
-        Used to print the final success banner (doc 00 §6.3).
+        Used to print the final success banner (doc 00 §6.3). A gated-off
+        step counts as done here only; its own status stays `PENDING` so it
+        runs once the gate is turned on.
         """
         state = self.load()
         for step_id in STEP_IDS:
             entry = state.steps.get(step_id)
-            if entry is None or entry.status is not StepStatus.COMPLETE:
+            if entry is None:
                 return False
+            if entry.status is StepStatus.COMPLETE:
+                continue
+            if entry.status is StepStatus.PENDING and entry.skipped_gate_off:
+                continue
+            return False
         return True

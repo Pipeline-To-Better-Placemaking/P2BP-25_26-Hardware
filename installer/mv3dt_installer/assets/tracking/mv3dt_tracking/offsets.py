@@ -339,6 +339,7 @@ def save_offsets(path: Path, offsets: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name, suffix=".tmp", dir=path.parent)
     try:
+        os.fchmod(fd, 0o644)  # mkstemp creates 0600; the file is meant to be world-readable
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(offsets, f, indent=2, sort_keys=True)
             f.write("\n")
