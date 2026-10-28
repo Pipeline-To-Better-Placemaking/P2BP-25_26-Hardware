@@ -252,3 +252,11 @@ def test_clean_report_needs_a_window(tmp_path):
         main(["clean-report", "--from", "2025-10-20T00:00"], env=_env(tmp_path))
     with pytest.raises(SystemExit):
         main(["clean-report", "--from", "yesterday", "--to", "today"], env=_env(tmp_path))
+
+
+def test_hours_and_from_together_is_a_usage_error(tmp_path, capsys):
+    for cmd in ("zones-suggest", "learn-offsets"):
+        with pytest.raises(SystemExit) as exc:
+            main([cmd, "--hours", "2", "--from", str(T0)], env=_cleaning_env(tmp_path))
+        assert exc.value.code == 2
+        assert "not allowed with argument" in capsys.readouterr().err

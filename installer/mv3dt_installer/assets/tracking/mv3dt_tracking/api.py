@@ -33,7 +33,7 @@ from starlette.concurrency import run_in_threadpool
 from . import __version__, calib
 from .auth import Claims, ticket_dependency
 from .cleaning import CleaningConfig, CleaningFile, resolve_room
-from .fuse import FusedSample, Fuser, fuse, offsets_summary, summarize
+from .fuse import FusedSample, Fuser, offsets_summary, summarize
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
 from .offsets import read_offsets
 from .settings import Settings
@@ -137,15 +137,23 @@ class Cleaning:
         config = self.config_file.get()
         return config, self.offsets_file.get(), resolve_room(config, self.calib_dir)
 
+    @staticmethod
+    def _public(error: str | None, path: Path | None) -> str | None:
+        """An error for web clients: the file's name instead of its absolute
+        path (the full path stays in the service log)."""
+        if error is None or path is None:
+            return error
+        return error.replace(str(path), path.name)
+
     def summary_extras(self, config: CleaningConfig, offsets: dict | None) -> dict:
         """Fields every fused summary adds to the engine's own."""
         return {
-            "config_error": self.config_file.error,
+            "config_error": self._public(self.config_file.error, self.config_file.path),
             "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys],
             "offsets_extra": {
                 "enabled": config.offsets_apply,
                 "learned": offsets is not None and bool(offsets.get("sensors")),
-                "file_error": self.offsets_file.error,
+                "file_error": self._public(self.offsets_file.error, self.offsets_file.path),
             },
         }
 
@@ -201,10 +209,12 @@ def fused_range(store: TrackStore, cleaning: Cleaning, from_ms: int, to_ms: int,
     first appearance, downsampled when `hz` is coarser than the fusion
     bucket, and the summary. `hz` in the result is the output rate."""
     config, offsets, room = cleaning.current()
-    rows = store.query_range(from_ms, to_ms)
-    result = fuse(_positioned(rows), config, offsets, room)
-    summary = finish_summary(result.summary, cleaning.summary_extras(config, offsets))
-    people = result.people
+    # Streamed like the export, so memory follows a 10-minute chunk rather
+    # than the whole window; the result equals one `fuse` call.
+    fuser = Fuser(config, offsets, room)
+    samples = list(fused_samples(store, fuser, from_ms, to_ms))
+    people, _ = summarize(samples)
+    summary = finish_summary(stream_summary(samples, fuser, offsets), cleaning.summary_extras(config, offsets))
     _renumber(people, summary["persons"])
     width = bucket_ms(hz)
     if width > config.bucket_ms:
@@ -217,10 +227,15 @@ def fused_range(store: TrackStore, cleaning: Cleaning, from_ms: int, to_ms: int,
 def fused_samples(store: TrackStore, fuser: Fuser, from_ms: int, to_ms: int) -> Iterator[FusedSample]:
     """Stream [from_ms, to_ms] through one Fuser in epoch-aligned 10-minute
     windows, yielding samples as their people become final, then the rest.
-    Gives the same people and ids as one `fuse` call over the window."""
+    Each finalized group comes out in per-person blocks, each time-ordered
+    (sorted by person id, then ts). Gives the same people and ids as one
+    `fuse` call over the window."""
+    def block(samples: list[FusedSample]) -> list[FusedSample]:
+        return sorted(samples, key=lambda s: (s.person_id, s.ts_ms))
+
     for start, stop in _windows(from_ms, to_ms, FUSE_CHUNK_MS):
-        yield from fuser.feed(_positioned(store.query_range(start, stop)))
-    yield from fuser.finish()
+        yield from block(fuser.feed(_positioned(store.query_range(start, stop))))
+    yield from block(fuser.finish())
 
 
 def stream_summary(samples: list[FusedSample], fuser: Fuser, offsets: dict | None) -> dict:
@@ -240,8 +255,8 @@ def export_records(
 
     Raw: every stored row, in ts order, read a minute at a time. Fused: one
     record per person per fusion bucket (`ts_ms, person_id, x, y, cameras`,
-    cameras joined with ";"), in blocks as people become final; ids match
-    a fused `range` over the same window.
+    cameras joined with ";"), in per-person blocks, each time-ordered, as
+    people become final; ids match a fused `range` over the same window.
     """
     if fused:
         config, offsets, room = (cleaning.current() if cleaning is not None
@@ -404,11 +419,15 @@ def create_app(
         _check_window(from_ms, to_ms, RANGE_MAX_MS)
         if not 0 < hz <= MAX_HZ:
             raise HTTPException(400, f"hz must be > 0 and <= {MAX_HZ:g}")
-        if hz * (to_ms - from_ms) / 1000 > RANGE_MAX_SAMPLES:
+        # Fused output never exceeds the fusion bucket rate (5 Hz at the
+        # default 200 ms), so the cap counts what is actually served.
+        served_hz = hz if mode == "raw" else min(hz, 1000.0 / cleaning.config_file.get().bucket_ms)
+        if served_hz * (to_ms - from_ms) / 1000 > RANGE_MAX_SAMPLES:
             raise HTTPException(
                 400,
                 f"hz x window seconds must not exceed {RANGE_MAX_SAMPLES}"
-                " (6 h at 5 Hz, 72 min at 25 Hz); lower hz or narrow the window",
+                " (6 h at 5 Hz, 72 min at 25 Hz; fused output counts at most 5 Hz);"
+                " lower hz or narrow the window",
             )
         admitted = guard("range", session, claims)
         try:
