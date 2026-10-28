@@ -341,13 +341,17 @@ Every stage counts what it removed. The counts are returned in every fused
 
 ### 5.2 Streaming
 
-A person is finalized and emitted once the gap since its last kept
-tracklet exceeds `stitch_gap_s`, or at the end of the requested window.
-Chunked processing produces exactly the one-shot result (REQUIRED).
-Memory is bounded by the people open in the last `stitch_gap_s`, not by
-the window length.
-Because a person can only be finalized after that hold-back, `export` rows
-are emitted in per-person blocks, each block time-ordered.
+The streaming `Fuser` finalizes people at a **quiet period**, not one
+person at a time: once no tracklet is open within `stitch_gap_s` of the
+latest kept tracklet, every person accumulated so far is finalized and
+emitted as one group. The end of the requested window also closes the
+current group. Chunked processing produces exactly the one-shot result
+(REQUIRED).
+
+Memory is bounded by the busiest continuous stretch, the longest run of
+data without such a quiet period, not by the window length. The fused
+`export` writes each finalized group as per-person blocks, each block
+time-ordered.
 
 ---
 
@@ -474,7 +478,7 @@ An invalid `offsets.json` means no correction: `applied` is `false` and
 
 | `mode` | Rows | Columns |
 |---|---|---|
-| `fused` | one per person per bucket, streamed through `Fuser` in chunks, in per-person blocks as people become final ([section 5.2](#52-streaming)) | `ts_ms, person_id, x, y, cameras` |
+| `fused` | one per person per bucket, streamed through `Fuser` in chunks, each finalized group written as per-person blocks ([section 5.2](#52-streaming)) | `ts_ms, person_id, x, y, cameras` |
 | `stitched` | alias of `fused` for one release | as `fused` |
 | `raw` | unchanged | unchanged |
 
