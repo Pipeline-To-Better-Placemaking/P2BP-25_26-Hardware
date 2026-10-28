@@ -119,7 +119,6 @@ __all__ = [
     "render_validation_banner",
     "amc_project_dir",
     "amc_project_present",
-    "amc_project_path",
     "amc_projects_root",
     "reconcile_registry",
     "remove_project_artifacts",
@@ -1240,13 +1239,10 @@ def amc_project_dir(ctx: "Context", project_name: str) -> pathlib.Path:
 class _ApiListing:
     """What `GET /v1/list_projects` said. `names` is `None` when the reply
     carries ids only, so "no names listed" is not mistaken for "no project
-    by that name". `dirs` maps a project name and its id to the reply's
-    `project_dir` (AMC 3.3.0: `projects/project_<id>`, relative to the AMC
-    root)."""
+    by that name"."""
 
     names: Optional[set[str]]
     ids: set[str]
-    dirs: dict[str, str]
 
 
 def _api_project_listing(ctx: "Context") -> Optional[_ApiListing]:
@@ -1279,37 +1275,17 @@ def _api_project_listing(ctx: "Context") -> Optional[_ApiListing]:
 
     names: set[str] = set()
     ids: set[str] = set()
-    dirs: dict[str, str] = {}
     for item in items:
         if isinstance(item, str):
             ids.add(item)
         elif isinstance(item, dict):
             ident = item.get("project_id") or item.get("id")
             name = item.get("project_name") or item.get("name")
-            project_dir = item.get("project_dir")
             if ident:
                 ids.add(str(ident))
             if name:
                 names.add(str(name))
-            if isinstance(project_dir, str) and project_dir:
-                for key in (ident, name):
-                    if key:
-                        dirs.setdefault(str(key), project_dir)
-    return _ApiListing(names=names or None, ids=ids, dirs=dirs)
-
-
-def _host_project_dir(ctx: "Context", project_dir: str) -> pathlib.Path:
-    """Map the API's `project_dir` to the host. An absolute value is used
-    as given; a relative one is relative to the AMC root, and its leading
-    `projects/` is the mount of the compose `PROJECT_DIR`, so it resolves
-    under `amc_projects_root`."""
-    path = pathlib.Path(project_dir)
-    if path.is_absolute():
-        return path
-    parts = path.parts
-    if parts and parts[0] == "projects":
-        return amc_projects_root(ctx).joinpath(*parts[1:])
-    return step3_mod.resolve_config(ctx).amc_root / path
+    return _ApiListing(names=names or None, ids=ids)
 
 
 def _configured_project_id(ctx: "Context", project_name: str) -> str:
@@ -1328,23 +1304,6 @@ def _disk_candidates(ctx: "Context", project_name: str) -> list[pathlib.Path]:
         root = amc_projects_root(ctx)
         candidates += [root / configured_id, root / f"project_{configured_id}"]
     return candidates
-
-
-def amc_project_path(ctx: "Context", project_name: str) -> Optional[pathlib.Path]:
-    """The host directory holding `project_name`'s AMC files, or `None`.
-
-    The API's `project_dir` is preferred when the service is up and lists
-    the project; otherwise the first existing on-disk candidate is used.
-    """
-    listing = _api_project_listing(ctx)
-    if listing is not None:
-        for key in (project_name, _configured_project_id(ctx, project_name)):
-            if key and key in listing.dirs:
-                return _host_project_dir(ctx, listing.dirs[key])
-    for path in _disk_candidates(ctx, project_name):
-        if path.exists():
-            return path
-    return None
 
 
 def amc_project_present(ctx: "Context", project_name: str) -> bool:
