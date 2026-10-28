@@ -35,7 +35,7 @@ from .auth import Claims, ticket_dependency
 from .cleaning import CleaningConfig, CleaningFile, resolve_room
 from .fuse import FusedSample, Fuser, fuse, offsets_summary, summarize
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
-from .offsets import load_offsets
+from .offsets import read_offsets
 from .settings import Settings
 from .stitch import raw_series
 from .store import Detection, TrackStore, bucket_ms
@@ -98,8 +98,9 @@ def _windows(from_ms: int, to_ms: int, width: int) -> Iterator[tuple[int, int]]:
 
 
 class OffsetsFile:
-    """offsets.json, re-read when its mtime changes. A missing file gives
-    None; an invalid one gives None with the reason in `error`."""
+    """offsets.json through `read_offsets`, re-read when its mtime changes.
+    A missing file gives None; an unreadable or invalid one gives None with
+    the reason in `error` (no correction, never a failed request)."""
 
     def __init__(self, path: Path | None) -> None:
         self.path = None if path is None else Path(path)
@@ -117,12 +118,9 @@ class OffsetsFile:
                 pass
         if stamp != self._stamp:
             self._stamp = stamp
-            try:
-                self._offsets = load_offsets(self.path)
-                self.error = None
-            except (OSError, ValueError) as exc:  # JSONDecodeError is a ValueError
-                self._offsets, self.error = None, str(exc)
-                log.error("offsets: %s; not applying a correction", exc)
+            self._offsets, self.error = read_offsets(self.path)
+            if self.error:
+                log.error("offsets: %s; not applying a correction", self.error)
         return self._offsets
 
 
@@ -147,14 +145,21 @@ class Cleaning:
             "offsets_extra": {
                 "enabled": config.offsets_apply,
                 "learned": offsets is not None and bool(offsets.get("sensors")),
-                "error": self.offsets_file.error,
+                "file_error": self.offsets_file.error,
             },
         }
 
 
 def finish_summary(summary: dict, extras: dict) -> dict:
+    """Add the request's file state to an engine summary. `offsets.error` is
+    the offsets.json load error when there is one, else the Fuser's own
+    validation error, so there is one error field from either source."""
     extras = dict(extras)
-    summary["offsets"].update(extras.pop("offsets_extra"))
+    extra = dict(extras.pop("offsets_extra"))
+    file_error = extra.pop("file_error")
+    offsets = summary["offsets"]
+    offsets.update(extra)
+    offsets["error"] = file_error or offsets.get("error")
     summary.update(extras)
     return summary
 
@@ -223,7 +228,7 @@ def stream_summary(samples: list[FusedSample], fuser: Fuser, offsets: dict | Non
     builds it for a one-shot call."""
     _, summary = summarize(samples)
     summary["dropped"] = {**fuser.dropped, "zones": dict(fuser.dropped["zones"])}
-    summary["offsets"] = offsets_summary(offsets, fuser.offsets_applied)
+    summary["offsets"] = offsets_summary(offsets, fuser.offsets_applied, fuser.offsets_error)
     summary["preset"] = fuser.config.preset
     return summary
 

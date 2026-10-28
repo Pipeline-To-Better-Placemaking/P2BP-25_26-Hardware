@@ -793,6 +793,13 @@ def test_offsets_applied_and_toggled(fclient, files):
     write_json(offsets, "[]")
     bad = frng(fclient, sid)["summary"]["offsets"]
     assert bad["applied"] is False and bad["learned"] is False and bad["error"]
+    broken = json.loads(json.dumps(OFFSETS))
+    broken["sensors"]["camera1"]["scale"] = 0
+    write_json(offsets, broken)
+    bad = frng(fclient, sid)
+    assert bad["summary"]["offsets"]["applied"] is False
+    assert "camera1.scale" in bad["summary"]["offsets"]["error"]
+    assert bad["people"] == before["people"]
 
 
 def test_export_fused_rows(fclient):
