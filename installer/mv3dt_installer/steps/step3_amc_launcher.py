@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import contextlib
 import filecmp
 import json
 import os
@@ -67,6 +68,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1205,6 +1207,52 @@ def execute_hold(
 # ---------------------------------------------------------------------------
 
 
+def replace_executable(src: pathlib.Path, dest: pathlib.Path) -> None:
+    """Install `src` at `dest` by writing a temp file beside `dest` and
+    renaming it over the target.
+
+    Writing into `dest` directly fails with ETXTBSY ("Text file busy")
+    while any process is executing it, and `mv3dt-agent.service` and the
+    pipeline units run this very binary. A rename only swaps the directory
+    entry: running processes keep the old inode, new ones get the new
+    file. The replacement keeps the old file's mode and owner (0755 and the
+    caller's owner for a first install). On any failure the old binary is
+    left untouched and the temp file is removed.
+    """
+    dest = pathlib.Path(dest)
+    mode = 0o755
+    owner: Optional[tuple[int, int]] = None
+    try:
+        st = dest.stat()
+    except FileNotFoundError:
+        pass
+    else:
+        mode = stat.S_IMODE(st.st_mode) | 0o111
+        owner = (st.st_uid, st.st_gid)
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.", dir=str(dest.parent))
+    tmp = pathlib.Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as source:
+            shutil.copyfileobj(source, out)
+            out.flush()
+            os.fsync(out.fileno())
+        shutil.copystat(src, tmp)
+        os.chmod(tmp, mode)
+        if owner is not None:
+            try:
+                os.chown(tmp, *owner)
+            except PermissionError:
+                # Only root can give a file away; a non-root caller keeps
+                # its own ownership, the same as the copy it replaces.
+                pass
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def ensure_installer_binary(ctx: "Context") -> pathlib.Path:
     """`<install_dir>/bin/mv3dt-installer` (section 6.1 step 1): a stable
     copy of the running executable, so the `amc` wrapper survives the
@@ -1226,8 +1274,7 @@ def ensure_installer_binary(ctx: "Context") -> pathlib.Path:
         if src.is_file() and (
             not dest.exists() or not filecmp.cmp(src, dest, shallow=False)
         ):
-            shutil.copy2(src, dest)
-            dest.chmod(0o755)
+            replace_executable(src, dest)
             ctx.log.info(f"updated {dest} from {src}")
     elif not dest.exists():
         ctx.log.warn(

@@ -842,6 +842,91 @@ def test_ensure_installer_binary_replaces_a_same_size_stale_copy(tmp_path, monke
     assert dest.read_bytes() == b"release-b"
 
 
+def _busy_target_open(monkeypatch, busy: pathlib.Path):
+    """Make opening `busy` for writing fail the way Linux does while a
+    process executes it (ETXTBSY), as `shutil.copy2` onto it did live."""
+    import builtins
+    import errno
+
+    real_open = builtins.open
+
+    def _open(file, mode="r", *args, **kwargs):
+        if pathlib.Path(file) == busy and any(c in mode for c in "wax+"):
+            raise OSError(errno.ETXTBSY, "Text file busy", str(file))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _open)
+
+
+def test_ensure_installer_binary_replaces_a_running_binary_by_rename(tmp_path, monkeypatch):
+    """The installed copy is executed by mv3dt-agent.service, so writing
+    into it fails with ETXTBSY; the update must land by rename instead."""
+    fake_exe = tmp_path / "fake-mv3dt-installer"
+    fake_exe.write_bytes(b"release-new")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(fake_exe))
+    ctx = FakeContext(tmp_path)
+    dest = ctx.install_dir / "bin" / "mv3dt-installer"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(b"release-old")
+    dest.chmod(0o750)
+    old_inode = dest.stat().st_ino
+    _busy_target_open(monkeypatch, dest)
+
+    step3.ensure_installer_binary(ctx)
+
+    assert dest.read_bytes() == b"release-new"
+    assert dest.stat().st_ino != old_inode
+    assert (dest.stat().st_mode & 0o777) == 0o750 | 0o111
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["mv3dt-installer"]
+
+
+def test_replace_executable_preserves_owner(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    dest = tmp_path / "bin" / "mv3dt-installer"
+    dest.parent.mkdir()
+    dest.write_bytes(b"old")
+    st = dest.stat()
+    chowned = []
+    monkeypatch.setattr(step3.os, "chown", lambda path, uid, gid: chowned.append((uid, gid)))
+
+    step3.replace_executable(src, dest)
+
+    assert chowned == [(st.st_uid, st.st_gid)]
+    assert dest.read_bytes() == b"new"
+
+
+def test_replace_executable_first_install_is_0755(tmp_path):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    src.chmod(0o600)
+    dest = tmp_path / "mv3dt-installer"
+
+    step3.replace_executable(src, dest)
+
+    assert (dest.stat().st_mode & 0o777) == 0o755
+
+
+def test_replace_executable_failure_keeps_old_binary_and_removes_temp(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.write_bytes(b"new")
+    dest = tmp_path / "bin" / "mv3dt-installer"
+    dest.parent.mkdir()
+    dest.write_bytes(b"old")
+
+    def _fail(_a, _b):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(step3.os, "replace", _fail)
+
+    with pytest.raises(OSError, match="rename failed"):
+        step3.replace_executable(src, dest)
+
+    assert dest.read_bytes() == b"old"
+    assert sorted(p.name for p in dest.parent.iterdir()) == ["mv3dt-installer"]
+
+
 # ---------------------------------------------------------------------------
 # preflight() -- section 7.1
 # ---------------------------------------------------------------------------
