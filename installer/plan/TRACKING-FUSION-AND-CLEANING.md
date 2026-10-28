@@ -341,12 +341,13 @@ Every stage counts what it removed. The counts are returned in every fused
 
 ### 5.2 Streaming
 
-The streaming `Fuser` finalizes people at a **quiet period**, not one
-person at a time: once no tracklet is open within `stitch_gap_s` of the
-latest kept tracklet, every person accumulated so far is finalized and
-emitted as one group. The end of the requested window also closes the
-current group. Chunked processing produces exactly the one-shot result
-(REQUIRED).
+In the streaming `Fuser`, pending tracklets are split into groups
+separated by more than `stitch_gap_s`; a group is finalized and emitted,
+oldest first, once no open or future tracklet can start within
+`stitch_gap_s` of its last bucket. An older group can therefore be emitted
+while a later one is still open. The end of the requested window
+finalizes every remaining group. Chunked processing produces exactly the
+one-shot result (REQUIRED).
 
 Memory is bounded by the busiest continuous stretch, the longest run of
 data without such a quiet period, not by the window length. The fused
