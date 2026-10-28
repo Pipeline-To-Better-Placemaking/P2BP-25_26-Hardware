@@ -153,13 +153,14 @@ to paste.
 | Owner | the invoking user, mode `644` |
 | Seeded | once by Step 8; never overwritten ([section 10](#10-step-8-changes)) |
 | Reload | re-read when its mtime changes; no restart |
-| Invalid file | keep the last valid config, log the error, report it in `summary.config_error` |
+| Invalid file | keep the last valid config, or strict defaults when none loaded yet; log the error and surface it as `summary.config_error` |
 | Missing file | strict defaults |
 
 Resolution order for every key: the value present in the file, else the
 value of the selected `preset`, else the strict default. Keys absent from
 the file follow the preset, so changing `preset` changes every key the
-operator has not pinned. An unknown key is logged and ignored.
+operator has not pinned. An unknown key is ignored and listed in the load
+warnings.
 
 ### 4.2 Keys and strict defaults
 
@@ -168,6 +169,7 @@ operator has not pinned. An unknown key is logged and ignored.
 | `version` | `1` | | | schema version |
 | `preset` | `"strict"` | | | `strict` \| `relaxed` |
 | `room_margin_m` | `0.3` | m | 1 | margin around the room rectangle |
+| `room` | `null` | m | 1 | fallback `{"x": [min, max], "y": [min, max]}` used only when calibration is unavailable |
 | `zones` | `[]` | | 1 | ignore zones ([section 4.4](#44-zone-entries)) |
 | `vmax_mps` | `3.0` | m/s | 2, 7 | max speed between kept samples |
 | `speed_slack_m` | `0.3` | m | 2, 7 | distance allowed on top of `vmax_mps * dt` |
@@ -175,6 +177,7 @@ operator has not pinned. An unknown key is logged and ignored.
 | `bucket_ms` | `200` | ms | 3, 6 | time bucket for tracklets and fusion |
 | `min_tracklet_s` | `1.0` | s | 3 | drop shorter tracklets |
 | `min_tracklet_samples` | `5` | buckets | 3 | drop tracklets with fewer buckets |
+| `tracklet_gap_s` | `5.0` | s | 3 | a `(track, sensor)` silent this long starts a new tracklet |
 | `offsets_apply` | `true` | | 4 | apply `offsets.json` when present |
 | `shared_id_hint` | `true` | | 5a | join same-id tracklets across cameras |
 | `shared_id_gate_m` | `1.5` | m | 5a | max median distance for a shared-id join |
@@ -185,22 +188,23 @@ operator has not pinned. An unknown key is logged and ignored.
 | `stitch_d0_m` | `0.8` | m | 5c | stitch distance at zero gap |
 | `stitch_dv_mps` | `0.1` | m/s | 5c | stitch distance growth per second of gap |
 | `stitch_dmax_m` | `3.5` | m | 5c | stitch distance cap |
-| `stitch_exclusive` | `true` | | 5c | never stitch onto a person tracked elsewhere during the candidate's lifetime |
+| `stitch_exclusive` | `true` | | 5c | never stitch when the candidate's person and the target person overlap in time |
 | `smooth_window` | `5` | buckets | 7 | rolling median window |
 | `min_person_s` | `3.0` | s | 8 | drop shorter people |
 
-`shared_id_gate_m` is the one value not taken from the prototype, which has
-no shared-id pass. 1.5 m sits above the measured
+`tracklet_gap_s` and `shared_id_gate_m` are the thresholds not taken from
+the prototype: the prototype never split a tracklet on silence and has no
+shared-id pass. For `shared_id_gate_m`, 1.5 m sits above the measured
 seated same-id distance (about 1.2 m) so the hint keeps today's behavior,
 and below the room's smallest plausible separation between two people who
 were merged by an id mistake.
 
-The room rectangle is not a key. It comes from the calibration: the floor
-plan size from `calib.png_size` on `map.png` and the inverse of
-`calib.read_t_gt2px` from `transforms.yml`
+The room rectangle comes from the calibration: the floor plan size from
+`calib.png_size` on `map.png` and the inverse of `calib.read_t_gt2px` from
+`transforms.yml`
 ([`STEP-8` section 2.1](STEP-8-TRACKING-HISTORY.md#21-inputs-via-context)).
-Without calibration output, stage 1 skips the bounds check and counts
-nothing.
+Without calibration output the configured `room` is used; when that is also
+`null`, stage 1 skips the bounds check and counts nothing.
 
 ### 4.3 Relaxed preset (flagged decision)
 
@@ -278,11 +282,14 @@ stream a 24 h window without loading it. The stages run in this order
    distance from the last kept sample of that key is at most
    `vmax_mps * max(dt, min_dt_s) + speed_slack_m`.
 3. **Tracklets**: group surviving samples by `(track_id, sensor)` into
-   `bucket_ms` buckets (median position per bucket); drop tracklets shorter
-   than `min_tracklet_s` or with fewer than `min_tracklet_samples` buckets.
+   `bucket_ms` buckets (median position per bucket), starting a new
+   tracklet after `tracklet_gap_s` of silence on that key; drop tracklets
+   shorter than `min_tracklet_s` or with fewer than `min_tracklet_samples`
+   buckets.
 4. **Offset correction**: when `offsets_apply` is true and `offsets.json`
    is valid, apply each sensor's learned correction to its tracklets
-   ([section 6](#6-offset-correction)).
+   ([section 6](#6-offset-correction)), then re-check the room bounds so a
+   corrected position cannot leave the room.
 5. **Association into people**, a union-find over tracklets, in three
    passes:
    1. **Shared id**: when `shared_id_hint` is true, join tracklets with
@@ -294,8 +301,12 @@ stream a 24 h window without loading it. The stages run in this order
    3. **Sequential stitch**: a tracklet starting after another person's last
       bucket, within `stitch_gap_s`, joins the nearest such person whose
       end lies within `min(stitch_d0_m + stitch_dv_mps * gap, stitch_dmax_m)`.
-      With `stitch_exclusive`, a person with any tracklet overlapping the
-      candidate's lifetime is not eligible.
+      With `stitch_exclusive`, the conflict rule checks the whole person on
+      both sides: the stitch is refused when any tracklet of the
+      candidate's person overlaps in time any tracklet of the target
+      person. A literal port of the prototype, which checked only the
+      candidate tracklet, merged concurrent people already joined through
+      the shared-id pass.
 6. **Camera fusion**: per person per bucket, combine the sensors' positions
    as an inverse-variance weighted mean, using each sensor's `sigma_m` from
    `offsets.json` when applied, else equal weights. Record the number of
@@ -329,8 +340,9 @@ Every stage counts what it removed. The counts are returned in every fused
 
 ### 5.2 Streaming
 
-A person is finalized and emitted once no tracklet has extended it for
-`stitch_gap_s`, or at the end of the requested window. Memory is bounded by
+A person is finalized and emitted once the gap since its last kept
+tracklet exceeds `stitch_gap_s`, or at the end of the requested window.
+Chunked processing produces exactly the one-shot result (REQUIRED). Memory is bounded by
 the people open in the last `stitch_gap_s`, not by the window length.
 Because a person can only be finalized after that hold-back, `export` rows
 are emitted in per-person blocks, each block time-ordered.
@@ -347,7 +359,7 @@ same-id pairs**: samples of one `track_id` on two sensors in the same
 [section 5](#5-fusion-stages).
 
 1. **Collect pairs** over the requested window (default the last 24 h).
-   Discard pairs farther apart than `stitch_dmax_m`.
+   Discard pairs farther apart than `shared_id_gate_m` (1.5 m strict).
 2. **Fit**: solve per-sensor translations with a zero-sum constraint by
    least squares, so with two sensors each moves by half of the mean
    difference, toward the other. With `--model similarity`, also fit a small
@@ -402,7 +414,7 @@ and reports connected groups of cells that meet **all** of:
 |---|---|
 | Single camera | at least 95% of the group's samples come from one sensor |
 | Low motion | median per-tracklet speed at most 0.1 m/s |
-| Long occupancy | occupied in at least 30% of the window's occupied seconds |
+| Long occupancy | occupied in at least 30% of the window's occupied seconds, or at least 10 minutes absolute |
 | Id churn | at least 10 distinct tracker ids |
 
 Each suggestion prints its evidence (sensor share, occupancy, id count) and
