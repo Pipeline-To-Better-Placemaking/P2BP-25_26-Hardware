@@ -159,8 +159,8 @@ to paste.
 Resolution order for every key: the value present in the file, else the
 value of the selected `preset`, else the strict default. Keys absent from
 the file follow the preset, so changing `preset` changes every key the
-operator has not pinned. An unknown key is ignored and listed in the load
-warnings.
+operator has not pinned. An unknown key is ignored, logged, and listed in
+`summary.config_warnings` ([section 8.1](#81-range)).
 
 ### 4.2 Keys and strict defaults
 
@@ -328,7 +328,7 @@ Every stage counts what it removed. The counts are returned in every fused
 
 | Counter | Stage | Counts |
 |---|---|---|
-| `out_of_bounds` | 1 | samples |
+| `out_of_bounds` | 1, 4 | samples; includes the post-correction bounds re-check of stage 4 |
 | `zone` | 1 | samples, also broken down per zone `name` in `zones` |
 | `speed` | 2 | samples |
 | `short_tracklet` | 3 | tracklets (and their samples in `short_tracklet_samples`) |
@@ -342,8 +342,9 @@ Every stage counts what it removed. The counts are returned in every fused
 
 A person is finalized and emitted once the gap since its last kept
 tracklet exceeds `stitch_gap_s`, or at the end of the requested window.
-Chunked processing produces exactly the one-shot result (REQUIRED). Memory is bounded by
-the people open in the last `stitch_gap_s`, not by the window length.
+Chunked processing produces exactly the one-shot result (REQUIRED).
+Memory is bounded by the people open in the last `stitch_gap_s`, not by
+the window length.
 Because a person can only be finalized after that hold-back, `export` rows
 are emitted in per-person blocks, each block time-ordered.
 
@@ -454,6 +455,7 @@ Fusion always runs at `bucket_ms`; the response is downsampled to `hz` when
 | `offsets` | object | `applied`, `needed`, `gain_m`, `learned_at_ms`; `applied` is `false` when no valid file exists |
 | `preset` | string | the active preset |
 | `config_error` | string or null | the last `cleaning.json` load error |
+| `config_warnings` | array of strings | non-fatal load warnings, e.g. `"ignored unknown key foo"` |
 
 ### 8.2 `export`
 
