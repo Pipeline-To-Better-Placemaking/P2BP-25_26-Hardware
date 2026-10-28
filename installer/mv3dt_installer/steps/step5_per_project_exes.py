@@ -118,6 +118,7 @@ __all__ = [
     "render_validation_banner",
     "amc_project_dir",
     "amc_project_present",
+    "amc_project_path",
     "amc_projects_root",
     "reconcile_registry",
     "remove_project_artifacts",
@@ -1234,16 +1235,22 @@ def amc_project_dir(ctx: "Context", project_name: str) -> pathlib.Path:
     return amc_projects_root(ctx) / project_name
 
 
-def _api_project_listing(
-    ctx: "Context",
-) -> Optional[tuple[Optional[set[str]], set[str]]]:
-    """Ask the running AMC service which projects it has.
+@dataclass(frozen=True)
+class _ApiListing:
+    """What `GET /v1/list_projects` said. `names` is `None` when the reply
+    carries ids only, so "no names listed" is not mistaken for "no project
+    by that name". `dirs` maps a project name and its id to the reply's
+    `project_dir` (AMC 3.3.0: `projects/project_<id>`, relative to the AMC
+    root)."""
 
-    Returns `(names, ids)`, or `None` when the service is not answering or
-    its reply cannot be read. `names` is `None` when the reply carries ids
-    only, so the caller does not mistake "no names listed" for "no project
-    by that name".
-    """
+    names: Optional[set[str]]
+    ids: set[str]
+    dirs: dict[str, str]
+
+
+def _api_project_listing(ctx: "Context") -> Optional[_ApiListing]:
+    """Ask the running AMC service which projects it has, or `None` when
+    the service is not answering or its reply cannot be read."""
     cfg = step3_mod.resolve_config(ctx)
     result = ctx.run_root(
         "curl", "-fsS", "--max-time", "5",
@@ -1271,46 +1278,92 @@ def _api_project_listing(
 
     names: set[str] = set()
     ids: set[str] = set()
+    dirs: dict[str, str] = {}
     for item in items:
         if isinstance(item, str):
             ids.add(item)
         elif isinstance(item, dict):
             ident = item.get("project_id") or item.get("id")
             name = item.get("project_name") or item.get("name")
+            project_dir = item.get("project_dir")
             if ident:
                 ids.add(str(ident))
             if name:
                 names.add(str(name))
-    return (names if names else None), ids
+            if isinstance(project_dir, str) and project_dir:
+                for key in (ident, name):
+                    if key:
+                        dirs.setdefault(str(key), project_dir)
+    return _ApiListing(names=names or None, ids=ids, dirs=dirs)
+
+
+def _host_project_dir(ctx: "Context", project_dir: str) -> pathlib.Path:
+    """Map the API's `project_dir` to the host. An absolute value is used
+    as given; a relative one is relative to the AMC root, and its leading
+    `projects/` is the mount of the compose `PROJECT_DIR`, so it resolves
+    under `amc_projects_root`."""
+    path = pathlib.Path(project_dir)
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if parts and parts[0] == "projects":
+        return amc_projects_root(ctx).joinpath(*parts[1:])
+    return step3_mod.resolve_config(ctx).amc_root / path
+
+
+def _configured_project_id(ctx: "Context", project_name: str) -> str:
+    if project_name != ctx.conf.get(CONF_PROJECT_NAME_KEY):
+        return ""
+    return (ctx.conf.get(step3_mod.CONF_AMC_PROJECT_ID_KEY) or "").strip()
+
+
+def _disk_candidates(ctx: "Context", project_name: str) -> list[pathlib.Path]:
+    """Every on-disk shape a project has used: `<root>/<name>`, and for
+    the configured project `<root>/<id>` and AMC 3.3.0's
+    `<root>/project_<id>`."""
+    candidates = [amc_project_dir(ctx, project_name)]
+    configured_id = _configured_project_id(ctx, project_name)
+    if configured_id:
+        root = amc_projects_root(ctx)
+        candidates += [root / configured_id, root / f"project_{configured_id}"]
+    return candidates
+
+
+def amc_project_path(ctx: "Context", project_name: str) -> Optional[pathlib.Path]:
+    """The host directory holding `project_name`'s AMC files, or `None`.
+
+    The API's `project_dir` is preferred when the service is up and lists
+    the project; otherwise the first existing on-disk candidate is used.
+    """
+    listing = _api_project_listing(ctx)
+    if listing is not None:
+        for key in (project_name, _configured_project_id(ctx, project_name)):
+            if key and key in listing.dirs:
+                return _host_project_dir(ctx, listing.dirs[key])
+    for path in _disk_candidates(ctx, project_name):
+        if path.exists():
+            return path
+    return None
 
 
 def amc_project_present(ctx: "Context", project_name: str) -> bool:
     """Whether AMC still has the project registered as `project_name`.
 
-    AMC 3.x stores a project under its opaque `AMC_PROJECT_ID`, not under
-    its name, so a name-shaped directory is no evidence either way for the
-    configured project. The running service is asked first
-    (`GET /v1/list_projects`): a matching name, or the configured project's
-    `AMC_PROJECT_ID`, means present. When the service is down the projects
-    root on disk is checked for a directory named after the project or
-    after its `AMC_PROJECT_ID`.
+    AMC 3.x stores a project under its opaque `AMC_PROJECT_ID`
+    (`project_<id>` in 3.3.0), not under its name. The running service is
+    asked first (`GET /v1/list_projects`): a matching name, or the
+    configured project's `AMC_PROJECT_ID`, means present. When the service
+    is down, or lists ids only, the projects root on disk is checked for
+    every shape in `_disk_candidates`.
     """
-    configured_id = ""
-    if project_name == ctx.conf.get(CONF_PROJECT_NAME_KEY):
-        configured_id = (ctx.conf.get(step3_mod.CONF_AMC_PROJECT_ID_KEY) or "").strip()
-
+    configured_id = _configured_project_id(ctx, project_name)
     listing = _api_project_listing(ctx)
     if listing is not None:
-        names, ids = listing
-        if configured_id and configured_id in ids:
+        if configured_id and configured_id in listing.ids:
             return True
-        if names is not None:
-            return project_name in names
-
-    candidates = [amc_project_dir(ctx, project_name)]
-    if configured_id:
-        candidates.append(amc_projects_root(ctx) / configured_id)
-    return any(path.exists() for path in candidates)
+        if listing.names is not None:
+            return project_name in listing.names
+    return any(path.exists() for path in _disk_candidates(ctx, project_name))
 
 
 def _project_artifact_paths(ctx: "Context", entry: ProjectEntry) -> list[pathlib.Path]:

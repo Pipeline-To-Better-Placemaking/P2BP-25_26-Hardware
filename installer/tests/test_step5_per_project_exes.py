@@ -914,6 +914,58 @@ def test_reconcile_reports_a_project_the_api_no_longer_lists(tmp_path):
     assert step5.reconcile_registry(ctx, apply=False) == ["Living-Room"]
 
 
+# The live AMC 3.3.0 reply, verified on the workstation.
+_LIVE_LIST_PROJECTS = {
+    "code": 0,
+    "message": "Projects listed successfully",
+    "projects": [
+        {
+            "project_id": "20261023_091449_9720",
+            "project_name": "Living-Room",
+            "project_dir": "projects/project_20261023_091449_9720",
+            "project_state": "COMPLETED",
+        }
+    ],
+}
+
+
+def test_live_list_projects_reply_resolves_living_room(tmp_path):
+    amc_root, projects = _amc330_layout(tmp_path)
+    runner = ScriptedRunner().when(
+        _list_projects_call, stdout=json.dumps(_LIVE_LIST_PROJECTS)
+    )
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    _make_entry(ctx.install_dir, project_name="Living-Room", slug="living-room")
+    _make_entry(ctx.install_dir, project_name="Gone", slug="gone")
+
+    assert step5.reconcile_registry(ctx, apply=False) == ["Gone"]
+    # project_dir is relative to the AMC root; its projects/ prefix is the
+    # compose PROJECT_DIR mount.
+    assert step5.amc_project_path(ctx, "Living-Room") == (
+        projects / "project_20261023_091449_9720"
+    )
+
+
+def test_disk_fallback_matches_the_amc330_project_folder(tmp_path):
+    amc_root, projects = _amc330_layout(tmp_path)
+    (projects / "project_20261023_091449_9720").mkdir()
+    runner = ScriptedRunner().when(_list_projects_call, returncode=7)
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    _make_entry(ctx.install_dir, project_name="Living-Room", slug="living-room")
+
+    assert step5.reconcile_registry(ctx, apply=False) == []
+    assert step5.amc_project_path(ctx, "Living-Room") == (
+        projects / "project_20261023_091449_9720"
+    )
+
+
+def test_amc_project_path_is_none_when_nothing_matches(tmp_path):
+    amc_root, _projects = _amc330_layout(tmp_path)
+    runner = ScriptedRunner().when(_list_projects_call, returncode=7)
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    assert step5.amc_project_path(ctx, "Living-Room") is None
+
+
 def test_projects_subcommand_list_reports_drift_without_deleting(tmp_path, monkeypatch, capsys):
     ctx = FakeContext(tmp_path)
     entry = _make_entry(ctx.install_dir)
