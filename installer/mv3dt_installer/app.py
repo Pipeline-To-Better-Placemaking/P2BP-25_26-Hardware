@@ -1050,6 +1050,13 @@ _GATE_ORDER_TO_CONF_ATTR: dict[int, str] = {
     8: "tracking_history",
 }
 
+# The installer.conf gate key behind each gated step, for `--status`.
+_STEP_ID_TO_GATE_KEY: dict[str, str] = {
+    "step6_remote_supervision": config_mod.GATE_REMOTE_SUPERVISION,
+    "step7_webapp_integration": config_mod.GATE_WEBAPP_INTEGRATION,
+    "step8_tracking_history": config_mod.GATE_TRACKING_HISTORY,
+}
+
 # Maps each installer.conf gate key to the argparse destination its
 # matching flag parses into. The dests happen to equal the `Config`
 # attribute names above, but they are listed separately because they are
@@ -1317,6 +1324,14 @@ def _print_status(sm: StateMachine) -> int:
     so this never crashes on a fresh install."""
     state = sm.load()
     print(f"install_dir: {state.install_dir}")
+    # Read-only and best effort: --status runs without root, and a gate's
+    # current value only refines how a skipped step is described.
+    try:
+        conf = config_mod._read_conf(
+            pathlib.Path(state.install_dir) / config_mod.CONF_FILENAME
+        )
+    except OSError:
+        conf = {}
     for step_id in STEP_IDS:
         entry = state.steps.get(step_id)
         status_value = (
@@ -1327,7 +1342,12 @@ def _print_status(sm: StateMachine) -> int:
             and entry.skipped_gate_off
             and entry.status is StepStatus.PENDING
         ):
-            status_value = "SKIPPED (gate off; runs when the gate is turned on)"
+            gate_key = _STEP_ID_TO_GATE_KEY.get(step_id)
+            gate_now = conf.get(gate_key) if gate_key else None
+            if gate_now and not _gate_is_off(gate_now):
+                status_value = "SKIPPED, gate now on: runs on next install run"
+            else:
+                status_value = "SKIPPED (gate off; runs when the gate is turned on)"
         print(f"{step_id}: {status_value}")
     print(f"all complete: {sm.all_complete()}")
     return 0

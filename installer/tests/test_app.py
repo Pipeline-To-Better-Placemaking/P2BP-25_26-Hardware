@@ -885,6 +885,27 @@ def test_dispatch_all_complete_names_the_gated_off_steps(tmp_path, monkeypatch, 
     ) in err
 
 
+def test_status_notes_a_skipped_step_whose_gate_is_now_on(tmp_path, capsys):
+    install_dir = tmp_path / "install"
+    install_dir.mkdir()
+    (install_dir / config_mod.CONF_FILENAME).write_text(
+        f"{config_mod.GATE_TRACKING_HISTORY}=on\n"
+    )
+    state_path = tmp_path / "state.json"
+    sm = StateMachine(path=state_path)
+    state = sm.load()
+    state.install_dir = str(install_dir)
+    sm.save(state)
+    sm.mark_skipped_gate_off("step8_tracking_history")
+    sm.mark_skipped_gate_off("step7_webapp_integration")
+
+    assert app.main(["--status"], state_path=state_path) == 0
+
+    out = capsys.readouterr().out
+    assert "step8_tracking_history: SKIPPED, gate now on: runs on next install run" in out
+    assert "step7_webapp_integration: SKIPPED (gate off" in out
+
+
 def test_status_shows_a_gate_off_skip(tmp_path, capsys):
     state_path = tmp_path / "state.json"
     sm = StateMachine(path=state_path)
