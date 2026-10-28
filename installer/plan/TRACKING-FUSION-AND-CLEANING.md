@@ -350,9 +350,9 @@ finalizes every remaining group. Chunked processing produces exactly the
 one-shot result (REQUIRED).
 
 Memory is bounded by the busiest continuous stretch, the longest run of
-data without a gap longer than `stitch_gap_s`, not by the window length. The fused
-`export` writes each finalized group as per-person blocks, each block
-time-ordered.
+data without a gap longer than `stitch_gap_s`, not by the window length.
+The fused `export` writes each finalized group as per-person blocks, each
+block time-ordered.
 
 ---
 
