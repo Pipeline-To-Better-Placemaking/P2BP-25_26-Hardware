@@ -951,4 +951,44 @@ def test_hidden_prompt_takes_every_default(tmp_path, monkeypatch, capsys):
     assert cfg.install_dir == default_dir
     for key in config.GATE_KEYS:
         assert cfg.values[key] == config.GATE_DEFAULTS[key]
-    assert "not asking configuration questions" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert f"install directory ({default_dir})" in err
+    for key in config.GATE_KEYS:
+        assert f"{key} ({config.GATE_DEFAULTS[key]})" in err
+
+
+def test_hidden_prompt_with_a_complete_conf_does_not_warn(tmp_path, monkeypatch, capsys):
+    """Nothing would have been asked, so a non-TTY run says nothing."""
+    install_dir = tmp_path / "install"
+    config.load(str(install_dir), _state(tmp_path), non_interactive=True)
+    capsys.readouterr()
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+
+    config.load(None, _state(tmp_path))
+
+    assert "not asking" not in capsys.readouterr().err
+
+
+def test_hidden_prompt_names_only_the_missing_gate(tmp_path, monkeypatch, capsys):
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    install_dir = tmp_path / "install"
+    config.load(str(install_dir), _state(tmp_path), non_interactive=True)
+    conf = install_dir / config.CONF_FILENAME
+    missing = config.GATE_KEYS[-1]
+    conf.write_text(
+        "".join(
+            line + "\n"
+            for line in conf.read_text().splitlines()
+            if not line.startswith(f"{missing}=")
+        )
+    )
+    capsys.readouterr()
+    _hide_prompts(monkeypatch)
+
+    config.load(None, _state(tmp_path))
+
+    err = capsys.readouterr().err
+    assert f"not asking for {missing} (" in err
+    assert "install directory" not in err

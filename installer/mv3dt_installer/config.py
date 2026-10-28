@@ -457,26 +457,43 @@ def load(
         install_dir_override, state, default_install_dir
     )
 
+    # A hidden prompt blocks forever, so when the real `input()` cannot be
+    # seen every question here takes its default, exactly as under
+    # --non-interactive. Only the real `input()` is checked; an injected
+    # prompt is a test's.
+    hidden_reason = None
     if prompt is None:
         prompt = input
-        # A hidden prompt blocks forever, so every question here takes its
-        # default, exactly as under --non-interactive.
-        reason = None if non_interactive else prompting.prompt_unavailable_reason()
-        if reason is not None:
-            log.warn(
-                f"{reason}: not asking configuration questions; using the "
-                "defaults (install directory and gates as already set, else "
-                "their defaults). Run without a pipe to be asked."
-            )
-            non_interactive = True
+        if not non_interactive:
+            hidden_reason = prompting.prompt_unavailable_reason()
+            if hidden_reason is not None:
+                non_interactive = True
+    skipped_questions: list[str] = []
 
-    if source == "default" and not non_interactive:
-        resolved = _prompt_for_install_dir(resolved, prompt)
+    if source == "default":
+        if not non_interactive:
+            resolved = _prompt_for_install_dir(resolved, prompt)
+        elif hidden_reason is not None:
+            skipped_questions.append(f"install directory ({resolved})")
 
     resolved.mkdir(parents=True, exist_ok=True)
 
     conf_path = resolved / CONF_FILENAME
     values = _read_conf(conf_path)
+    if hidden_reason is not None:
+        overrides = gate_overrides or {}
+        skipped_questions += [
+            f"{key} ({GATE_DEFAULTS[key]})"
+            for key in GATE_KEYS
+            if key not in values
+            and not overrides.get(key)
+            and not os.environ.get(key)
+        ]
+    if skipped_questions:
+        log.warn(
+            f"{hidden_reason}: not asking for {', '.join(skipped_questions)}; "
+            "using the default shown. Run without a pipe to be asked."
+        )
     _resolve_gates(
         values,
         gate_overrides=gate_overrides or {},
