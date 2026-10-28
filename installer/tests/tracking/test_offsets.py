@@ -176,3 +176,11 @@ def test_valid_offsets_validate_and_read():
     o = learn_offsets(_pairs(offset=(0.4, 0.0)))
     assert validate_offsets(o) is None
     assert read_offsets(None) == (None, None)
+
+
+def test_saved_offsets_file_is_mode_644(tmp_path):
+    import stat
+
+    path = tmp_path / "offsets.json"
+    save_offsets(path, learn_offsets(_pairs(offset=(0.4, 0.0))))
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
