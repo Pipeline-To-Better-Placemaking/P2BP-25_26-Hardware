@@ -223,3 +223,14 @@ def test_suggests_the_static_single_camera_object_only():
     # Ready to paste: it parses as a zone and covers the object.
     assert parse_zone(s["zone"]).contains("cam2", 3.25, -3.75)
     assert suggest_zones([]) == []
+
+
+def test_long_window_still_finds_an_object_that_is_on_part_of_the_time():
+    rng = random.Random(2)
+    # A TV on for 12 minutes of a 2 h window that is otherwise busy elsewhere.
+    rows = _static(rng, ["cam2"], 900, 3.25, -3.75, 0, 720, life=30)
+    rows += _static(rng, ["cam1", "cam2"], 100, 5.5, -1.0, 0, 7200, life=2)
+    out = suggest_zones(rows)
+    assert len(out) == 1 and out[0]["zone"]["sensors"] == ["cam2"]
+    assert out[0]["stats"]["occupancy_frac"] < 0.3 and out[0]["stats"]["occupied_s"] >= 600
+    assert suggest_zones(rows, min_occupancy_s=900) == []

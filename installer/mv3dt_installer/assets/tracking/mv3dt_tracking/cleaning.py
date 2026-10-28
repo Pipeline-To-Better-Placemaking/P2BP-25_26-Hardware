@@ -358,6 +358,7 @@ def suggest_zones(
     min_camera_share: float = 0.95,
     max_median_speed_mps: float = 0.1,
     min_occupancy_frac: float = 0.3,
+    min_occupancy_s: float = 600.0,
     min_ids: int = 10,
     pad_m: float = 0.25,
 ) -> list[dict]:
@@ -366,8 +367,9 @@ def suggest_zones(
     Pass the detections that survive bounds, zones and the speed gate. The
     window is gridded into `cell_m` cells; a cell is a candidate when it is
     occupied in at least `min_occupancy_frac` of the window's occupied
-    seconds and at least `min_camera_share` of its detections come from one
-    camera. Touching candidates of the same camera form a group, kept when
+    seconds or for at least `min_occupancy_s` seconds (so a long window still
+    finds an object that is only on part of the time), and at least
+    `min_camera_share` of its detections come from one camera. Touching candidates of the same camera form a group, kept when
     the median per-tracklet speed (net displacement over duration) is at
     most `max_median_speed_mps` and it saw at least `min_ids` tracker ids.
     Each group becomes a `rect` padded by `pad_m` and limited to its camera,
@@ -390,7 +392,8 @@ def suggest_zones(
     for cell, secs in seconds.items():
         total = sum(cams[cell].values())
         cam, n = max(cams[cell].items(), key=lambda kv: (kv[1], kv[0]))
-        if len(secs) >= min_occupancy_frac * len(window_s) and n / total >= min_camera_share:
+        occupied = len(secs) >= min_occupancy_frac * len(window_s) or len(secs) >= min_occupancy_s
+        if occupied and n / total >= min_camera_share:
             hot[cell] = cam
 
     out = []

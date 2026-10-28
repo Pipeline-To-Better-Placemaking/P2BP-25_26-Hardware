@@ -121,3 +121,11 @@ def test_save_load_round_trip_and_apply(tmp_path):
     assert apply_offsets((1.0, 2.0), "cam9", back) == (1.0, 2.0)
     assert apply_offsets((1.0, 2.0), "cam1", None) == (1.0, 2.0)
     assert apply_offsets((1.0, 2.0), "cam1", back)[1] == pytest.approx(2.4, abs=0.03)
+
+
+def test_default_gate_is_the_shared_id_gate():
+    near = learn_offsets(_pairs(offset=(1.4, 0.0)))
+    far = learn_offsets(_pairs(offset=(1.6, 0.0)))
+    assert near["pairs"] == 600 and near["needed"] is True
+    assert far["pairs"] == 0 and far["sensors"] == {}
+    assert learn_offsets(_pairs(offset=(1.6, 0.0)), gate_m=2.0)["pairs"] == 600

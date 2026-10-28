@@ -119,14 +119,16 @@ def _fit_camera(pts, targets, model: str) -> tuple[dict, str]:
 def learn_offsets(
     detections: Iterable[Detection],
     bucket_ms: int = 200,
-    gate_m: float = 3.5,
+    gate_m: float = 1.5,
     model: str = "translation",
     min_pairs: int = MIN_PAIRS,
     window: dict | None = None,
 ) -> dict:
     """Fit per-sensor corrections from same-ID cross-camera pairs.
 
-    Pass detections that survived bounds, zones and the speed gate. Each
+    Pass detections that survived bounds, zones and the speed gate. Only
+    pairs within `gate_m` (default: the strict `shared_id_gate_m`, 1.5 m, so
+    only plausibly-same-person pairs count) are used. Each
     sensor's points are fitted onto the pair midpoints, so with two sensors
     each moves half the mean difference toward the other (the corrections
     sum to zero). `model="similarity"` also fits a small rotation and
