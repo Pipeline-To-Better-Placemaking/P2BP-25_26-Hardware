@@ -23,11 +23,38 @@ Judgment calls the spec leaves open:
 - **The ticket secret never leaves the file.** It is generated with
   `secrets.token_urlsafe(48)`, written once with mode 600, and never logged,
   printed, or passed on a command line or in a subprocess environment.
+
+Cleaning files (TRACKING-FUSION-AND-CLEANING.md section 10):
+
+- **`cleaning.json` is seeded once.** When absent, `run` writes the strict
+  seed `{"version", "preset", "zones"}` to `<install_dir>/tracking/`, owned
+  by the invoking user (who is also the service user) with mode 644. The
+  values come from the installed package's own `cleaning.STRICT`, read
+  through the venv interpreter, so no default is restated here. The file is
+  operator-managed: it is not a managed template, an existing file (or
+  symlink) is never touched, and a failed seed is only a warning because a
+  missing file already means strict defaults.
+- **`offsets.json` is never created here.** Only `learn-offsets --save`
+  writes it. The tracking directory is owned by the service user, and the
+  `tracking` passthrough runs the package as that user, so the saved file
+  lands where the service reads it, owned by the user the service runs as.
+- **One environment for the unit and the passthrough.**
+  `service_environment()` is the single list of `Environment=` values; the
+  unit renders it and `mv3dt-installer tracking ...` passes it to the
+  package, run from the unit's working directory. The unit's two
+  `EnvironmentFile=` sources are deliberately not forwarded:
+  `secrets/tracking.env` because the ticket secret never leaves its file,
+  and `installer.conf` because the CLI commands read none of its keys (only
+  `serve` uses `LOCATION_ID`, for the MQTT topic).
+- **Upgrade.** Re-running the step re-syncs the package (which never
+  touches files beside it), re-renders the unit and restarts the service
+  when anything changed; both cleaning files stay as they are.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import hashlib
 import json
@@ -59,6 +86,8 @@ __all__ = [
     "ensure_venv",
     "ensure_tracking_env",
     "render_tracking_unit",
+    "service_environment",
+    "seed_cleaning_file",
     "tailscale_state",
     "Step8TrackingHistory",
 ]
@@ -67,7 +96,8 @@ STEP_ID = "step8_tracking_history"
 UNIT_NAME = "mv3dt-tracking.service"
 
 PACKAGE_NAME = "mv3dt_tracking"
-LISTEN_URL = "http://127.0.0.1:8090"
+BIND = "127.0.0.1:8090"
+LISTEN_URL = f"http://{BIND}"
 HEALTH_URL = f"{LISTEN_URL}/health"
 TAILNET_HTTPS_PORT = 8443
 TAILSCALE_SERVE_ARGV = (
@@ -86,6 +116,9 @@ SECRETS_DIRNAME = "secrets"
 SECRETS_DIR_MODE = 0o700
 TRACKING_ENV_NAME = "tracking.env"
 TRACKING_ENV_MODE = 0o600
+CLEANING_FILE_NAME = "cleaning.json"
+CLEANING_FILE_MODE = 0o644
+OFFSETS_FILE_NAME = "offsets.json"
 REQUIREMENTS_MARKER = ".mv3dt-requirements.sha256"
 
 KEY_SECRET = "WORKSTATION_TICKET_SECRET"
@@ -130,6 +163,14 @@ def _venv_python(ctx: Any) -> pathlib.Path:
 
 def _tracking_env_path(ctx: Any) -> pathlib.Path:
     return pathlib.Path(ctx.install_dir) / SECRETS_DIRNAME / TRACKING_ENV_NAME
+
+
+def _cleaning_file(ctx: Any) -> pathlib.Path:
+    return _tracking_dir(ctx) / CLEANING_FILE_NAME
+
+
+def _offsets_file(ctx: Any) -> pathlib.Path:
+    return _tracking_dir(ctx) / OFFSETS_FILE_NAME
 
 
 def _calibration_dir(ctx: Any) -> pathlib.Path:
@@ -418,24 +459,120 @@ def ensure_tracking_env(ctx: Any) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# cleaning.json seed (TRACKING-FUSION-AND-CLEANING.md sections 4.1 and 10)
+# ---------------------------------------------------------------------------
+
+# Run by the venv interpreter in isolated mode (-I, so neither the caller's
+# directory nor PYTHONPATH is on sys.path); argv[1] is the tracking
+# directory. It prints the strict seed taken from the package itself and
+# checks that the package accepts it.
+_SEED_PROGRAM = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "from mv3dt_tracking.cleaning import PRESETS, STRICT, parse_config\n"
+    "preset = next(name for name, values in PRESETS.items() if values is STRICT)\n"
+    "seed = {'version': STRICT['version'], 'preset': preset, 'zones': list(STRICT['zones'])}\n"
+    "parse_config(seed)\n"
+    "print(json.dumps(seed))\n"
+)
+
+
+def _strict_seed(ctx: Any) -> tuple:
+    """`(seed, error)`: the strict seed as the installed package defines it."""
+    result = ctx.run_as_user(
+        str(_venv_python(ctx)), "-I", "-c", _SEED_PROGRAM, str(_tracking_dir(ctx)),
+        capture_output=True, text=True,
+    )
+    if getattr(result, "returncode", 1) != 0:
+        return None, _tail(result, 300) or "the tracking package could not be imported"
+    try:
+        seed = json.loads(getattr(result, "stdout", "") or "")
+    except json.JSONDecodeError:
+        seed = None
+    if not isinstance(seed, dict):
+        return None, "the tracking package printed no seed"
+    return seed, None
+
+
+def seed_cleaning_file(ctx: Any) -> tuple:
+    """Write `cleaning.json` once with the strict seed. Returns `(written, error)`.
+
+    An existing path, a dangling symlink included, is left alone. The file
+    is created under a temporary name and hard-linked into place, so it
+    appears complete or not at all and a file that appeared meanwhile is
+    never replaced.
+    """
+    path = _cleaning_file(ctx)
+    if os.path.lexists(path):
+        return False, None
+    seed, error = _strict_seed(ctx)
+    if error:
+        return False, error
+    content = json.dumps(seed, indent=2) + "\n"
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(str(tmp), flags, CLEANING_FILE_MODE)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                os.fchmod(f.fileno(), CLEANING_FILE_MODE)  # regardless of umask
+                try:
+                    os.fchown(f.fileno(), ctx.user.uid, ctx.user.gid)
+                except OSError:
+                    pass  # best effort, e.g. under a non-root test process
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+            os.link(tmp, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
+    except FileExistsError:
+        return False, None
+    except OSError as exc:
+        return False, f"could not write {path}: {exc}"
+    log.info(f"wrote {path} (strict cleaning defaults)")
+    return True, None
+
+
+# ---------------------------------------------------------------------------
 # Unit (section 4.4, section 11.2 step 5)
 # ---------------------------------------------------------------------------
 
 
+def service_environment(ctx: Any, *, data_dir: Optional[pathlib.Path] = None) -> dict:
+    """The unit's `Environment=` values, in unit order.
+
+    The single source for both the rendered unit and the `tracking`
+    passthrough, so a CLI command sees the same data directory,
+    calibration, cleaning file and offsets file as `serve`. Holds no secret.
+    """
+    return {
+        "PYTHONPATH": str(_tracking_dir(ctx)),
+        "DATA_DIR": str(data_dir or DATA_DIR),
+        "CALIB_DIR": str(_calibration_dir(ctx)),
+        "CAMERA_MODELS_DIR": str(_camera_models_dir(ctx)),
+        "CLEANING_FILE": str(_cleaning_file(ctx)),
+        "OFFSETS_FILE": str(_offsets_file(ctx)),
+        "BIND": BIND,
+        "PYTHONUNBUFFERED": "1",
+    }
+
+
 def render_tracking_unit(ctx: Any, *, data_dir: Optional[pathlib.Path] = None) -> str:
-    data_dir = data_dir or DATA_DIR
     values = {
         "INSTALL_DIR": str(ctx.install_dir),
         "TRACKING_DIR": str(_tracking_dir(ctx)),
         "VENV_PYTHON": str(_venv_python(ctx)),
-        "DATA_DIR": str(data_dir),
-        "CALIB_DIR": str(_calibration_dir(ctx)),
-        "CAMERA_MODELS_DIR": str(_camera_models_dir(ctx)),
     }
-    for label, value in values.items():
+    environment = service_environment(ctx, data_dir=data_dir)
+    for label, value in (*values.items(), *environment.items()):
         systemd._reject_unquotable(label, value)
     substitutions = {k: systemd._escape_specifiers(v) for k, v in values.items()}
     substitutions["USER"] = ctx.user.name
+    substitutions["SERVICE_ENVIRONMENT"] = "\n".join(
+        f'Environment="{k}={systemd._escape_specifiers(v)}"' for k, v in environment.items()
+    )
     return systemd.render_unit(
         (systemd.TEMPLATE_DIR, "mv3dt-tracking.service.in"), substitutions
     )
@@ -686,8 +823,14 @@ class Step8TrackingHistory:
             return StepResult(status=StepStatus.FAILED, message=error)
 
         ctx.progress.phase(2)
-        ctx.progress.task("creating the data directory and tracking.env")
+        ctx.progress.task("creating the data directory, cleaning.json and tracking.env")
         ensure_data_dir(ctx)
+        _, seed_error = seed_cleaning_file(ctx)
+        if seed_error:
+            log.warn(
+                f"step8: {_cleaning_file(ctx)} was not seeded ({seed_error}); the "
+                "service uses the strict defaults until the file exists"
+            )
         env_changed, missing = ensure_tracking_env(ctx)
         if missing:
             path = _tracking_env_path(ctx)
@@ -822,21 +965,35 @@ register(Step8TrackingHistory())
 
 # ---------------------------------------------------------------------------
 # `mv3dt-installer tracking stats | wipe --yes [--before DATE]` (section 10)
+# and the cleaning commands (TRACKING-FUSION-AND-CLEANING.md section 9)
 # ---------------------------------------------------------------------------
+
+# Forwarded to the package unchanged; it owns their options and help.
+CLEANING_COMMANDS = {
+    "zones-suggest": "list static single-camera hotspots as zone entries",
+    "learn-offsets": "learn the per-camera offset correction (--save writes offsets.json)",
+    "clean-report": "print the fused summary and drop counters for --from/--to",
+}
 
 
 def _package_argv(ctx: Any, *args: str) -> list:
-    """Run the package as the invoking user, so SQLite sidecar files stay
-    owned by the service user. Only non-secret settings are passed."""
+    """Run the package with the unit's own environment (no secret), as the
+    invoking user, so SQLite sidecar files and a saved offsets.json stay
+    owned by the service user."""
     return [
         "env",
-        f"PYTHONPATH={_tracking_dir(ctx)}",
-        f"DATA_DIR={DATA_DIR}",
+        *(f"{k}={v}" for k, v in service_environment(ctx).items()),
         str(_venv_python(ctx)),
         "-m",
         PACKAGE_NAME,
         *args,
     ]
+
+
+def _run_package(ctx: Any, *args: str) -> int:
+    # The unit's WorkingDirectory, so `-m` resolves exactly as in `serve`.
+    result = ctx.run_as_user(*_package_argv(ctx, *args), cwd=str(_tracking_dir(ctx)))
+    return int(getattr(result, "returncode", 1))
 
 
 def _day(value: str) -> str:
@@ -865,21 +1022,38 @@ def _tracking_parser() -> argparse.ArgumentParser:
     wipe = sub.add_parser("wipe", help="delete recorded history (local only)")
     wipe.add_argument("--yes", action="store_true", help="confirm the deletion")
     wipe.add_argument("--before", type=_day, help="only delete UTC days before YYYY-MM-DD")
+    for name, text in CLEANING_COMMANDS.items():
+        sub.add_parser(name, help=text, add_help=False)  # parsed by the package
     return parser
 
 
+def _not_installed() -> int:
+    log.error(
+        "tracking history is not installed; enable it with "
+        "--tracking-history on and re-run the installer"
+    )
+    return 1
+
+
 def _handle_tracking(argv: list, ctx: Any) -> int:
-    args = _tracking_parser().parse_args(_strip_framework_flags(argv))
+    rest = _strip_framework_flags(argv)
+    if rest and rest[0] in CLEANING_COMMANDS:
+        if not _gate_on(ctx):
+            log.error(
+                "tracking history is off in installer.conf; enable it with "
+                "--tracking-history on and re-run the installer"
+            )
+            return 1
+        if not _venv_python(ctx).exists():
+            return _not_installed()
+        return _run_package(ctx, *rest)
+
+    args = _tracking_parser().parse_args(rest)
     if not _venv_python(ctx).exists():
-        log.error(
-            "tracking history is not installed; enable it with "
-            "--tracking-history on and re-run the installer"
-        )
-        return 1
+        return _not_installed()
 
     if args.command == "stats":
-        result = ctx.run_as_user(*_package_argv(ctx, "stats"))
-        return int(getattr(result, "returncode", 1))
+        return _run_package(ctx, "stats")
 
     if not args.yes:
         log.error("refusing to wipe without --yes")
@@ -895,10 +1069,9 @@ def _handle_tracking(argv: list, ctx: Any) -> int:
         log.error(f"{UNIT_NAME} is still active after stop; refusing to wipe")
         return 1
     try:
-        result = ctx.run_as_user(*_package_argv(ctx, *wipe_args))
+        return _run_package(ctx, *wipe_args)
     finally:
         runner(["systemctl", "start", UNIT_NAME], check=False)
-    return int(getattr(result, "returncode", 1))
 
 
 app_mod.register_subcommand("tracking", _handle_tracking)

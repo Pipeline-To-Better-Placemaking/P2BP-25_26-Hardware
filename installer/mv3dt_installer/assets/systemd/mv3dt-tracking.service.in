@@ -7,8 +7,17 @@
 # from LOCATION_ID in installer.conf; the ticket secret, project id and
 # allowed origins come from secrets/tracking.env.
 #
-# Runs as @USER@, who owns the package, its venv and the data directory.
-# Unlike the uploader it depends on the local broker.
+# The environment marker in [Service] expands to one Environment="KEY=value"
+# line per entry of service_environment() in the step module: PYTHONPATH,
+# DATA_DIR, CALIB_DIR, CAMERA_MODELS_DIR, CLEANING_FILE, OFFSETS_FILE, BIND
+# and PYTHONUNBUFFERED. The `mv3dt-installer tracking` commands run the
+# package with that same set, so they read the files and calibration that
+# `serve` reads.
+#
+# Runs as @USER@, who owns the package, its venv, the data directory and the
+# tracking directory itself, so `learn-offsets --save` (run as the same user)
+# can write offsets.json there. Unlike the uploader it depends on the local
+# broker.
 [Unit]
 Description=mv3dt tracking history recorder and API
 After=network.target mosquitto.service
@@ -22,12 +31,7 @@ User=@USER@
 WorkingDirectory=@TRACKING_DIR@
 EnvironmentFile=@INSTALL_DIR@/installer.conf
 EnvironmentFile=@INSTALL_DIR@/secrets/tracking.env
-Environment="PYTHONPATH=@TRACKING_DIR@"
-Environment="DATA_DIR=@DATA_DIR@"
-Environment="CALIB_DIR=@CALIB_DIR@"
-Environment="CAMERA_MODELS_DIR=@CAMERA_MODELS_DIR@"
-Environment=BIND=127.0.0.1:8090
-Environment=PYTHONUNBUFFERED=1
+@SERVICE_ENVIRONMENT@
 ExecStart="@VENV_PYTHON@" -m mv3dt_tracking serve
 Restart=on-failure
 RestartSec=5
