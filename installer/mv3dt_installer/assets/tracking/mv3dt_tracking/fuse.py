@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from .cleaning import CleaningConfig
-from .offsets import apply_offsets
+from .offsets import apply_offsets, validate_offsets
 from .store import Detection
 
 DROP_KEYS = (
@@ -84,6 +84,7 @@ class _Tracklet:
     last_raw: tuple[int, float, float]          # last kept raw sample, for the speed gate
     buckets: dict[int, list[tuple[float, float]]] = field(default_factory=dict)
     n_raw: int = 0
+    rows: list[Detection] | None = None         # kept raw rows, only while prefiltering
     pts: list[tuple[int, float, float, int]] = field(default_factory=list)  # (bucket, x, y, n) once closed
 
     @property
@@ -110,7 +111,11 @@ class Fuser:
 
     def __init__(self, config: CleaningConfig | None = None, offsets: dict | None = None, room=None) -> None:
         self.config = config or CleaningConfig()
-        self.offsets = offsets if (offsets and offsets.get("sensors") and self.config.offsets_apply) else None
+        # Invalid offsets (bad or non-finite numbers) are never applied; the
+        # reason is kept for the summary instead of failing the request.
+        self.offsets_error = validate_offsets(offsets) if offsets else None
+        usable = offsets and not self.offsets_error and offsets.get("sensors")
+        self.offsets = offsets if (usable and self.config.offsets_apply) else None
         self.room = _room(room)
         self.dropped: dict = {k: 0 for k in DROP_KEYS}
         self.dropped["zones"] = {z.name: 0 for z in self.config.zones}
@@ -127,6 +132,8 @@ class Fuser:
         self._watermark: int | None = None
         self._next_person = 1
         self._finished = False
+        self._collect: str | None = None             # set by `prefilter`
+        self._survivors: list[Detection] = []
 
     @property
     def offsets_applied(self) -> bool:
@@ -181,6 +188,12 @@ class Fuser:
         b = r.ts_ms - r.ts_ms % cfg.bucket_ms
         t.buckets.setdefault(b, []).append((x, y))
         t.n_raw += 1
+        if self._collect == "speed":
+            self._survivors.append(r)
+        elif self._collect == "short_tracklet":
+            if t.rows is None:
+                t.rows = []
+            t.rows.append(r)
 
     def _close(self, key: tuple[int, str]) -> None:
         cfg = self.config
@@ -191,6 +204,10 @@ class Fuser:
         ]
         t.buckets = {}
         if len(t.pts) >= cfg.min_tracklet_samples and (t.end - t.pts[0][0]) / 1000.0 >= cfg.min_tracklet_s:
+            if self._collect is not None:
+                self._survivors.extend(t.rows or ())
+                t.rows = None
+                return
             self._pending.append(t)
         else:
             self.dropped["short_tracklet"] += 1
@@ -198,14 +215,18 @@ class Fuser:
 
     # -- public --------------------------------------------------------------
 
+    @staticmethod
+    def _sorted(detections: Iterable[Detection]) -> list[Detection]:
+        return sorted(
+            (r for r in detections if r.x is not None and r.y is not None),
+            key=lambda r: (r.ts_ms, r.sensor, r.track_id, r.x, r.y),
+        )
+
     def feed(self, detections: Iterable[Detection]) -> list[FusedSample]:
         """Process one chunk; return the samples of people now final."""
         if self._finished:
             raise RuntimeError("feed() after finish()")
-        rows = sorted(
-            (r for r in detections if r.x is not None and r.y is not None),
-            key=lambda r: (r.ts_ms, r.sensor, r.track_id, r.x, r.y),
-        )
+        rows = self._sorted(detections)
         if not rows:
             return []
         if self._watermark is not None and rows[0].ts_ms < self._watermark:
@@ -239,6 +260,10 @@ class Fuser:
         if final:
             batch, self._pending = self._pending, []
             return self._people(batch)
+        # Finalization is by quiet period, not per person (an accepted
+        # deviation from the spec's per-person hold-back): association is
+        # global within a group, so only a group no later data can reach is
+        # final. This is what makes any chunking match one-shot exactly.
         # Split the pending tracklets into groups no association can bridge
         # (more than stitch_gap_s between one group's last bucket and the
         # next one's first), and emit each group, oldest first, once nothing
@@ -333,8 +358,10 @@ class Fuser:
             t0, x0, y0, _ = tc.pts[0]
             rc = find(c)
             best, best_d = None, None
+            # Candidates end at most stitch_gap_s before c starts; an end in
+            # c's first bucket counts too (an id handoff inside one bucket).
             lo = bisect.bisect_left(end_ts, t0 - gap_ms)
-            hi = bisect.bisect_left(end_ts, t0)
+            hi = bisect.bisect_right(end_ts, t0)
             for te, a in ends[lo:hi]:
                 ra = find(a)
                 if ra == rc:
@@ -343,7 +370,7 @@ class Fuser:
                 d = math.hypot(x0 - xa, y0 - ya)
                 if d > cfg.stitch_dist((t0 - te) / 1000.0) or (best_d is not None and d >= best_d):
                     continue
-                if cfg.stitch_exclusive and _overlaps(spans[ra], spans[rc]):
+                if cfg.stitch_exclusive and _overlaps(spans[ra], spans[rc], cfg.bucket_ms):
                     continue
                 best, best_d = a, d
             if best is not None:
@@ -412,6 +439,33 @@ class Fuser:
         return out
 
 
+def prefilter(
+    detections: Iterable[Detection],
+    config: CleaningConfig | None = None,
+    room=None,
+    *,
+    through: str = "speed",
+) -> list[Detection]:
+    """The raw detections that survive the early stages, through the same
+    code paths as `Fuser`: bounds and zones then the speed gate
+    (`through="speed"`), or additionally the short-tracklet drop
+    (`through="short_tracklet"`). No offsets are applied and nothing is
+    associated; the rows come back unchanged, in timestamp order. This is
+    the input `learn_offsets` and `suggest_zones` expect.
+    """
+    if through not in ("speed", "short_tracklet"):
+        raise ValueError(f"through must be speed or short_tracklet, got {through!r}")
+    f = Fuser(config, None, room)
+    f._collect = through
+    for r in Fuser._sorted(detections):
+        point = f._accept(r)
+        if point is not None:
+            f._add(r, point)
+    for key in list(f._open):
+        f._close(key)
+    return sorted(f._survivors, key=lambda r: (r.ts_ms, r.sensor, r.track_id, r.x, r.y))
+
+
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Sorted, merged closed intervals."""
     out: list[list[int]] = []
@@ -423,11 +477,12 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out]
 
 
-def _overlaps(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> bool:
-    """Whether two merged interval lists share any instant."""
+def _overlaps(a: list[tuple[int, int]], b: list[tuple[int, int]], tol: int) -> bool:
+    """Whether two merged lists of bucket spans overlap by `tol` or more,
+    i.e. share more than one bucket (one shared bucket is an id handoff)."""
     i = j = 0
     while i < len(a) and j < len(b):
-        if a[i][0] <= b[j][1] and b[j][0] <= a[i][1]:
+        if min(a[i][1], b[j][1]) - max(a[i][0], b[j][0]) >= tol:
             return True
         if a[i][1] < b[j][1]:
             i += 1
@@ -483,17 +538,18 @@ def fuse(
     samples += f.finish()
     people, summary = summarize(samples)
     summary["dropped"] = {**f.dropped, "zones": dict(f.dropped["zones"])}
-    summary["offsets"] = offsets_summary(offsets, f.offsets_applied)
+    summary["offsets"] = offsets_summary(offsets, f.offsets_applied, f.offsets_error)
     summary["preset"] = f.config.preset
     return FuseResult(people, summary)
 
 
-def offsets_summary(offsets: dict | None, applied: bool) -> dict:
+def offsets_summary(offsets: dict | None, applied: bool, error: str | None = None) -> dict:
     """The `summary.offsets` block of a fused response."""
-    offsets = offsets or {}
+    offsets = offsets if isinstance(offsets, dict) else {}
     return {
         "applied": applied,
         "needed": offsets.get("needed"),
         "gain_m": offsets.get("gain_m"),
         "learned_at_ms": offsets.get("learned_at_ms"),
+        "error": error,
     }

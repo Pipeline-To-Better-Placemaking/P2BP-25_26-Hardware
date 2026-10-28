@@ -166,10 +166,16 @@ def learn_offsets(
         return result
 
     def fit_all(use):
+        # Zero-sum least-squares translations first; each camera's points are
+        # then fitted onto the midpoints of the translation-corrected pairs,
+        # which reproduces those translations for the translation model and
+        # adds the small rotation and scale for the similarity model.
+        shift = _zero_sum_translations(use)
         src: dict[str, list] = defaultdict(list)
         dst: dict[str, list] = defaultdict(list)
         for a, pa, b, pb in use:
-            mid = ((pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2)
+            ta, tb = shift[a], shift[b]
+            mid = ((pa[0] + ta[0] + pb[0] + tb[0]) / 2, (pa[1] + ta[1] + pb[1] + tb[1]) / 2)
             src[a].append(pa)
             dst[a].append(mid)
             src[b].append(pb)
@@ -191,7 +197,10 @@ def learn_offsets(
     res = residuals(cams, pairs)
     after = statistics.median(res)
     # sigma: median distance of a sensor's corrected point from the corrected
-    # pair midpoint (half the corrected cross-camera distance).
+    # pair midpoint (half the corrected cross-camera distance). With exactly
+    # two cameras every pair involves both, so their sigmas are equal by
+    # construction and the stage 6 weights come out equal; they differ only
+    # with three or more cameras.
     half: dict[str, list[float]] = defaultdict(list)
     for (a, _, b, _), r in zip(pairs, res):
         half[a].append(r / 2)
@@ -208,17 +217,114 @@ def learn_offsets(
     return result
 
 
+def _solve(m: list[list[float]], v: list[float]) -> list[float]:
+    """Gaussian elimination with partial pivoting for a small dense system."""
+    n = len(v)
+    a = [row[:] + [v[i]] for i, row in enumerate(m)]
+    for col in range(n):
+        piv = max(range(col, n), key=lambda r: abs(a[r][col]))
+        a[col], a[piv] = a[piv], a[col]
+        p = a[col][col]
+        if abs(p) < 1e-12:
+            raise ValueError("singular system")
+        for r in range(n):
+            if r != col and a[r][col]:
+                f = a[r][col] / p
+                for k in range(col, n + 1):
+                    a[r][k] -= f * a[col][k]
+    return [a[i][n] / a[i][i] for i in range(n)]
+
+
+def _zero_sum_translations(pairs) -> dict[str, tuple[float, float]]:
+    """Per-camera translations t minimising sum |(p_a + t_a) - (p_b + t_b)|^2
+    over all pairs, with the translations of each connected group of
+    cameras summing to zero (the normal equations are a graph Laplacian;
+    the constraint removes its constant null space)."""
+    cams = sorted({c for a, _, b, _ in pairs for c in (a, b)})
+    idx = {c: i for i, c in enumerate(cams)}
+    n = len(cams)
+    lap = [[0.0] * n for _ in range(n)]
+    rx, ry = [0.0] * n, [0.0] * n
+    group = list(range(n))
+
+    def root(i):
+        while group[i] != i:
+            i = group[i]
+        return i
+
+    for a, pa, b, pb in pairs:
+        i, j = idx[a], idx[b]
+        lap[i][i] += 1
+        lap[j][j] += 1
+        lap[i][j] -= 1
+        lap[j][i] -= 1
+        dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+        rx[i] += dx
+        ry[i] += dy
+        rx[j] -= dx
+        ry[j] -= dy
+        group[root(i)] = root(j)
+    for i in range(n):
+        for j in range(n):
+            if root(i) == root(j):
+                lap[i][j] += 1.0
+    tx, ty = _solve(lap, rx), _solve(lap, ry)
+    return {c: (tx[i], ty[i]) for c, i in idx.items()}
+
+
+_SENSOR_FIELDS = ("dx", "dy", "theta_deg", "scale")
+
+
+def validate_offsets(data) -> str | None:
+    """None when `data` is usable offsets.json content, else why not."""
+    if not isinstance(data, dict):
+        return "not a JSON object"
+    sensors = data.get("sensors")
+    if not isinstance(sensors, dict):
+        return "sensors: expected an object"
+    for name, entry in sensors.items():
+        if not isinstance(entry, dict):
+            return f"sensors.{name}: expected an object"
+        for key in _SENSOR_FIELDS + (("sigma_m",) if "sigma_m" in entry else ()):
+            v = entry.get(key)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                return f"sensors.{name}.{key}: expected a finite number, got {v!r}"
+        if entry["scale"] <= 0:
+            return f"sensors.{name}.scale: must be > 0, got {entry['scale']!r}"
+        if "sigma_m" in entry and entry["sigma_m"] < 0:
+            return f"sensors.{name}.sigma_m: must be >= 0, got {entry['sigma_m']!r}"
+    return None
+
+
 def load_offsets(path: Path | None) -> dict | None:
-    """Read offsets.json; None when the path is unset or the file is missing."""
+    """Read offsets.json; None when the path is unset or the file is missing.
+    Raises ValueError naming the problem when the file is unreadable or
+    invalid (see `read_offsets` for a variant that never raises)."""
     if path is None:
         return None
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("sensors", {}), dict):
-        raise ValueError(f"{path}: not an offsets file")
+    except OSError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(f"{path}: invalid JSON: {exc}") from exc
+    problem = validate_offsets(data)
+    if problem:
+        raise ValueError(f"{path}: {problem}")
     return data
+
+
+def read_offsets(path: Path | None) -> tuple[dict | None, str | None]:
+    """(offsets, None), (None, None) when missing, or (None, error) when
+    invalid: an invalid file means no correction, never a crash."""
+    try:
+        return load_offsets(path), None
+    except ValueError as exc:
+        return None, str(exc)
 
 
 def save_offsets(path: Path, offsets: dict) -> None:

@@ -91,6 +91,9 @@ def test_unknown_keys_are_ignored_and_reported():
     ({"zones": [{"name": "a", "sensors": "cam2", "rect": {"x": [0, 1], "y": [0, 1]}}]}, "zones[0].sensors"),
     ({"zones": [{"name": "a", "rect": {"x": [0, 1], "y": [0, 1]}, "colour": "red"}]}, "zones[0]"),
     ({"room": {"x": [0, 7]}}, "room"),
+    ({"smooth_window": 4}, "smooth_window"),
+    ({"smooth_window": 0}, "smooth_window"),
+    ({"version": 2}, "version"),
     ([1, 2], "JSON object"),
 ])
 def test_validation_errors_name_the_key(data, needle):
