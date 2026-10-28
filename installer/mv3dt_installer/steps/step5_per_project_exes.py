@@ -84,6 +84,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from mv3dt_installer import app as app_mod
 from mv3dt_installer import cameras as cameras_mod
 from mv3dt_installer import config as config_mod
+from mv3dt_installer import prompting
 from mv3dt_installer import shellout
 from mv3dt_installer import systemd as systemd_mod
 from mv3dt_installer.state import write_json_atomic
@@ -1546,7 +1547,7 @@ def _confirm_start_now(ctx: "Context") -> bool:
     `step3_amc_launcher._confirm_launch_now`'s identical reasoning)."""
     if ctx.non_interactive:
         return False
-    reason = app_mod.prompt_unavailable_reason()
+    reason = prompting.prompt_unavailable_reason()
     if reason is not None:
         # A hidden prompt blocks forever; take the documented default.
         ctx.log.warn(

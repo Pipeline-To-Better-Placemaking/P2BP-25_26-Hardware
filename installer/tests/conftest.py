@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from mv3dt_installer import logs
+from mv3dt_installer import logs, prompting
 
 
 @pytest.fixture(autouse=True)
@@ -29,3 +29,12 @@ def _reset_logs_global_state():
     with logs._lock:
         logs._live_stream = None
         logs._live_writer = None
+
+
+@pytest.fixture(autouse=True)
+def _prompts_visible(monkeypatch):
+    """pytest's stdin is never a terminal, so every prompt would take its
+    hidden-prompt branch. Tests answer prompts through injected stand-ins,
+    so treat prompts as visible unless a test patches this to return a
+    reason. `tests/test_prompting.py` tests the real function."""
+    monkeypatch.setattr(prompting, "prompt_unavailable_reason", lambda: None)

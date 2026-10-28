@@ -79,6 +79,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from mv3dt_installer import app as app_mod
 from mv3dt_installer import config as config_mod
+from mv3dt_installer import prompting
 from mv3dt_installer import progress_exec
 from mv3dt_installer.steps import step2_deepstream_sdk as step2_mod
 from mv3dt_installer.steps import StepResult, StepStatus, register
@@ -361,12 +362,30 @@ def resolve_project_identity(
                 "LOCATION_ID is required in installer.conf or via --location-id "
                 "for a non-interactive AMC launch"
             )
+        reason = prompting.prompt_unavailable_reason()
+        if reason is not None:
+            # There is no default to fall back on, and a hidden prompt
+            # blocks forever.
+            raise AmcLaunchError(
+                f"LOCATION_ID is not set and cannot be asked for ({reason}). "
+                f"Set {CONF_LOCATION_ID_KEY}=<id> in installer.conf (then "
+                "--non-interactive also works), or run the installer without "
+                "a pipe to be asked."
+            )
         location = _INPUT("Location ID (3-50 letters, numbers, ._-): ")
     location = _validated_identity(location, CONF_LOCATION_ID_KEY)
 
     project_name = project or ctx.conf.get(CONF_PROJECT_NAME_KEY)
     if not project_name:
+        reason = None if ctx.non_interactive else prompting.prompt_unavailable_reason()
         if ctx.non_interactive:
+            project_name = location
+        elif reason is not None:
+            ctx.log.warn(
+                f"{reason}: not asking for the AMC project name; using "
+                f"LOCATION_ID ({location}), the default. Set "
+                f"{CONF_PROJECT_NAME_KEY} in installer.conf to choose another."
+            )
             project_name = location
         else:
             answer = _INPUT(f"AMC project name [{location}]: ").strip()
@@ -1861,7 +1880,7 @@ def _confirm_launch_now(ctx: "Context") -> bool:
     Step 2 makes the same decision)."""
     if ctx.non_interactive:
         return False
-    reason = app_mod.prompt_unavailable_reason()
+    reason = prompting.prompt_unavailable_reason()
     if reason is not None:
         # A hidden prompt blocks forever; take the documented default.
         ctx.log.warn(

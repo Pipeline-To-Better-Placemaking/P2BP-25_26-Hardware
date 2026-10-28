@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from mv3dt_installer import app  # noqa: E402
+from mv3dt_installer import prompting  # noqa: E402
 from mv3dt_installer import logs, report  # noqa: E402
 from mv3dt_installer.steps import STEP_REGISTRY, StepStatus  # noqa: E402
 from mv3dt_installer.steps import step2_deepstream_sdk as step2  # noqa: E402
@@ -38,14 +39,6 @@ def _reset_transcript_state():
 @pytest.fixture(autouse=True)
 def _force_no_colour(monkeypatch):
     monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
-
-
-@pytest.fixture(autouse=True)
-def _prompts_visible(monkeypatch):
-    """pytest's stdin is never a terminal; prompt tests answer through the
-    injected `_INPUT`, so treat the prompt as visible unless a test says
-    otherwise."""
-    monkeypatch.setattr(app, "prompt_unavailable_reason", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -1635,6 +1628,53 @@ def test_identity_defaults_project_to_location_and_persists(tmp_path, monkeypatc
     answers = iter(("site-42", ""))
     monkeypatch.setattr(step3, "_INPUT", lambda _prompt: next(answers))
     assert step3.resolve_project_identity(ctx) == ("site-42", "site-42")
+
+
+def _hide_prompts(monkeypatch, reason="stdout is not a terminal (is the output piped?)"):
+    monkeypatch.setattr(prompting, "prompt_unavailable_reason", lambda: reason)
+
+    def _boom(prompt):  # pragma: no cover -- must never be called
+        raise AssertionError(f"input() called for a hidden prompt: {prompt}")
+
+    monkeypatch.setattr(step3, "_INPUT", _boom)
+
+
+def test_identity_location_fails_fast_when_the_prompt_is_hidden(tmp_path, monkeypatch):
+    """No default exists for LOCATION_ID, so a hidden prompt must fail with
+    instructions instead of blocking the run."""
+    ctx = FakeContext(tmp_path, conf={step2.CONF_METHOD_KEY: "deb"}, non_interactive=False)
+    _hide_prompts(monkeypatch)
+    with pytest.raises(step3.AmcLaunchError) as excinfo:
+        step3.resolve_project_identity(ctx)
+    message = str(excinfo.value)
+    assert "stdout is not a terminal" in message
+    assert "LOCATION_ID=<id> in installer.conf" in message
+    assert "without a pipe" in message
+
+
+def test_identity_project_name_takes_location_when_the_prompt_is_hidden(
+    tmp_path, monkeypatch, capsys
+):
+    ctx = FakeContext(
+        tmp_path,
+        conf={step2.CONF_METHOD_KEY: "deb", step3.CONF_LOCATION_ID_KEY: "site-07"},
+        non_interactive=False,
+    )
+    _hide_prompts(monkeypatch)
+    assert step3.resolve_project_identity(ctx) == ("site-07", "site-07")
+    assert ctx.conf[step3.CONF_PROJECT_NAME_KEY] == "site-07"
+    assert "using LOCATION_ID (site-07), the default" in capsys.readouterr().err
+
+
+def test_confirm_launch_now_does_not_launch_when_the_prompt_is_hidden(
+    tmp_path, monkeypatch, capsys
+):
+    ctx = FakeContext(tmp_path, non_interactive=False)
+    _hide_prompts(monkeypatch)
+    assert step3._confirm_launch_now(ctx) is False
+    err = capsys.readouterr().err
+    assert "not launching (the default)" in err
+    assert "without a pipe" in err
 
 
 def test_amc_project_created_once_then_persisted(tmp_path):
