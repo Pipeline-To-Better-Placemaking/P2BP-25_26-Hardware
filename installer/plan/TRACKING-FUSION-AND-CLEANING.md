@@ -369,7 +369,9 @@ same-id pairs**: samples of one `track_id` on two sensors in the same
 3. **Residual spread**: `sigma_m` per sensor is the median absolute
    residual after correction, used as the stage 6 weight.
 4. **Report** the median cross-camera distance before and after, the gain,
-   and the pair count. With fewer than `200` pairs, write nothing and exit `1`.
+   and the pair count. Without `--save` the report is always printed and
+   the exit code is `0`. With `--save` and fewer than `200` pairs, write
+   nothing and exit `1`.
 
 `learn-offsets --save` is the only writer. Nothing applies the file except stage
 4, and only while `offsets_apply` is true.
@@ -486,8 +488,8 @@ passthrough ([`STEP-8` section 10](STEP-8-TRACKING-HISTORY.md#10-cli))
 forwards them unchanged:
 
 ```bash
-mv3dt-installer tracking zones-suggest [--hours N | --from T --to T]
-mv3dt-installer tracking learn-offsets [--hours N | --from T --to T] [--model translation|similarity] [--save]
+mv3dt-installer tracking zones-suggest [--from T] [--to T] [--hours N]
+mv3dt-installer tracking learn-offsets [--from T] [--to T] [--hours N] [--model translation|similarity] [--save]
 mv3dt-installer tracking clean-report --from T --to T
 ```
 
@@ -498,10 +500,18 @@ mv3dt-installer tracking clean-report --from T --to T
 | `clean-report` | day files, both files | nothing | the fused `summary` ([section 8.1](#81-range)) as JSON |
 
 `T` is unix milliseconds or ISO 8601; an ISO time without an offset is
-workstation local time. Without `--from`/`--to`, `--hours` sets a window
-ending now: default `24` for `zones-suggest`, `72` for `learn-offsets`.
-`clean-report` requires `--from` and `--to`. `learn-offsets` exits `1`
-when it finds fewer than `200` pairs ([section 6.1](#61-learning-method)).
+workstation local time. The window is chosen as follows:
+
+| Options given | Window |
+|---|---|
+| `--from` and `--to` | exactly `--from` to `--to` |
+| `--from` alone | `--from` to now |
+| neither, or `--to` alone | `--hours` ending at `--to` (default now); `--hours` defaults to `24` for `zones-suggest`, `72` for `learn-offsets` |
+
+`clean-report` requires `--from` and `--to`. `learn-offsets` without
+`--save` always prints its report and exits `0`; with `--save` and fewer
+than `200` pairs it writes nothing and exits `1`
+([section 6.1](#61-learning-method)).
 All three run as the invoking user against the read-only day
 files, so they need neither the lease nor a ticket.
 
