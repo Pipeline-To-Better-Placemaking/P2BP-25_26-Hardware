@@ -21,10 +21,12 @@ detected as people for hours. **Fusion and cleaning run entirely on the
 workstation, over DeepStream's recorded per-camera output, at query time.**
 Raw rows in the day files are never modified.
 
-The stage order and every strict default below are taken from the prototype
-`clean.py` (a local analysis script, not committed), which was run against a
-full recorded day and an exported hour. Where this spec departs from the
-prototype it says so.
+The strict defaults below are taken from the prototype `clean.py` (a local
+analysis script, not committed), which was run against a full recorded day
+and an exported hour. The prototype keys tracklets by `(track, sensor)`,
+associates them with duplicate merging and sequential stitching, and takes a
+per-person median after association. This spec departs from it in five
+places, listed in [section 5](#5-fusion-stages).
 
 ---
 
@@ -85,7 +87,8 @@ carrying shared MV3DT ids. Calibration itself is centimetre-level; the
 cross-camera gap comes from DeepStream's model-based foot estimate, not from
 the floor homography.
 
-The prototype applied to the same hour gave:
+The prototype applied to the same hour, with its hard-coded TV zone,
+gave:
 
 | Metric | Before | After |
 |---|---|---|
@@ -186,8 +189,8 @@ operator has not pinned. An unknown key is logged and ignored.
 | `smooth_window` | `5` | buckets | 7 | rolling median window |
 | `min_person_s` | `3.0` | s | 8 | drop shorter people |
 
-`shared_id_gate_m` is the one value not taken from the prototype, which
-joined every same-id pair unconditionally. 1.5 m sits above the measured
+`shared_id_gate_m` is the one value not taken from the prototype, which has
+no shared-id pass. 1.5 m sits above the measured
 seated same-id distance (about 1.2 m) so the hint keeps today's behavior,
 and below the room's smallest plausible separation between two people who
 were merged by an id mistake.
@@ -256,9 +259,17 @@ A zone with both or neither of `rect` and `polygon` is invalid
 `fuse.py` is stdlib only. It exposes a resumable `Fuser` that carries state
 across time-ordered chunks, like `stitch.Stitcher` today, so `export` can
 stream a 24 h window without loading it. The stages run in this order
-(REQUIRED); the prototype's order differs only in that it fused cameras
-before associating, which this spec moves after association so the camera
-count per bucket is kept.
+(REQUIRED). The departures from the prototype are:
+
+- **Shared-id pass** (stage 5a) with its `shared_id_gate_m` of 1.5 m; the
+  prototype has none.
+- **Offset correction** (stage 4); the prototype has none.
+- **Inverse-variance weighted mean** across sensors (stage 6) instead of
+  the prototype's per-person median.
+- **Room bounds from the calibration** (stage 1) instead of hard-coded room
+  dimensions.
+- **An empty default `zones` list**; the prototype hard-coded one zone
+  around the TV.
 
 1. **Bounds and zones**: drop samples outside the room rectangle grown by
    `room_margin_m`, then samples inside any applicable zone
@@ -505,10 +516,14 @@ shipped as their own unit.
    with `Text file busy`. Write the new binary to a temp file in the same
    directory, `chmod 755`, `fsync`, then `os.replace` it over the target,
    so the running process keeps its old inode.
-2. **Prompts honor Ctrl-C and SIGTERM**: an interactive prompt must not
-   swallow `KeyboardInterrupt` or ignore `SIGTERM`. Either ends the run
-   with the step left not `COMPLETE` and the usual exit codes (`130`,
-   `143`).
+2. **Interactive Step 5 prompt honors Ctrl-C and SIGTERM**: the interactive
+   Step 5 prompt, with its progress spinner, did not react to Ctrl-C or
+   `SIGTERM`, and blocked when stdout was piped. It must end the run with
+   the step left not `COMPLETE`, and must not block on a non-tty stdout.
+   F1 identifies the exact module responsible and lists it in its PR.
+   `waitui.py` is not the bug: its existing `KeyboardInterrupt` to
+   `CANCELLED` handling correctly halts without `COMPLETE` and is kept
+   unchanged.
 3. **Gated-off steps are not marked complete**: a step skipped because its
    gate is `off` is logged as skipped but not persisted as `COMPLETE`, so
    turning the gate on later runs it. This amends the auto-`COMPLETE` rule
@@ -558,9 +573,12 @@ contract the API serves. Files: `TrackingReplayPanel.tsx`,
    injected value, a `zones-suggest` hit on the static object only, and a
    preset change taking effect on the next call without a restart.
 3. **Offline check** (local only, not committed) against the exported hour
-   and a copy of the database: the hour gives at most about 12 people and
-   at most 2 to 3 at once; the walking window gives about 3 people;
-   `clean-report` counters are plausible.
+   and a copy of the database: the hour gives about 10 people and at most
+   2 at once; the walking window gives about 3 people; `clean-report`
+   counters are plausible. These figures assume the suggested TV zone from
+   `zones-suggest` is pasted into `cleaning.json`, as the prototype's
+   hard-coded zone did; with the default empty `zones` list the count is
+   higher.
 4. **Live checks after release**:
    - [ ] Step 8 re-run seeds `cleaning.json` and leaves an existing one
          untouched.
@@ -585,7 +603,7 @@ contract the API serves. Files: `TrackingReplayPanel.tsx`,
 | F1 Installer fixes | `feat/installer-upgrade-fixes` | `steps/step3_amc_launcher.py` (binary replace), `app.py` (signals, gated-off steps), `steps/step5_per_project_exes.py` (registry drift), their tests | none | 1 |
 | C3 API + CLI | `feat/installer-tracking-fused-api` | `mv3dt_tracking/api.py`, `cli.py`, `settings.py`, `tests/tracking/test_api.py`, `test_cli.py` | C2 | 2 |
 | W1 Replay fused view | `feat/replay-fused-view` | client `TrackingReplayPanel.tsx`, `workstationTrackingApi.ts`, `trackingTypes.ts` | C3 (contract) | 2 |
-| C4 Step 8 wiring | `feat/installer-step8-cleaning` | `steps/step8_tracking_history.py`, `assets/systemd/mv3dt-tracking.service.in`, `app.py` (tracking passthrough), `tests/test_step8_tracking_history.py` | C3, F1 | 3 |
+| C4 Step 8 wiring | `feat/installer-step8-cleaning` | `steps/step8_tracking_history.py` (seeding, tracking passthrough), `assets/systemd/mv3dt-tracking.service.in`, `tests/test_step8_tracking_history.py` | C3 | 3 |
 
 Package paths are relative to
 `installer/mv3dt_installer/assets/tracking/` for `mv3dt_tracking/` and to
@@ -594,7 +612,6 @@ Package paths are relative to
 
 Serialization points:
 
-- C4 and F1 both touch `app.py`, so C4 waits for F1.
 - C3 imports `fuse`, `offsets` and `cleaning`, so it branches from C2.
 - W1 depends only on C3's wire contract
   ([section 8](#8-api-changes)), not on its code.
@@ -613,7 +630,8 @@ DeepStream facts here (per-camera output with shared MV3DT ids, the
 [`STEP-8`](STEP-8-TRACKING-HISTORY.md#references). The measured numbers
 come from a local analysis of one recorded day and are not committed.
 
-- NVIDIA DeepStream developer guide, multi-view 3D tracking — **backs
+- [DeepStream MV3DT](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_MV3DT.html)
+  — **backs
   [section 2](#2-problem-and-measured-evidence)**: MV3DT output is per
   camera, with ids shared across views.
 - [Gst-nvmsgconv](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_plugin_gst-nvmsgconv.html)
