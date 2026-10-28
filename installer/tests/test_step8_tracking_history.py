@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import pathlib
+import os
 import stat
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -37,12 +39,23 @@ class Runner:
         self.tailscale_status = tailscale_status
         self.fail = set(fail)
         self.active = None  # None: is-active succeeds except in wipe tests
+        self.kwargs = []
+        self.exit_code = 0  # what a package run (`-m mv3dt_tracking`) returns
 
     def __call__(self, *argv, **kwargs):
         argv = tuple(str(a) for a in argv)
         self.calls.append(argv)
+        self.kwargs.append(kwargs)
         out, code = "", 0
-        if argv[:2] == ("python3", "-c"):
+        if argv[1:3] == ("-I", "-c") and argv[3] == s8._SEED_PROGRAM:
+            # The real seed program, run against the copied package.
+            done = subprocess.run(
+                [sys.executable, *argv[1:]], capture_output=True, text=True, check=False
+            )
+            out, code = done.stdout, done.returncode
+        elif "-m" in argv and s8.PACKAGE_NAME in argv:
+            code = self.exit_code
+        elif argv[:2] == ("python3", "-c"):
             if self.python_version is None:
                 code = 1
             out = self.python_version or ""
@@ -408,12 +421,43 @@ def test_unit_renders_fully_with_correct_execstart(tmp_path):
     calib = ctx.install_dir / "deepstream" / "calibration" / "site-42"
     assert f'Environment="CALIB_DIR={calib}"' in text
     assert f'Environment="PYTHONPATH={tracking}"' in text
-    assert "Environment=BIND=127.0.0.1:8090" in text
+    assert 'Environment="BIND=127.0.0.1:8090"' in text
+    assert f'Environment="CLEANING_FILE={tracking}/cleaning.json"' in text
+    assert f'Environment="OFFSETS_FILE={tracking}/offsets.json"' in text
+    assert 'Environment="PYTHONUNBUFFERED=1"' in text
     assert "After=network.target mosquitto.service" in text
     assert "Wants=mosquitto.service" in text
     assert "Restart=on-failure" in text
     assert "StandardOutput=journal" in text
     assert "0.0.0.0" not in text
+
+
+def _unit_environment(text):
+    """The unit's Environment= lines as a dict, in order."""
+    out = {}
+    for line in text.splitlines():
+        if line.startswith("Environment="):
+            key, _, value = line[len("Environment="):].strip('"').partition("=")
+            out[key] = value
+    return out
+
+
+def test_unit_environment_is_the_service_environment(tmp_path):
+    ctx = Context(tmp_path)
+    env = s8.service_environment(ctx)
+    assert _unit_environment(s8.render_tracking_unit(ctx)) == env
+    # The same paths the package falls back to when the variables are unset.
+    tracking = ctx.install_dir / "tracking"
+    assert env["CLEANING_FILE"] == str(tracking / "cleaning.json")
+    assert env["OFFSETS_FILE"] == str(tracking / "offsets.json")
+    assert env["BIND"] == s8.LISTEN_URL.removeprefix("http://")
+    assert not any(s8.KEY_SECRET in k or s8.KEY_SECRET in v for k, v in env.items())
+
+
+def test_unit_escapes_percent_in_environment(tmp_path):
+    ctx = Context(tmp_path, conf={GATE: "on", "LOCATION_ID": "site%42"})
+    env = _unit_environment(s8.render_tracking_unit(ctx))
+    assert env["CALIB_DIR"].endswith("/site%%42")
 
 
 def test_unit_rejects_unquotable_paths(tmp_path):
@@ -660,3 +704,193 @@ def test_subcommand_refuses_when_not_installed(tmp_path):
     ctx = Context(tmp_path)
     assert s8._handle_tracking(["stats"], ctx) == 1
     assert ctx.runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# cleaning.json seed (TRACKING-FUSION-AND-CLEANING.md sections 4.1 and 10)
+# ---------------------------------------------------------------------------
+
+STRICT_SEED = {"version": 1, "preset": "strict", "zones": []}
+
+
+def _synced(tmp_path):
+    ctx = Context(tmp_path)
+    s8.sync_package(ctx)
+    return ctx, ctx.install_dir / "tracking" / "cleaning.json"
+
+
+def test_seed_comes_from_the_package_defaults(tmp_path):
+    ctx, path = _synced(tmp_path)
+    seed, error = s8._strict_seed(ctx)
+    assert error is None and seed == STRICT_SEED
+    (call,) = ctx.runner.calls
+    assert call[:3] == (str(s8._venv_python(ctx)), "-I", "-c")
+    assert call[-1] == str(ctx.install_dir / "tracking")
+    # The installer restates none of the values; they come from cleaning.py.
+    assert "'version': STRICT['version']" in s8._SEED_PROGRAM
+    assert "list(STRICT['zones'])" in s8._SEED_PROGRAM
+
+
+def test_seed_writes_once_with_mode_644_owned_by_the_service_user(tmp_path, monkeypatch):
+    ctx, path = _synced(tmp_path)
+    owners = []
+    monkeypatch.setattr(s8.os, "fchown", lambda fd, uid, gid: owners.append((uid, gid)))
+    old_umask = os.umask(0o077)
+    try:
+        assert s8.seed_cleaning_file(ctx) == (True, None)
+    finally:
+        os.umask(old_umask)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == STRICT_SEED
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert owners == [(ctx.user.uid, ctx.user.gid)]
+    assert [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+    ctx.runner.calls.clear()
+    assert s8.seed_cleaning_file(ctx) == (False, None)
+    assert ctx.runner.calls == []
+
+
+def test_seed_never_overwrites_an_existing_file_or_symlink(tmp_path):
+    ctx, path = _synced(tmp_path)
+    path.write_text('{"preset": "relaxed"}\n', encoding="utf-8")
+    path.chmod(0o600)
+    ctx.runner.calls.clear()
+
+    assert s8.seed_cleaning_file(ctx) == (False, None)
+    assert path.read_text(encoding="utf-8") == '{"preset": "relaxed"}\n'
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert ctx.runner.calls == []
+
+    path.unlink()
+    path.symlink_to(tmp_path / "elsewhere.json")  # dangling
+    assert s8.seed_cleaning_file(ctx) == (False, None)
+    assert path.is_symlink() and not (tmp_path / "elsewhere.json").exists()
+
+
+def test_seed_failure_is_a_warning(tmp_path, env_values, capsys):
+    ctx = Context(tmp_path)
+    ctx.runner.fail = {s8._SEED_PROGRAM}
+
+    assert s8.Step8TrackingHistory().run(ctx).status is StepStatus.COMPLETE
+    assert not (ctx.install_dir / "tracking" / "cleaning.json").exists()
+    assert "cleaning.json was not seeded" in capsys.readouterr().err
+
+
+def test_run_seeds_cleaning_but_never_offsets(tmp_path, env_values):
+    ctx = Context(tmp_path, runner=Runner(tailscale_status=_logged_in()))
+    assert s8.Step8TrackingHistory().run(ctx).status is StepStatus.COMPLETE
+    tracking = ctx.install_dir / "tracking"
+    assert json.loads((tracking / "cleaning.json").read_text(encoding="utf-8")) == STRICT_SEED
+    assert not (tracking / "offsets.json").exists()
+
+
+def test_upgrade_rerun_restarts_and_keeps_both_files(tmp_path, env_values):
+    ctx = Context(tmp_path, runner=Runner(tailscale_status=_logged_in()))
+    step = s8.Step8TrackingHistory()
+    step.run(ctx)
+    tracking = ctx.install_dir / "tracking"
+    cleaning = tracking / "cleaning.json"
+    offsets = tracking / "offsets.json"
+    cleaning.write_text('{"preset": "relaxed", "zones": []}\n', encoding="utf-8")
+    offsets.write_text('{"version": 1}\n', encoding="utf-8")
+    # An older installed package, as after an installer upgrade.
+    (tracking / "mv3dt_tracking" / "cleaning.py").write_text("# old\n", encoding="utf-8")
+    unit = systemd.UNIT_DIR / s8.UNIT_NAME
+    unit.write_text("[Unit]\nDescription=old\n", encoding="utf-8")
+    ctx.runner.calls.clear()
+    ctx.reported.clear()
+
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert ("systemctl", "restart", s8.UNIT_NAME) in ctx.runner.calls
+    assert ctx.reported == [("installed", s8.UNIT_NAME, s8.bundled_version(ctx))]
+    assert unit.read_text(encoding="utf-8") == s8.render_tracking_unit(ctx)
+    bundled = shellout.asset_path("tracking", "mv3dt_tracking", "cleaning.py")
+    assert (tracking / "mv3dt_tracking" / "cleaning.py").read_bytes() == bundled.read_bytes()
+    assert cleaning.read_text(encoding="utf-8") == '{"preset": "relaxed", "zones": []}\n'
+    assert offsets.read_text(encoding="utf-8") == '{"version": 1}\n'
+
+    # A second re-run with nothing new is a no-op.
+    ctx.runner.calls.clear()
+    ctx.reported.clear()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert ("systemctl", "restart", s8.UNIT_NAME) not in ctx.runner.calls
+    assert ctx.reported == [("already", s8.UNIT_NAME, s8.bundled_version(ctx))]
+    assert cleaning.read_text(encoding="utf-8") == '{"preset": "relaxed", "zones": []}\n'
+
+
+# ---------------------------------------------------------------------------
+# Cleaning command passthrough (TRACKING-FUSION-AND-CLEANING.md section 9)
+# ---------------------------------------------------------------------------
+
+
+def _env_pairs(call):
+    """The KEY=VALUE arguments of an `env ... python -m pkg` call."""
+    assert call[0] == "env"
+    end = next(i for i, a in enumerate(call) if "=" not in a and i > 0)
+    return dict(a.split("=", 1) for a in call[1:end]), call[end:]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["zones-suggest", "--hours", "12", "--json"],
+        ["learn-offsets", "--from", "2026-10-01T08:00", "--model", "similarity", "--save"],
+        ["clean-report", "--from", "1700000000000", "--to", "1700003600000"],
+        ["learn-offsets", "--help"],
+    ],
+)
+def test_cleaning_commands_forward_args_with_the_service_environment(tmp_path, argv):
+    ctx, python = _with_venv(tmp_path)
+    as_user = []
+    ctx.run_as_user = lambda *a, **kw: as_user.append(a) or ctx.runner(*a, **kw)
+
+    assert s8._handle_tracking([*argv, "--non-interactive"], ctx) == 0
+
+    (call,) = ctx.runner.calls
+    assert as_user == [call]  # as the service user, never as root
+    env, command = _env_pairs(call)
+    assert command == (str(python), "-m", "mv3dt_tracking", *argv)
+    assert env == s8.service_environment(ctx)
+    assert env == _unit_environment(s8.render_tracking_unit(ctx))
+    assert ctx.runner.kwargs[0]["cwd"] == str(ctx.install_dir / "tracking")
+    assert not any(s8.KEY_SECRET in arg for arg in call)
+
+
+def test_stats_and_wipe_use_the_service_environment_too(tmp_path):
+    ctx, _ = _with_venv(tmp_path)
+    s8._handle_tracking(["stats"], ctx)
+    s8._handle_tracking(["wipe", "--yes"], ctx)
+    package_calls = [c for c in ctx.runner.calls if c[0] == "env"]
+    assert len(package_calls) == 2
+    for call in package_calls:
+        assert _env_pairs(call)[0] == s8.service_environment(ctx)
+
+
+def test_cleaning_command_exit_code_is_forwarded(tmp_path):
+    ctx, _ = _with_venv(tmp_path)
+    ctx.runner.exit_code = 1  # e.g. learn-offsets --save with too few pairs
+    assert s8._handle_tracking(["learn-offsets", "--save"], ctx) == 1
+
+
+def test_cleaning_commands_refuse_when_gated_off(tmp_path, capsys):
+    ctx, _ = _with_venv(tmp_path)
+    ctx.conf = {GATE: "off", "LOCATION_ID": "site-42"}
+    assert s8._handle_tracking(["zones-suggest"], ctx) == 1
+    assert ctx.runner.calls == []
+    assert "tracking history is off" in capsys.readouterr().err
+
+
+def test_cleaning_commands_refuse_when_not_installed(tmp_path, capsys):
+    ctx = Context(tmp_path)
+    assert s8._handle_tracking(["clean-report", "--from", "0", "--to", "1"], ctx) == 1
+    assert ctx.runner.calls == []
+    assert "not installed" in capsys.readouterr().err
+
+
+def test_tracking_help_lists_the_cleaning_commands(capsys):
+    with pytest.raises(SystemExit):
+        s8._handle_tracking(["--help"], SimpleNamespace())
+    out = capsys.readouterr().out
+    for name in s8.CLEANING_COMMANDS:
+        assert name in out

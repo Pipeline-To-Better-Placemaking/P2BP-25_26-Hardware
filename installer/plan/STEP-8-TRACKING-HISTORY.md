@@ -105,6 +105,8 @@ projects and local calibrations to maintain.
 | `<install_dir>/tracking/venv/` | the service venv with pinned dependencies |
 | `/var/lib/mv3dt-tracking/YYYY-MM-DD.sqlite` | one SQLite database per UTC day, WAL mode |
 | `<install_dir>/secrets/tracking.env` | ticket secret, project id, allowed origins; mode `600` |
+| `<install_dir>/tracking/cleaning.json` | strict cleaning seed, written once; mode `644` ([section 4.5](#45-cleaningjson-and-offsetsjson)) |
+| `<install_dir>/tracking/offsets.json` | never written by Step 8; only `learn-offsets --save` creates it |
 | `/etc/systemd/system/mv3dt-tracking.service` | the recorder and API service |
 | `tailscale serve` mapping | HTTPS `8443` on the tailnet to `http://127.0.0.1:8090` |
 
@@ -203,6 +205,8 @@ never open a listener the operator did not ask for.
 | Data directory | `/var/lib/mv3dt-tracking/` |
 | Database file | `YYYY-MM-DD.sqlite`, one per UTC day, `journal_mode=WAL` |
 | Secrets file | `<install_dir>/secrets/tracking.env`, mode `600` |
+| Cleaning file | `<install_dir>/tracking/cleaning.json` (`CLEANING_FILE`) |
+| Offsets file | `<install_dir>/tracking/offsets.json` (`OFFSETS_FILE`) |
 | Unit | `mv3dt-tracking.service` |
 | Listen address | `127.0.0.1:8090` |
 | Tailnet exposure | HTTPS `8443` via `tailscale serve` |
@@ -243,6 +247,57 @@ runs the package's `serve` command from the venv
 ([section 10](#10-cli)). One process runs both the recorder and the API, so
 the in-memory lease state in [section 9](#9-data-access-lock-required) has a
 single owner.
+
+**REQUIRED — one environment list.** The template carries a single
+`@SERVICE_ENVIRONMENT@` marker in `[Service]`. `render_tracking_unit()`
+expands it to one `Environment="KEY=value"` line per entry of
+`service_environment()` in `steps/step8_tracking_history.py`, in this order:
+
+| Variable | Value |
+|---|---|
+| `PYTHONPATH` | `<install_dir>/tracking` |
+| `DATA_DIR` | `/var/lib/mv3dt-tracking` |
+| `CALIB_DIR` | `<install_dir>/deepstream/calibration/<LOCATION_ID>`, or the persisted `CALIBRATION_DIR` |
+| `CAMERA_MODELS_DIR` | `<install_dir>/deepstream/camera_models` |
+| `CLEANING_FILE` | `<install_dir>/tracking/cleaning.json` |
+| `OFFSETS_FILE` | `<install_dir>/tracking/offsets.json` |
+| `BIND` | `127.0.0.1:8090` |
+| `PYTHONUNBUFFERED` | `1` |
+
+Values are checked with the same quoting rule as every other marker and
+have `%` doubled for systemd. The `CLEANING_FILE` and `OFFSETS_FILE` paths
+match the package's own defaults in `settings.py`. The `tracking`
+passthrough ([section 10](#10-cli)) passes the same list, so the two can
+never drift.
+
+### 4.5 `cleaning.json` and `offsets.json`
+
+Both files are operator data, read by the package as described in
+[`TRACKING-FUSION` section 4.1](TRACKING-FUSION-AND-CLEANING.md#41-file-and-reload-required) and
+[`TRACKING-FUSION` section 6.2](TRACKING-FUSION-AND-CLEANING.md#62-offsetsjson-schema).
+Neither is a managed template, so the edit protection in
+[`LIVE-BASELINE-AND-EDIT-PROTECTION.md`](LIVE-BASELINE-AND-EDIT-PROTECTION.md)
+does not apply to them.
+
+| File | Written by | Owner, mode | Re-run and upgrade |
+|---|---|---|---|
+| `cleaning.json` | Step 8 `run`, only when the path does not exist | invoking user, `644` | never touched again |
+| `offsets.json` | `mv3dt-installer tracking learn-offsets --save` only | invoking user | never touched by Step 8 |
+
+**RESOLVED — the seed comes from the package.** The seed is
+`{"version", "preset", "zones"}` with the strict values. Step 8 runs a short
+program in the venv interpreter (`python3 -I -c ...`, as the invoking user)
+that reads `cleaning.STRICT` and `cleaning.PRESETS`, checks the result with
+`parse_config()` and prints it, so the installer restates no default. The
+file is created under a temporary name with mode `644` regardless of the
+umask, chowned to the invoking user, then hard-linked into place: it
+appears complete or not at all, and an existing file or symlink, dangling or
+not, is never replaced. A failed seed is a warning, not a failure, because a
+missing file already means strict defaults.
+
+The invoking user is the unit's `User=`, and it owns
+`<install_dir>/tracking/`, so `learn-offsets --save` can write
+`offsets.json` there and the service can read it.
 
 ---
 
@@ -416,12 +471,17 @@ lock.
 
 ## 10. CLI
 
-The package's `cli.py` provides `serve | stats | wipe --yes [--before DATE]`.
+The package's `cli.py` provides `serve | stats | wipe --yes [--before DATE]`
+and the cleaning commands `zones-suggest | learn-offsets | clean-report`
+([`TRACKING-FUSION` section 9](TRACKING-FUSION-AND-CLEANING.md#9-cli-and-installer-passthrough)).
 `serve` is the unit's `ExecStart`. Step 8 registers the installer subcommand:
 
 ```bash
 mv3dt-installer tracking stats
 mv3dt-installer tracking wipe --yes [--before DATE]
+mv3dt-installer tracking zones-suggest [--from T] [--to T] [--hours N] [--json]
+mv3dt-installer tracking learn-offsets [--from T] [--to T] [--hours N] [--model translation|similarity] [--save]
+mv3dt-installer tracking clean-report --from T --to T
 ```
 
 `stats` reports what is recorded (row counts per day file, data span).
@@ -432,6 +492,25 @@ refuses. If the unit is still active after the stop, it refuses and leaves
 the files and the service alone; a workstation without the unit can still
 be wiped.
 Wipe is local only ([section 3.1](#31-security-controls-required)).
+
+**REQUIRED — the cleaning passthrough.** The three cleaning commands are
+forwarded to the package unchanged, `--help` included; only the framework
+flags (`--install-dir`, `--log-dir`, `--non-interactive`, `--verbose`) are
+removed. Every package command, `stats` and `wipe` too, runs as follows:
+
+| Item | Value |
+|---|---|
+| Interpreter | `<install_dir>/tracking/venv/bin/python3 -m mv3dt_tracking <command> <args>` |
+| User | the invoking user via `ctx.run_as_user`, which is the unit's `User=` |
+| Working directory | `<install_dir>/tracking`, the unit's `WorkingDirectory=` |
+| Environment | `service_environment()` ([section 4.4](#44-the-unit)), passed through `env` |
+| Not passed | the unit's `EnvironmentFile=` sources: `secrets/tracking.env` (the ticket secret never leaves its file) and `installer.conf` (no cleaning command reads its keys) |
+| Exit code | the package's, returned unchanged |
+| Gate `off` (cleaning commands) | exits `1` with `tracking history is off in installer.conf ...`; nothing runs |
+| Not installed | exits `1` with `tracking history is not installed ...`; nothing runs |
+
+The passthrough never prompts. Running as the invoking user keeps a saved
+`offsets.json` owned by the user the service runs as.
 
 ---
 
@@ -462,11 +541,14 @@ Implements the `Step` protocol
    `<install_dir>/tracking/`.
 2. **Venv**: build `<install_dir>/tracking/venv` and install the pinned
    requirements.
-3. **Data directory**: create `/var/lib/mv3dt-tracking/`.
+3. **Data directory**: create `/var/lib/mv3dt-tracking/`, then seed
+   `cleaning.json` once per [section 4.5](#45-cleaningjson-and-offsetsjson).
+   `offsets.json` is never created.
 4. **Secrets**: write `<install_dir>/secrets/tracking.env` with mode `600`
    per [section 4.3](#43-trackingenv), generating the ticket secret only if
    absent.
-5. **Unit**: render `mv3dt-tracking.service.in`, `systemctl daemon-reload`,
+5. **Unit**: render `mv3dt-tracking.service.in` with the environment list
+   of [section 4.4](#44-the-unit), `systemctl daemon-reload`,
    `systemctl enable --now mv3dt-tracking.service`, mirroring
    [`STEP-6` section A.4](STEP-6-REMOTE-SUPERVISION.md#a4-installer-integration-mirror-installsh).
 6. **Expose**: `tailscale serve --bg --https=8443 http://127.0.0.1:8090`,
@@ -478,6 +560,13 @@ Implements the `Step` protocol
    ```
    installed mv3dt-tracking.service version 0.1.0
    ```
+
+**RESOLVED — upgrade.** A re-run, including one after an installer upgrade,
+repeats steps 1 to 5: it re-syncs the package (only the `mv3dt_tracking/`
+directory is replaced), re-renders the unit, and restarts the service when
+the package, venv, `tracking.env` or unit changed. With nothing changed it
+reports the unit as already installed. `cleaning.json` and `offsets.json`
+stay as they are.
 
 ### 11.3 `verify(ctx)`
 
@@ -586,6 +675,11 @@ Repo files referenced:
 - [`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — sections
   3.4 gates, 4.2 bundled assets, 8.2 transcript, 8.3 reporting strings, 11
   install layout, 12 the Step protocol, 14.4 redaction.
+- [`TRACKING-FUSION-AND-CLEANING.md`](TRACKING-FUSION-AND-CLEANING.md) —
+  sections 4.1 and 6.2, the two cleaning files, and section 9, the cleaning
+  commands the passthrough forwards.
+- [`LIVE-BASELINE-AND-EDIT-PROTECTION.md`](LIVE-BASELINE-AND-EDIT-PROTECTION.md)
+  — the managed-file edit protection that the cleaning files are outside of.
 - [`STEP-1-PREREQUISITES.md`](STEP-1-PREREQUISITES.md) — installs the
   Mosquitto broker the recorder subscribes to.
 - [`STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md) — sections
