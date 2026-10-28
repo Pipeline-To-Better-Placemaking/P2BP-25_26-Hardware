@@ -43,6 +43,14 @@ def _force_no_colour(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _prompts_visible(monkeypatch):
+    """pytest's stdin is never a terminal; prompt tests answer through the
+    injected `_INPUT`, so treat the prompt as visible unless a test says
+    otherwise."""
+    monkeypatch.setattr(app, "prompt_unavailable_reason", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_repo_root(monkeypatch):
     monkeypatch.setattr(step3, "repo_root", lambda: None)
 
@@ -391,6 +399,38 @@ def test_confirm_start_now_interactive_start(tmp_path, monkeypatch):
     ctx = FakeContext(tmp_path, non_interactive=False)
     monkeypatch.setattr(step5, "_INPUT", lambda _prompt: "S")
     assert step5._confirm_start_now(ctx) is True
+
+
+def test_confirm_start_now_never_blocks_on_a_hidden_prompt(tmp_path, monkeypatch, capsys):
+    """Live regression: under `sudo mv3dt-installer 2>&1 | tail -40` the
+    prompt went into the pipe and the run hung on it. With no visible
+    prompt the documented default (Close) is taken and said so."""
+    ctx = FakeContext(tmp_path, non_interactive=False)
+    monkeypatch.setattr(
+        app, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+    def _boom(_prompt):  # pragma: no cover -- must never be called
+        raise AssertionError("input() must not be called without a visible prompt")
+
+    monkeypatch.setattr(step5, "_INPUT", _boom)
+    assert step5._confirm_start_now(ctx) is False
+    err = capsys.readouterr().err
+    assert "not asking 'What next?'; closing (the default)" in err
+    assert "without a pipe" in err
+
+
+def test_ctrl_c_at_the_prompt_leaves_step5_incomplete(tmp_path, monkeypatch):
+    """Ctrl-C at the What next? prompt propagates; the dispatch loop never
+    reaches mark_complete, so the step re-runs next time."""
+    ctx = FakeContext(tmp_path, non_interactive=False)
+
+    def _ctrl_c(_prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(step5, "_INPUT", _ctrl_c)
+    with pytest.raises(KeyboardInterrupt):
+        step5._confirm_start_now(ctx)
 
 
 @pytest.mark.parametrize("answer", ["c", "C", "", "no", "n"])

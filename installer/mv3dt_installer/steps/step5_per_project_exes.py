@@ -1493,6 +1493,15 @@ def _confirm_start_now(ctx: "Context") -> bool:
     `step3_amc_launcher._confirm_launch_now`'s identical reasoning)."""
     if ctx.non_interactive:
         return False
+    reason = app_mod.prompt_unavailable_reason()
+    if reason is not None:
+        # A hidden prompt blocks forever; take the documented default.
+        ctx.log.warn(
+            f"{reason}: not asking 'What next?'; closing (the default). "
+            "Run the installer without a pipe to be asked, or pass "
+            "--non-interactive to skip the question."
+        )
+        return False
     answer = _INPUT("What next? [S]tart the pipeline now / [C]lose (default: C): ").strip().lower()
     return answer in ("s", "start")
 

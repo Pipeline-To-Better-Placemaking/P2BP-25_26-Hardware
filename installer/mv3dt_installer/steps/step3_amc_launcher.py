@@ -1861,6 +1861,15 @@ def _confirm_launch_now(ctx: "Context") -> bool:
     Step 2 makes the same decision)."""
     if ctx.non_interactive:
         return False
+    reason = app_mod.prompt_unavailable_reason()
+    if reason is not None:
+        # A hidden prompt blocks forever; take the documented default.
+        ctx.log.warn(
+            f"{reason}: not asking whether to launch AutoMagicCalib; not "
+            "launching (the default). Launch it later with the amc command, "
+            "or run the installer without a pipe to be asked."
+        )
+        return False
     answer = _INPUT("Launch AutoMagicCalib now? [y/N]: ").strip().lower()
     return answer in ("y", "yes")
 

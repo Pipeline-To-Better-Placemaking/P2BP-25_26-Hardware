@@ -41,6 +41,14 @@ def _force_no_colour(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _prompts_visible(monkeypatch):
+    """pytest's stdin is never a terminal; prompt tests answer through the
+    injected `_INPUT`, so treat the prompt as visible unless a test says
+    otherwise."""
+    monkeypatch.setattr(app, "prompt_unavailable_reason", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_repo_root(monkeypatch):
     """Every isolation-guard test drives `check_repo_isolation` directly
     against an injected `repo_root`-like value; tests that don't care about

@@ -60,7 +60,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import ipaddress
+import os
 import pathlib
+import signal
 import subprocess
 import sys
 import threading
@@ -109,6 +111,8 @@ __all__ = [
     "build_context",
     "SUBCOMMAND_REGISTRY",
     "register_subcommand",
+    "prompt_unavailable_reason",
+    "InstallerTerminated",
     "main",
 ]
 
@@ -1137,6 +1141,78 @@ def _step_title(step_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class InstallerTerminated(BaseException):
+    """Raised in the main thread when the installer receives SIGTERM.
+
+    A `BaseException`, like `KeyboardInterrupt`, so no step's
+    `except Exception` turns it into an ordinary failure, but `finally`
+    blocks still run: the live progress region comes down and the step in
+    progress is never marked complete.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def _sigterm_raises():
+    """Turn SIGTERM into `InstallerTerminated` for the install flow, and
+    put the previous handler back afterwards.
+
+    Without this, SIGTERM's default action kills the process outright, so
+    nothing tells the operator what happened or cleans up the terminal.
+    Only the main thread may install a handler; anywhere else this is a
+    no-op.
+    """
+
+    def _handler(signum: int, _frame: Any) -> None:
+        raise InstallerTerminated(signum)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, _handler)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def prompt_unavailable_reason(stdin: Any = None, stdout: Any = None) -> Optional[str]:
+    """Why an interactive prompt cannot be shown here, or `None` if it can.
+
+    `input()` writes its prompt to stdout and reads stdin. When stdout is a
+    pipe (`mv3dt-installer 2>&1 | tail -40`) the prompt goes into the pipe
+    and the operator never sees it. When stdin is not a terminal there is
+    nobody to answer. When the process is not in the terminal's foreground
+    process group (the shape `sudo` gives a command at the head of a
+    pipeline), reading the terminal stops the process with SIGTTIN, and a
+    stopped process acts on no signal but SIGKILL. A caller that gets a
+    reason back uses its documented default instead of blocking.
+    """
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+
+    def _isatty(stream: Any) -> bool:
+        try:
+            return bool(stream is not None and stream.isatty())
+        except (AttributeError, OSError, ValueError):
+            return False
+
+    if not _isatty(stdin):
+        return "stdin is not a terminal"
+    if not _isatty(stdout):
+        return "stdout is not a terminal (is the output piped?)"
+    try:
+        if os.tcgetpgrp(stdin.fileno()) != os.getpgrp():
+            return "the installer is not in the terminal's foreground process group"
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
 def _refresh_installed_binary(ctx: Context) -> None:
     """Keep `<install_dir>/bin/mv3dt-installer` identical to the running
     release on every install run.
@@ -1220,18 +1296,21 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
         # `ctx.progress.phase(n)` needs the binding to have a declaration
         # to index against (doc 08 §9).
         ctx.progress.begin_step(step, position)
+        # `end_step` collapses the last phase and takes the live region
+        # down, and it has to happen before anything else writes: on a tty
+        # the region is erased by cursor arithmetic over the rows it drew,
+        # so a `report()` line or a USER-ACTION block emitted while it was
+        # still up would be torn through by the erase. A step that raises
+        # (Ctrl-C and SIGTERM included) gets the same cleanup, but a failure
+        # of the cleanup itself, such as a broken pipe once `| tail` has
+        # gone, must not replace the exception already on its way out.
         try:
             result = _run_step_lifecycle(step, ctx)
-        finally:
-            # `end_step` collapses the last phase and takes the live region
-            # down, and it has to happen before anything else writes: on a
-            # tty the region is erased by cursor arithmetic over the rows it
-            # drew, so a `report()` line or a USER-ACTION block emitted
-            # while it was still up would be torn through by the erase.
-            # `finally` rather than a plain call, so a step that raises
-            # leaves the terminal in the same clean state as one that
-            # merely fails.
-            ctx.progress.end_step()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                ctx.progress.end_step()
+            raise
+        ctx.progress.end_step()
 
         if result.status is StepStatus.COMPLETE:
             step.report(ctx)
@@ -1485,6 +1564,32 @@ def main(
     if args.status:
         return _print_status(sm)
 
+    try:
+        with _sigterm_raises():
+            return _install_flow(args, sm)
+    except KeyboardInterrupt:
+        _report_interrupted("interrupted (Ctrl-C)")
+        return 130
+    except InstallerTerminated as exc:
+        _report_interrupted(f"terminated (signal {exc.signum})")
+        return 128 + exc.signum
+
+
+def _report_interrupted(what: str) -> None:
+    """One clear line for an operator who stopped the run. Writing it can
+    itself fail when the output pipe's reader died with the same signal,
+    and that must not turn a clean stop into a traceback."""
+    with contextlib.suppress(Exception):
+        log.error(
+            f"{what}; the step in progress was not marked complete. "
+            "Run the installer again to resume."
+        )
+
+
+def _install_flow(args: argparse.Namespace, sm: StateMachine) -> int:
+    """`main()` from the root check onwards: everything that can prompt or
+    run a step, so `main()` can stop all of it the same way on Ctrl-C or
+    SIGTERM."""
     privilege.require_root()
     user = onboarding.run_platform_preflight()
 

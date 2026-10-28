@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -2450,3 +2451,134 @@ def test_main_settles_colour_from_the_parsed_flag(tmp_path, monkeypatch):
     seen.clear()
     app.main(["--status"], state_path=tmp_path / "state.json")
     assert seen == [True]
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C, SIGTERM and prompts nobody can see
+# ---------------------------------------------------------------------------
+
+
+class _InterruptingStep(_DummyStep):
+    """A step whose run() is stopped part way through by `interrupt`."""
+
+    def __init__(self, interrupt):
+        super().__init__("step5_per_project_exes", "Per-project executables", 5)
+        self._interrupt = interrupt
+
+    def run(self, ctx):
+        self._interrupt()
+        return StepResult(status=StepStatus.COMPLETE)
+
+
+def _run_main_with_step(tmp_path, monkeypatch, step):
+    monkeypatch.setattr(app.privilege, "require_root", lambda: None)
+    _bypass_onboarding(monkeypatch, tmp_path)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+    state_path = tmp_path / "var" / "state.json"
+    rc = app.main(
+        [
+            "--non-interactive",
+            "--install-dir",
+            str(tmp_path / "install"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ],
+        state_path=state_path,
+    )
+    return rc, StateMachine(path=state_path)
+
+
+def test_main_ctrl_c_exits_130_with_a_message_and_leaves_the_step_incomplete(
+    tmp_path, monkeypatch, capsys
+):
+    def _ctrl_c():
+        raise KeyboardInterrupt
+
+    step = _InterruptingStep(_ctrl_c)
+    rc, sm = _run_main_with_step(tmp_path, monkeypatch, step)
+
+    assert rc == 130
+    assert sm.status(step.id) is not StepStatus.COMPLETE
+    assert step.report_calls == 0
+    err = capsys.readouterr().err
+    assert "interrupted (Ctrl-C)" in err
+    assert "not marked complete" in err
+
+
+def test_main_sigterm_while_blocked_exits_promptly(tmp_path, monkeypatch, capsys):
+    """Live regression: SIGTERM did not stop a run waiting at a prompt.
+    A real SIGTERM, sent from another thread while the step is blocked,
+    must end the run promptly with 143 and the step not complete."""
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def _block_until_signalled():
+        threading.Timer(0.1, os.kill, (os.getpid(), signal.SIGTERM)).start()
+        time.sleep(10)
+        raise AssertionError("SIGTERM did not interrupt the blocked step")
+
+    step = _InterruptingStep(_block_until_signalled)
+    started = time.monotonic()
+    rc, sm = _run_main_with_step(tmp_path, monkeypatch, step)
+
+    assert time.monotonic() - started < 5
+    assert rc == 128 + signal.SIGTERM
+    assert sm.status(step.id) is not StepStatus.COMPLETE
+    assert "terminated (signal 15)" in capsys.readouterr().err
+    # The install flow's handler does not outlive it.
+    assert signal.getsignal(signal.SIGTERM) == previous
+
+
+def test_dispatch_cleanup_failure_does_not_mask_the_interrupt(tmp_path, monkeypatch):
+    """Once `| tail` has died, taking the live region down can raise
+    BrokenPipeError; the Ctrl-C must still be what propagates."""
+    sm = StateMachine(path=tmp_path / "state.json")
+    ctx, cfg = _minimal_ctx(tmp_path)
+
+    def _ctrl_c():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app, "STEP_REGISTRY", [_InterruptingStep(_ctrl_c)])
+
+    def _broken_pipe():
+        raise BrokenPipeError
+
+    monkeypatch.setattr(ctx.progress, "end_step", _broken_pipe)
+    with pytest.raises(KeyboardInterrupt):
+        app._dispatch(sm, ctx, cfg)
+
+
+class _Stream:
+    def __init__(self, tty, fd=0):
+        self._tty = tty
+        self._fd = fd
+
+    def isatty(self):
+        return self._tty
+
+    def fileno(self):
+        return self._fd
+
+
+def test_prompt_unavailable_reason_none_on_a_foreground_terminal(monkeypatch):
+    monkeypatch.setattr(app.os, "tcgetpgrp", lambda fd: 4242)
+    monkeypatch.setattr(app.os, "getpgrp", lambda: 4242)
+    assert app.prompt_unavailable_reason(_Stream(True), _Stream(True)) is None
+
+
+def test_prompt_unavailable_reason_when_stdout_is_piped():
+    reason = app.prompt_unavailable_reason(_Stream(True), _Stream(False))
+    assert reason is not None and "stdout" in reason
+
+
+def test_prompt_unavailable_reason_when_stdin_is_not_a_terminal():
+    reason = app.prompt_unavailable_reason(_Stream(False), _Stream(True))
+    assert reason is not None and "stdin" in reason
+
+
+def test_prompt_unavailable_reason_in_the_background_process_group(monkeypatch):
+    """Reading the terminal from a background process group stops the
+    process with SIGTTIN, after which only SIGKILL ends it."""
+    monkeypatch.setattr(app.os, "tcgetpgrp", lambda fd: 1)
+    monkeypatch.setattr(app.os, "getpgrp", lambda: 2)
+    reason = app.prompt_unavailable_reason(_Stream(True), _Stream(True))
+    assert reason is not None and "foreground" in reason
