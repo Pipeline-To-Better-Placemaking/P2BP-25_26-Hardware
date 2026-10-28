@@ -386,9 +386,15 @@ def test_range_sample_cap(client):
     assert rng(client, sid, to=T0 + 6 * HOUR, hz=5).status_code == 200
     assert rng(client, sid, to=T0 + 72 * 60 * 1000, hz=25).status_code == 200
     for to, hz in ((T0 + 6 * HOUR, 25), (T0 + 72 * 60 * 1000 + 1, 25), (T0 + 6 * HOUR, 5.01)):
-        r = rng(client, sid, to=to, hz=hz)
+        r = rng(client, sid, to=to, hz=hz, mode="raw")
         assert r.status_code == 400
         assert "108000" in r.json()["Message"]
+    # Fused output is served at most at the 5 Hz fusion bucket, so a 6 h
+    # fused request at 25 Hz is within the cap; past 6 h is still refused.
+    for mode in ("fused", "stitched"):
+        r = rng(client, sid, to=T0 + 6 * HOUR, hz=25, mode=mode)
+        assert r.status_code == 200 and r.json()["hz"] == 5.0
+        assert rng(client, sid, to=T0 + 6 * HOUR + 1, hz=25, mode=mode).status_code == 400
 
 
 def test_range_concurrent_request_gets_429(client):
@@ -760,6 +766,9 @@ def test_config_error_and_warnings_are_reported(fclient, files):
     write_json(cleaning, "{not json")
     body = frng(fclient, sid)
     assert "invalid JSON" in body["summary"]["config_error"]
+    # Web clients see the file name, not the workstation's absolute path.
+    assert body["summary"]["config_error"].startswith("cleaning.json: ")
+    assert str(cleaning.parent) not in body["summary"]["config_error"]
     assert body["summary"]["people"] == 2  # the last valid config still applies
     write_json(cleaning, {"version": 1, "room": ROOM})
     assert frng(fclient, sid)["summary"]["config_error"] is None
@@ -792,13 +801,15 @@ def test_offsets_applied_and_toggled(fclient, files):
     write_json(cleaning, {"version": 1, "room": ROOM})
     write_json(offsets, "[]")
     bad = frng(fclient, sid)["summary"]["offsets"]
-    assert bad["applied"] is False and bad["learned"] is False and bad["error"]
+    assert bad["applied"] is False and bad["learned"] is False
+    assert bad["error"].startswith("offsets.json: ") and str(offsets.parent) not in bad["error"]
     broken = json.loads(json.dumps(OFFSETS))
     broken["sensors"]["camera1"]["scale"] = 0
     write_json(offsets, broken)
     bad = frng(fclient, sid)
     assert bad["summary"]["offsets"]["applied"] is False
     assert "camera1.scale" in bad["summary"]["offsets"]["error"]
+    assert str(offsets.parent) not in bad["summary"]["offsets"]["error"]
     assert bad["people"] == before["people"]
 
 
@@ -849,3 +860,59 @@ def test_export_fused_chunks_equal_one_shot_and_range_ids(tmp_path, clock):
     body = client.get("/tracking/range", params={"from": lo, "to": hi},
                       headers=data_headers(session(client))).json()
     assert {p["id"]: p["t"] for p in body["people"]} == {k: [t for t, _, _ in v] for k, v in expected.items()}
+
+
+def _blocks(person_ids):
+    """Person ids in the order their contiguous blocks appear."""
+    out = []
+    for pid in person_ids:
+        if not out or out[-1] != pid:
+            out.append(pid)
+    return out
+
+
+def test_export_fused_is_in_time_ordered_per_person_blocks(fclient):
+    sid = session(fclient, kind="export")
+    q = {"from": T0, "to": FUSED_TO, "mode": "fused", "format": "jsonl"}
+    r = fclient.get("/tracking/export", params=q, headers=data_headers(sid))
+    recs = [json.loads(line) for line in r.text.splitlines()]
+    blocks = _blocks([rec["person_id"] for rec in recs])
+    assert sorted(blocks) == blocks == [1, 2, 3]  # one block per person, by id
+    for pid in blocks:
+        ts = [rec["ts_ms"] for rec in recs if rec["person_id"] == pid]
+        assert ts == sorted(ts) and len(set(ts)) == len(ts)
+    body = frng(fclient, sid)
+    assert {p["id"]: p["t"] for p in body["people"]} == {
+        pid: [rec["ts_ms"] for rec in recs if rec["person_id"] == pid] for pid in blocks
+    }
+
+
+def _chunked_store(tmp_path):
+    store = TrackStore(tmp_path / "streamed")
+    edge = T0 - T0 % (10 * 60 * 1000) + 10 * 60 * 1000
+    base = edge - T0
+    rows = []
+    _walker(rows, 1, "camera1", base - 6000, 5, 1.0, -1.0, vx=0.1)
+    _walker(rows, 1, "camera2", base - 6000, 5, 1.2, -1.0, vx=0.1)
+    _walker(rows, 2, "camera1", base + 1000, 6, 1.6, -1.0, vx=0.1)
+    _walker(rows, 3, "camera2", base - 8000, 20, 6.0, -4.0, vx=0.0)
+    _walker(rows, 4, "camera1", base + 20 * 60 * 1000 + 7, 5, 2.0, -2.0, vx=0.2)
+    _walker(rows, 9, "camera1", base, 1, 3.0, -3.0, vx=0.0)
+    rows.append(Detection(T0 + base + 50, "camera1", 77, 50.0, 50.0))
+    store.insert_many(rows)
+    return store, edge - 60_000 + 13, edge + 25 * 60 * 1000
+
+
+def test_streamed_fused_range_equals_one_shot_fuse(tmp_path, files):
+    store, lo, hi = _chunked_store(tmp_path)
+    cleaning_path, offsets_path = files
+    write_json(cleaning_path, {"version": 1, "room": ROOM})
+    write_json(offsets_path, OFFSETS)
+    cleaning = api.Cleaning(Settings(cleaning_file=cleaning_path, offsets_file=offsets_path))
+    config, offsets, room = cleaning.current()
+    one_shot = fuse(store.query_range(lo, hi), config, offsets, room)
+    streamed = api.fused_range(store, cleaning, lo, hi, 5.0)
+    assert streamed["people"] == one_shot.people and len(one_shot.people) == 3
+    expected = api.finish_summary(one_shot.summary, cleaning.summary_extras(config, offsets))
+    assert streamed["summary"] == expected
+    assert expected["dropped"]["out_of_bounds"] == 1 and expected["offsets"]["applied"] is True

@@ -250,12 +250,16 @@ def build_parser() -> argparse.ArgumentParser:
     wipe.add_argument("--before", type=_day, help="only delete UTC days before YYYY-MM-DD")
 
     def window(p, hours: float | None, required: bool = False) -> None:
-        p.add_argument("--from", dest="from_ms", type=_time_ms, required=required,
-                       help="window start, unix ms or ISO 8601 (local time without an offset)")
+        # --from and --hours are alternative ways to give the start, so
+        # passing both is a usage error (exit 2) rather than one being ignored.
+        start = p.add_mutually_exclusive_group(required=required) if hours is not None else p
+        start.add_argument("--from", dest="from_ms", type=_time_ms, required=required and hours is None,
+                           help="window start, unix ms or ISO 8601 (local time without an offset)")
+        if hours is not None:
+            start.add_argument("--hours", type=float,
+                               help=f"window length ending at --to (default {hours:g})")
         p.add_argument("--to", dest="to_ms", type=_time_ms, required=required,
                        help="window end, unix ms or ISO 8601 (default now)")
-        if hours is not None:
-            p.add_argument("--hours", type=float, help=f"window length ending at --to (default {hours:g})")
 
     zones = sub.add_parser("zones-suggest", help="list static single-camera hotspots as zone entries")
     window(zones, 24)
