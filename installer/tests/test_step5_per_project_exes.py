@@ -763,6 +763,117 @@ def test_reconcile_registry_yes_flag_skips_confirm(tmp_path, monkeypatch):
     assert result == [entry.project_name]
 
 
+def _amc330_layout(tmp_path, *, project_dir=None):
+    """An AMC 3.3.0 checkout whose compose/.env points PROJECT_DIR outside
+    `<AMC_ROOT>/projects`, holding a project stored under its id."""
+    amc_root = tmp_path / "home" / "op" / "amc-3.3.0" / "tools" / "auto-magic-calib"
+    compose = amc_root / "compose"
+    compose.mkdir(parents=True)
+    projects = project_dir or (tmp_path / "amc-data" / "projects")
+    projects.mkdir(parents=True, exist_ok=True)
+    (compose / ".env").write_text(
+        f"HOST_IP=127.0.0.1\nPROJECT_DIR={projects}\nMODEL_DIR={amc_root / 'models'}\n"
+    )
+    return amc_root, projects
+
+
+def _amc330_ctx(tmp_path, amc_root, **kwargs):
+    return FakeContext(
+        tmp_path,
+        conf={
+            "AMC_ROOT": str(amc_root),
+            "HOST_IP": "127.0.0.1",
+            "PROJECT_NAME": "Living-Room",
+            "AMC_PROJECT_ID": "20261023_091449_9720",
+        },
+        **kwargs,
+    )
+
+
+def _list_projects_call(args):
+    return bool(args) and str(args[-1]).endswith("/v1/list_projects")
+
+
+def test_amc_projects_root_reads_project_dir_from_compose_env(tmp_path):
+    amc_root, projects = _amc330_layout(tmp_path)
+    ctx = _amc330_ctx(tmp_path, amc_root)
+    assert step5.amc_projects_root(ctx) == projects
+    assert step5.amc_project_dir(ctx, "Living-Room") == projects / "Living-Room"
+
+
+def test_amc_projects_root_falls_back_to_the_old_layout(tmp_path):
+    amc_root = tmp_path / "auto-magic-calib"
+    amc_root.mkdir()
+    ctx = FakeContext(tmp_path, conf={"AMC_ROOT": str(amc_root), "HOST_IP": "127.0.0.1"})
+    assert step5.amc_projects_root(ctx) == amc_root / "projects"
+
+
+def test_amc_projects_root_ignores_an_unexpanded_reference(tmp_path):
+    amc_root = tmp_path / "auto-magic-calib"
+    (amc_root / "compose").mkdir(parents=True)
+    (amc_root / "compose" / ".env").write_text('PROJECT_DIR="${AMC_ROOT}/projects"\n')
+    ctx = FakeContext(tmp_path, conf={"AMC_ROOT": str(amc_root), "HOST_IP": "127.0.0.1"})
+    assert step5.amc_projects_root(ctx) == amc_root / "projects"
+
+
+def test_reconcile_finds_the_configured_project_by_id_on_disk(tmp_path):
+    """Live regression: after the move to AMC 3.3.0 Step 5 logged "drift:
+    registry entry 'Living-Room' has no matching AMC project dir" although
+    the project existed under its AMC id in the compose PROJECT_DIR."""
+    amc_root, projects = _amc330_layout(tmp_path)
+    (projects / "20261023_091449_9720").mkdir()
+    runner = ScriptedRunner().when(_list_projects_call, returncode=7)
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    _make_entry(ctx.install_dir, project_name="Living-Room", slug="living-room")
+
+    assert step5.reconcile_registry(ctx, apply=False) == []
+
+
+def test_reconcile_prefers_the_amc_api_listing(tmp_path):
+    amc_root, _projects = _amc330_layout(tmp_path)  # nothing on disk at all
+    listing = {
+        "code": 0,
+        "projects": [
+            {"project_id": "20261023_091449_9720", "project_name": "Living-Room"},
+            {"project_id": "20261024_000000_0001", "project_name": "Lobby"},
+        ],
+    }
+    runner = ScriptedRunner().when(_list_projects_call, stdout=json.dumps(listing))
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    _make_entry(ctx.install_dir, project_name="Living-Room", slug="living-room")
+    _make_entry(ctx.install_dir, project_name="Lobby", slug="lobby")
+    _make_entry(ctx.install_dir, project_name="Gone", slug="gone")
+
+    assert step5.reconcile_registry(ctx, apply=False) == ["Gone"]
+
+
+def test_reconcile_api_listing_of_ids_only_falls_back_to_disk_for_names(tmp_path):
+    """An id-only listing cannot rule out a project by name, so the disk
+    check decides rather than reporting (and deleting) a live project."""
+    amc_root, projects = _amc330_layout(tmp_path)
+    (projects / "Lobby").mkdir()
+    runner = ScriptedRunner().when(
+        _list_projects_call, stdout=json.dumps(["20261023_091449_9720"])
+    )
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    _make_entry(ctx.install_dir, project_name="Living-Room", slug="living-room")
+    _make_entry(ctx.install_dir, project_name="Lobby", slug="lobby")
+    _make_entry(ctx.install_dir, project_name="Gone", slug="gone")
+
+    assert step5.reconcile_registry(ctx, apply=False) == ["Gone"]
+
+
+def test_reconcile_reports_a_project_the_api_no_longer_lists(tmp_path):
+    amc_root, projects = _amc330_layout(tmp_path)
+    (projects / "20261023_091449_9720").mkdir()
+    listing = {"projects": [{"project_id": "other", "project_name": "Other"}]}
+    runner = ScriptedRunner().when(_list_projects_call, stdout=json.dumps(listing))
+    ctx = _amc330_ctx(tmp_path, amc_root, runner_root=runner)
+    _make_entry(ctx.install_dir, project_name="Living-Room", slug="living-room")
+
+    assert step5.reconcile_registry(ctx, apply=False) == ["Living-Room"]
+
+
 def test_projects_subcommand_list_reports_drift_without_deleting(tmp_path, monkeypatch, capsys):
     ctx = FakeContext(tmp_path)
     entry = _make_entry(ctx.install_dir)

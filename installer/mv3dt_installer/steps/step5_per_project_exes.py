@@ -117,6 +117,8 @@ __all__ = [
     "generate_preview_config",
     "render_validation_banner",
     "amc_project_dir",
+    "amc_project_present",
+    "amc_projects_root",
     "reconcile_registry",
     "remove_project_artifacts",
     "register_removal_hook",
@@ -1184,11 +1186,131 @@ def handle_record_subcommand(
 # ---------------------------------------------------------------------------
 
 
-def amc_project_dir(ctx: "Context", project_name: str) -> pathlib.Path:
-    """`$AMC_ROOT/projects/<PROJECT_NAME>/` (section 5.4), reusing Step 3's
-    already-resolved `AMC_ROOT` (`step3_amc_launcher.resolve_config`)."""
+def _env_value(path: pathlib.Path, key: str) -> Optional[str]:
+    """`key`'s value in a dotenv file, or `None` when the file or key is
+    missing. Surrounding quotes are dropped; a value that still holds a
+    `$` reference is not expanded and is reported as missing."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        name, sep, value = line.partition("=")
+        if not sep or name.strip() != key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if not value or "$" in value:
+            return None
+        return value
+    return None
+
+
+def amc_projects_root(ctx: "Context") -> pathlib.Path:
+    """Where AMC keeps its project directories on the host.
+
+    AMC 3.3.0 mounts `PROJECT_DIR` from `<AMC_ROOT>/compose/.env`, which an
+    operator may point anywhere; that value wins when it is set. Without it
+    the older `<AMC_ROOT>/projects` layout is assumed. A relative value is
+    taken relative to the compose directory, as `docker compose` does.
+    """
     cfg = step3_mod.resolve_config(ctx)
-    return cfg.amc_root / "projects" / project_name
+    compose_dir = cfg.amc_root / "compose"
+    value = _env_value(compose_dir / ".env", "PROJECT_DIR")
+    if value:
+        root = pathlib.Path(value).expanduser()
+        return root if root.is_absolute() else compose_dir / root
+    return cfg.amc_root / "projects"
+
+
+def amc_project_dir(ctx: "Context", project_name: str) -> pathlib.Path:
+    """`<projects root>/<PROJECT_NAME>/` (section 5.4), where the projects
+    root is `amc_projects_root` (compose `PROJECT_DIR`, else
+    `$AMC_ROOT/projects`)."""
+    return amc_projects_root(ctx) / project_name
+
+
+def _api_project_listing(
+    ctx: "Context",
+) -> Optional[tuple[Optional[set[str]], set[str]]]:
+    """Ask the running AMC service which projects it has.
+
+    Returns `(names, ids)`, or `None` when the service is not answering or
+    its reply cannot be read. `names` is `None` when the reply carries ids
+    only, so the caller does not mistake "no names listed" for "no project
+    by that name".
+    """
+    cfg = step3_mod.resolve_config(ctx)
+    result = ctx.run_root(
+        "curl", "-fsS", "--max-time", "5",
+        f"http://localhost:{cfg.ms_port}/v1/list_projects",
+        check=False, capture_output=True, text=True, stream=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout or "")
+    except json.JSONDecodeError:
+        return None
+
+    items: Any = payload
+    if isinstance(payload, dict):
+        if "code" in payload and payload.get("code") != 0:
+            return None
+        items = None
+        for key in ("projects", "project_list", "project_info", "data", "result"):
+            if isinstance(payload.get(key), list):
+                items = payload[key]
+                break
+    if not isinstance(items, list):
+        return None
+
+    names: set[str] = set()
+    ids: set[str] = set()
+    for item in items:
+        if isinstance(item, str):
+            ids.add(item)
+        elif isinstance(item, dict):
+            ident = item.get("project_id") or item.get("id")
+            name = item.get("project_name") or item.get("name")
+            if ident:
+                ids.add(str(ident))
+            if name:
+                names.add(str(name))
+    return (names if names else None), ids
+
+
+def amc_project_present(ctx: "Context", project_name: str) -> bool:
+    """Whether AMC still has the project registered as `project_name`.
+
+    AMC 3.x stores a project under its opaque `AMC_PROJECT_ID`, not under
+    its name, so a name-shaped directory is no evidence either way for the
+    configured project. The running service is asked first
+    (`GET /v1/list_projects`): a matching name, or the configured project's
+    `AMC_PROJECT_ID`, means present. When the service is down the projects
+    root on disk is checked for a directory named after the project or
+    after its `AMC_PROJECT_ID`.
+    """
+    configured_id = ""
+    if project_name == ctx.conf.get(CONF_PROJECT_NAME_KEY):
+        configured_id = (ctx.conf.get(step3_mod.CONF_AMC_PROJECT_ID_KEY) or "").strip()
+
+    listing = _api_project_listing(ctx)
+    if listing is not None:
+        names, ids = listing
+        if configured_id and configured_id in ids:
+            return True
+        if names is not None:
+            return project_name in names
+
+    candidates = [amc_project_dir(ctx, project_name)]
+    if configured_id:
+        candidates.append(amc_projects_root(ctx) / configured_id)
+    return any(path.exists() for path in candidates)
 
 
 def _project_artifact_paths(ctx: "Context", entry: ProjectEntry) -> list[pathlib.Path]:
@@ -1257,8 +1379,9 @@ def reconcile_registry(
 ) -> list[str]:
     """Section 5.4's reconciliation check.
 
-    For each registered project, tests whether its AMC project dir still
-    exists. A project whose dir is gone was removed in the AMC GUI.
+    For each registered project, tests whether AMC still has it
+    (`amc_project_present`). A project AMC no longer has was removed in the
+    AMC GUI.
 
     - `apply=False` (the read-only `verify()` drift check, section 7.3):
       never deletes; just returns the list of drifted `PROJECT_NAME`s.
@@ -1274,7 +1397,7 @@ def reconcile_registry(
     drifted = [
         entry
         for entry in list_projects(ctx.install_dir)
-        if not amc_project_dir(ctx, entry.project_name).exists()
+        if not amc_project_present(ctx, entry.project_name)
     ]
     if not drifted:
         return []
