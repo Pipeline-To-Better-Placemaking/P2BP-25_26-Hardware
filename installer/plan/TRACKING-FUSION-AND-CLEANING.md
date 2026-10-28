@@ -126,7 +126,7 @@ must be a one-line edit with no restart.
 ### 3.3 Offset correction (LOCKED)
 
 **LOCKED: the per-camera offset correction is learned, reported and
-toggleable.** It is never applied silently: `learn-offsets` writes
+toggleable.** It is never applied silently: `learn-offsets --save` writes
 `offsets.json` with before/after numbers, `cleaning.json` key
 `offsets_apply` turns its use on or off, and every `range` summary says
 whether it was applied. When the learned correction improves the median
@@ -359,7 +359,7 @@ same-id pairs**: samples of one `track_id` on two sensors in the same
 `bucket_ms` bucket, after stages 1 to 3 of
 [section 5](#5-fusion-stages).
 
-1. **Collect pairs** over the requested window (default the last 24 h).
+1. **Collect pairs** over the requested window (default the last 72 h).
    Discard pairs farther apart than `shared_id_gate_m` (1.5 m strict).
 2. **Fit**: solve per-sensor translations with a zero-sum constraint by
    least squares, so with two sensors each moves by half of the mean
@@ -369,9 +369,9 @@ same-id pairs**: samples of one `track_id` on two sensors in the same
 3. **Residual spread**: `sigma_m` per sensor is the median absolute
    residual after correction, used as the stage 6 weight.
 4. **Report** the median cross-camera distance before and after, the gain,
-   and the pair count. Refuse to write with fewer than `200` pairs.
+   and the pair count. With fewer than `200` pairs, write nothing and exit `1`.
 
-`learn-offsets` is the only writer. Nothing applies the file except stage
+`learn-offsets --save` is the only writer. Nothing applies the file except stage
 4, and only while `offsets_apply` is true.
 
 ### 6.2 `offsets.json` schema
@@ -439,11 +439,13 @@ lease and window limits are unchanged.
 | `mode` | Behavior |
 |---|---|
 | `fused` (default) | the engine of [section 5](#5-fusion-stages); each person carries `trackIds` and a per-sample `cameras` array |
-| `stitched` | alias of `fused` for one release, then removed; the response reports `"mode": "fused"` |
+| `stitched` | alias of `fused` for one release, then removed; the response reports `"mode": "fused"` plus a top-level `deprecated` string |
 | `raw` | unchanged: each tracker id is its own person |
 
-Fusion always runs at `bucket_ms`; the response is downsampled to `hz` when
-`hz` is coarser. A fused response adds `summary`:
+Fusion always runs at `bucket_ms`. A coarser `hz` re-buckets the output;
+a finer `hz` stays at the bucket rate. The response's `hz` is the actual
+output rate (`5.0` at the strict 200 ms bucket). A fused response adds
+`summary`:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -451,11 +453,16 @@ Fusion always runs at `bucket_ms`; the response is downsampled to `hz` when
 | `max_at_once` | int | max people present in any one second |
 | `occupied_s` | number | seconds with at least one person |
 | `persons` | array | per person: `id`, `duration_s`, `camera_share` (sensor name to fraction of buckets) |
-| `dropped` | object | the counters of [section 5.1](#51-drop-and-merge-counters-required) |
-| `offsets` | object | `applied`, `needed`, `gain_m`, `learned_at_ms`; `applied` is `false` when no valid file exists |
+| `dropped` | object | every counter of [section 5.1](#51-drop-and-merge-counters-required): the drop counters, `zones` per zone name, `short_tracklet_samples`, `short_person_buckets` and the `*_joins` counters |
+| `offsets` | object | `enabled` (`offsets_apply`), `learned` (a valid file exists), `applied`, `needed`, `gain_m`, `learned_at_ms`, `error` |
 | `preset` | string | the active preset |
 | `config_error` | string or null | the last `cleaning.json` load error |
 | `config_warnings` | array of strings | non-fatal load warnings, e.g. `"ignored unknown key foo"` |
+
+An invalid `offsets.json` means no correction: `applied` is `false` and
+`offsets.error` carries the load error. This differs on purpose from
+`cleaning.json`, which keeps its last valid config
+([section 4.1](#41-file-and-reload-required)).
 
 ### 8.2 `export`
 
@@ -463,7 +470,7 @@ Fusion always runs at `bucket_ms`; the response is downsampled to `hz` when
 
 | `mode` | Rows | Columns |
 |---|---|---|
-| `fused` | one per person per bucket, streamed through `Fuser` in chunks | `ts_ms, person_id, x, y, cameras` |
+| `fused` | one per person per bucket, streamed through `Fuser` in chunks, in per-person blocks as people become final ([section 5.2](#52-streaming)) | `ts_ms, person_id, x, y, cameras` |
 | `stitched` | alias of `fused` for one release | as `fused` |
 | `raw` | unchanged | unchanged |
 
@@ -479,20 +486,23 @@ passthrough ([`STEP-8` section 10](STEP-8-TRACKING-HISTORY.md#10-cli))
 forwards them unchanged:
 
 ```bash
-mv3dt-installer tracking zones-suggest [--from T] [--to T]
-mv3dt-installer tracking learn-offsets [--from T] [--to T] [--model translation|similarity]
+mv3dt-installer tracking zones-suggest [--hours N | --from T --to T]
+mv3dt-installer tracking learn-offsets [--hours N | --from T --to T] [--model translation|similarity] [--save]
 mv3dt-installer tracking clean-report --from T --to T
 ```
 
 | Command | Reads | Writes | Prints |
 |---|---|---|---|
-| `zones-suggest` | day files, `cleaning.json` | nothing | suggestions ([section 7](#7-zone-suggestions)) |
-| `learn-offsets` | day files, `cleaning.json` | `offsets.json` | before/after, gain, pairs, `needed` |
+| `zones-suggest` | day files, `cleaning.json` | never writes | suggestions ([section 7](#7-zone-suggestions)), always followed by the seated-person warning |
+| `learn-offsets` | day files, `cleaning.json` | `offsets.json`, only with `--save` | before/after, gain, pairs, `needed` |
 | `clean-report` | day files, both files | nothing | the fused `summary` ([section 8.1](#81-range)) as JSON |
 
 `T` is unix milliseconds or ISO 8601; an ISO time without an offset is
-workstation local time. `--from` and `--to` default to the last 24 h where
-optional. All three run as the invoking user against the read-only day
+workstation local time. Without `--from`/`--to`, `--hours` sets a window
+ending now: default `24` for `zones-suggest`, `72` for `learn-offsets`.
+`clean-report` requires `--from` and `--to`. `learn-offsets` exits `1`
+when it finds fewer than `200` pairs ([section 6.1](#61-learning-method)).
+All three run as the invoking user against the read-only day
 files, so they need neither the lease nor a ticket.
 
 ---
@@ -508,7 +518,7 @@ Amends [`STEP-8` section 11.2](STEP-8-TRACKING-HISTORY.md#112-runctx) and
    those keys are seeded, so a later `preset` change reaches every other
    key ([section 4.1](#41-file-and-reload-required)). An existing file is
    never touched, on re-run or on upgrade.
-2. **Never create `offsets.json`**: only `learn-offsets` writes it.
+2. **Never create `offsets.json`**: only `learn-offsets --save` writes it.
 3. **Unit environment**: `mv3dt-tracking.service.in` adds
    `Environment="CLEANING_FILE=@TRACKING_DIR@/cleaning.json"` and
    `Environment="OFFSETS_FILE=@TRACKING_DIR@/offsets.json"`;
