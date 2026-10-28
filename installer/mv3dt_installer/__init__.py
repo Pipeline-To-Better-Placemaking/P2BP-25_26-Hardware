@@ -12,7 +12,7 @@ source commit; pushing the matching tag is what publishes a release.
 
 import sys
 
-__version__ = "0.4.17"
+__version__ = "0.4.18"
 
 # Build stamp. `.github/workflows/release.yml` writes an untracked
 # `_buildinfo.py` next to this file just before PyInstaller runs, so a
