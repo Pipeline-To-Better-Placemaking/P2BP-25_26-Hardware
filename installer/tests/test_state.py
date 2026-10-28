@@ -219,6 +219,47 @@ def test_all_complete_true_when_every_step_complete(tmp_path):
     assert sm.all_complete() is True
 
 
+def test_mark_skipped_gate_off_leaves_the_step_pending(tmp_path):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_skipped_gate_off("step8_tracking_history")
+    assert sm.status("step8_tracking_history") is StepStatus.PENDING
+    assert sm.is_skipped_gate_off("step8_tracking_history") is True
+    raw = json.loads((tmp_path / "state.json").read_text())
+    assert raw["steps"]["step8_tracking_history"] == {
+        "status": "PENDING",
+        "skipped": "gate off",
+    }
+
+
+def test_mark_skipped_gate_off_demotes_an_earlier_completion(tmp_path):
+    """A COMPLETE left by an older release's gate-off skip (or a real run
+    before the gate was turned off) must not survive as COMPLETE, or the
+    step never runs again once the gate is back on."""
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete("step7_webapp_integration")
+    sm.mark_skipped_gate_off("step7_webapp_integration")
+    assert sm.status("step7_webapp_integration") is StepStatus.PENDING
+    assert sm.load().steps["step7_webapp_integration"].finished_utc is None
+
+
+def test_mark_complete_and_set_status_clear_the_skip(tmp_path):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_skipped_gate_off("step8_tracking_history")
+    sm.mark_complete("step8_tracking_history")
+    assert sm.is_skipped_gate_off("step8_tracking_history") is False
+    sm.mark_skipped_gate_off("step8_tracking_history")
+    sm.set_status("step8_tracking_history", StepStatus.PENDING)
+    assert sm.is_skipped_gate_off("step8_tracking_history") is False
+
+
+def test_all_complete_counts_gate_off_skips_as_done(tmp_path):
+    sm = StateMachine(path=tmp_path / "state.json")
+    for step_id in STEP_IDS[:-1]:
+        sm.mark_complete(step_id)
+    sm.mark_skipped_gate_off(STEP_IDS[-1])
+    assert sm.all_complete() is True
+
+
 # ---------------------------------------------------------------------------
 # save() permissions (doc 00 §6.1)
 # ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ import argparse
 import contextlib
 import ipaddress
 import pathlib
+import signal
 import subprocess
 import sys
 import threading
@@ -109,6 +110,7 @@ __all__ = [
     "build_context",
     "SUBCOMMAND_REGISTRY",
     "register_subcommand",
+    "InstallerTerminated",
     "main",
 ]
 
@@ -1048,6 +1050,13 @@ _GATE_ORDER_TO_CONF_ATTR: dict[int, str] = {
     8: "tracking_history",
 }
 
+# The installer.conf gate key behind each gated step, for `--status`.
+_STEP_ID_TO_GATE_KEY: dict[str, str] = {
+    "step6_remote_supervision": config_mod.GATE_REMOTE_SUPERVISION,
+    "step7_webapp_integration": config_mod.GATE_WEBAPP_INTEGRATION,
+    "step8_tracking_history": config_mod.GATE_TRACKING_HISTORY,
+}
+
 # Maps each installer.conf gate key to the argparse destination its
 # matching flag parses into. The dests happen to equal the `Config`
 # attribute names above, but they are listed separately because they are
@@ -1137,6 +1146,45 @@ def _step_title(step_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class InstallerTerminated(BaseException):
+    """Raised in the main thread when the installer receives SIGTERM.
+
+    A `BaseException`, like `KeyboardInterrupt`, so no step's
+    `except Exception` turns it into an ordinary failure, but `finally`
+    blocks still run: the live progress region comes down and the step in
+    progress is never marked complete.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+@contextlib.contextmanager
+def _sigterm_raises():
+    """Turn SIGTERM into `InstallerTerminated` for the install flow, and
+    put the previous handler back afterwards.
+
+    Without this, SIGTERM's default action kills the process outright, so
+    nothing tells the operator what happened or cleans up the terminal.
+    Only the main thread may install a handler; anywhere else this is a
+    no-op.
+    """
+
+    def _handler(signum: int, _frame: Any) -> None:
+        raise InstallerTerminated(signum)
+
+    try:
+        previous = signal.signal(signal.SIGTERM, _handler)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def _refresh_installed_binary(ctx: Context) -> None:
     """Keep `<install_dir>/bin/mv3dt-installer` identical to the running
     release on every install run.
@@ -1164,9 +1212,9 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     Iterates `STEP_REGISTRY` (kept sorted by `.order` by `steps.register()`)
     in order. For each step:
 
-    - If its gate (steps 6-8 only, doc 00 §3.4) is off, auto-`COMPLETE` it
-      with a one-line log -- "the same skip discipline as a genuinely
-      completed step".
+    - If its gate (steps 6-8 only, doc 00 §3.4) is off, skip it with a
+      one-line log and record it as skipped, not `COMPLETE`, so it runs on
+      the first launch after the gate is turned on.
     - Else if already `COMPLETE`, skip with the "already complete" log line.
     - Else announce it with doc 08 §3.2's `[ 3/7 ] <title>` banner, run
       its lifecycle (`preflight -> run -> verify`), and record the
@@ -1204,8 +1252,10 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     for position, step in enumerate(STEP_REGISTRY, start=1):
         gate_value = _gate_value_for_step(step, cfg)
         if gate_value is not None and _gate_is_off(gate_value):
-            if sm.status(step.id) is not StepStatus.COMPLETE:
-                sm.mark_complete(step.id)
+            # Recorded as skipped, never as COMPLETE: a step marked complete
+            # here said "already complete" on every later run, so turning
+            # its gate on never installed it.
+            sm.mark_skipped_gate_off(step.id)
             log.info(f"{step.id}: skipped (gate off)")
             continue
 
@@ -1218,18 +1268,21 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
         # `ctx.progress.phase(n)` needs the binding to have a declaration
         # to index against (doc 08 §9).
         ctx.progress.begin_step(step, position)
+        # `end_step` collapses the last phase and takes the live region
+        # down, and it has to happen before anything else writes: on a tty
+        # the region is erased by cursor arithmetic over the rows it drew,
+        # so a `report()` line or a USER-ACTION block emitted while it was
+        # still up would be torn through by the erase. A step that raises
+        # (Ctrl-C and SIGTERM included) gets the same cleanup, but a failure
+        # of the cleanup itself, such as a broken pipe once `| tail` has
+        # gone, must not replace the exception already on its way out.
         try:
             result = _run_step_lifecycle(step, ctx)
-        finally:
-            # `end_step` collapses the last phase and takes the live region
-            # down, and it has to happen before anything else writes: on a
-            # tty the region is erased by cursor arithmetic over the rows it
-            # drew, so a `report()` line or a USER-ACTION block emitted
-            # while it was still up would be torn through by the erase.
-            # `finally` rather than a plain call, so a step that raises
-            # leaves the terminal in the same clean state as one that
-            # merely fails.
-            ctx.progress.end_step()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                ctx.progress.end_step()
+            raise
+        ctx.progress.end_step()
 
         if result.status is StepStatus.COMPLETE:
             step.report(ctx)
@@ -1251,7 +1304,11 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
             return 1
 
     if sm.all_complete():
-        log.info("all steps complete")
+        skipped = [step_id for step_id in STEP_IDS if sm.is_skipped_gate_off(step_id)]
+        if skipped:
+            log.info(f"all steps complete (skipped, gate off: {', '.join(skipped)})")
+        else:
+            log.info("all steps complete")
     return 0
 
 
@@ -1267,11 +1324,30 @@ def _print_status(sm: StateMachine) -> int:
     so this never crashes on a fresh install."""
     state = sm.load()
     print(f"install_dir: {state.install_dir}")
+    # Read-only and best effort: --status runs without root, and a gate's
+    # current value only refines how a skipped step is described.
+    try:
+        conf = config_mod._read_conf(
+            pathlib.Path(state.install_dir) / config_mod.CONF_FILENAME
+        )
+    except OSError:
+        conf = {}
     for step_id in STEP_IDS:
         entry = state.steps.get(step_id)
         status_value = (
             entry.status.value if entry is not None else StepStatus.PENDING.value
         )
+        if (
+            entry is not None
+            and entry.skipped_gate_off
+            and entry.status is StepStatus.PENDING
+        ):
+            gate_key = _STEP_ID_TO_GATE_KEY.get(step_id)
+            gate_now = conf.get(gate_key) if gate_key else None
+            if gate_now and not _gate_is_off(gate_now):
+                status_value = "SKIPPED, gate now on: runs on next install run"
+            else:
+                status_value = "SKIPPED (gate off; runs when the gate is turned on)"
         print(f"{step_id}: {status_value}")
     print(f"all complete: {sm.all_complete()}")
     return 0
@@ -1473,6 +1549,32 @@ def main(
     if args.status:
         return _print_status(sm)
 
+    try:
+        with _sigterm_raises():
+            return _install_flow(args, sm)
+    except KeyboardInterrupt:
+        _report_interrupted("interrupted (Ctrl-C)")
+        return 130
+    except InstallerTerminated as exc:
+        _report_interrupted(f"terminated (signal {exc.signum})")
+        return 128 + exc.signum
+
+
+def _report_interrupted(what: str) -> None:
+    """One clear line for an operator who stopped the run. Writing it can
+    itself fail when the output pipe's reader died with the same signal,
+    and that must not turn a clean stop into a traceback."""
+    with contextlib.suppress(Exception):
+        log.error(
+            f"{what}; the step in progress was not marked complete. "
+            "Run the installer again to resume."
+        )
+
+
+def _install_flow(args: argparse.Namespace, sm: StateMachine) -> int:
+    """`main()` from the root check onwards: everything that can prompt or
+    run a step, so `main()` can stop all of it the same way on Ctrl-C or
+    SIGTERM."""
     privilege.require_root()
     user = onboarding.run_platform_preflight()
 

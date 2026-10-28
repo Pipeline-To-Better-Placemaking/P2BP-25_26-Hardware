@@ -96,6 +96,7 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
 
+from mv3dt_installer import prompting
 from mv3dt_installer.logs import log
 from mv3dt_installer.state import DEFAULT_INSTALL_DIR, StateMachine
 
@@ -418,7 +419,7 @@ def load(
     non_interactive: bool = False,
     *,
     default_install_dir: str | os.PathLike[str] = DEFAULT_INSTALL_DIR,
-    prompt: Callable[[str], str] = input,
+    prompt: Callable[[str], str] | None = None,
     gate_overrides: dict[str, str] | None = None,
 ) -> Config:
     """Resolve the install directory, persist it, and return the parsed
@@ -437,7 +438,9 @@ def load(
             `/opt/mv3dt`.
         prompt: injectable stand-in for `input()`, for testability. Used
             both for the §11.1 install-dir question and for the §3.4 gate
-            questions.
+            questions. Left as `None`, the real `input()` is used, and only
+            then is the terminal checked first: a hidden prompt makes every
+            question take its default, as under `non_interactive`.
         gate_overrides: `{gate key: value}` from the matching CLI flags
             (`--remote-supervision`, `--webapp-integration`). Only keys the
             operator actually passed appear here -- `app.py` builds the map
@@ -454,13 +457,43 @@ def load(
         install_dir_override, state, default_install_dir
     )
 
-    if source == "default" and not non_interactive:
-        resolved = _prompt_for_install_dir(resolved, prompt)
+    # A hidden prompt blocks forever, so when the real `input()` cannot be
+    # seen every question here takes its default, exactly as under
+    # --non-interactive. Only the real `input()` is checked; an injected
+    # prompt is a test's.
+    hidden_reason = None
+    if prompt is None:
+        prompt = input
+        if not non_interactive:
+            hidden_reason = prompting.prompt_unavailable_reason()
+            if hidden_reason is not None:
+                non_interactive = True
+    skipped_questions: list[str] = []
+
+    if source == "default":
+        if not non_interactive:
+            resolved = _prompt_for_install_dir(resolved, prompt)
+        elif hidden_reason is not None:
+            skipped_questions.append(f"install directory ({resolved})")
 
     resolved.mkdir(parents=True, exist_ok=True)
 
     conf_path = resolved / CONF_FILENAME
     values = _read_conf(conf_path)
+    if hidden_reason is not None:
+        overrides = gate_overrides or {}
+        skipped_questions += [
+            f"{key} ({GATE_DEFAULTS[key]})"
+            for key in GATE_KEYS
+            if key not in values
+            and not overrides.get(key)
+            and not os.environ.get(key)
+        ]
+    if skipped_questions:
+        log.warn(
+            f"{hidden_reason}: not asking for {', '.join(skipped_questions)}; "
+            "using the default shown. Run without a pipe to be asked."
+        )
     _resolve_gates(
         values,
         gate_overrides=gate_overrides or {},

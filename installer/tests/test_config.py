@@ -923,3 +923,72 @@ def test_auto_ingest_flag_maps_to_its_gate():
     args = app.parse_args(["--auto-ingest", "on"])
     assert app._gate_overrides_from_args(args) == {config.GATE_AUTO_INGEST: "on"}
     assert "auto_ingest" not in app._GATE_ORDER_TO_CONF_ATTR.values()
+
+
+def _hide_prompts(monkeypatch):
+    from mv3dt_installer import prompting
+
+    monkeypatch.setattr(
+        prompting, "prompt_unavailable_reason", lambda: "stdout is not a terminal (is the output piped?)"
+    )
+
+
+def _no_prompt(*_args, **_kwargs):  # pragma: no cover -- must never be called
+    raise AssertionError("a hidden prompt was shown")
+
+
+def test_hidden_prompt_takes_every_default(tmp_path, monkeypatch, capsys):
+    """With the real input() and a prompt nobody can see, load() must not
+    block: the install directory and the gates take their defaults."""
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    default_dir = tmp_path / "default-install"
+
+    cfg = config.load(None, _state(tmp_path), default_install_dir=default_dir)
+
+    assert cfg.install_dir == default_dir
+    for key in config.GATE_KEYS:
+        assert cfg.values[key] == config.GATE_DEFAULTS[key]
+    err = capsys.readouterr().err
+    assert f"install directory ({default_dir})" in err
+    for key in config.GATE_KEYS:
+        assert f"{key} ({config.GATE_DEFAULTS[key]})" in err
+
+
+def test_hidden_prompt_with_a_complete_conf_does_not_warn(tmp_path, monkeypatch, capsys):
+    """Nothing would have been asked, so a non-TTY run says nothing."""
+    install_dir = tmp_path / "install"
+    config.load(str(install_dir), _state(tmp_path), non_interactive=True)
+    capsys.readouterr()
+    _hide_prompts(monkeypatch)
+    monkeypatch.setattr("builtins.input", _no_prompt)
+
+    config.load(None, _state(tmp_path))
+
+    assert "not asking" not in capsys.readouterr().err
+
+
+def test_hidden_prompt_names_only_the_missing_gate(tmp_path, monkeypatch, capsys):
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    install_dir = tmp_path / "install"
+    config.load(str(install_dir), _state(tmp_path), non_interactive=True)
+    conf = install_dir / config.CONF_FILENAME
+    missing = config.GATE_KEYS[-1]
+    conf.write_text(
+        "".join(
+            line + "\n"
+            for line in conf.read_text().splitlines()
+            if not line.startswith(f"{missing}=")
+        )
+    )
+    capsys.readouterr()
+    _hide_prompts(monkeypatch)
+
+    config.load(None, _state(tmp_path))
+
+    err = capsys.readouterr().err
+    assert f"not asking for {missing} (" in err
+    assert "install directory" not in err

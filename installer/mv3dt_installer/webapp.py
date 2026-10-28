@@ -76,7 +76,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Optional
 
-from . import privilege
+from . import privilege, prompting
 from .logs import log
 
 __all__ = [
@@ -176,6 +176,17 @@ def capture_credentials(
     existing_endpoint = existing.endpoint if existing else None
 
     if non_interactive:
+        return Credentials(api_key=existing_key, endpoint=existing_endpoint)
+
+    reason = prompting.prompt_unavailable_reason()
+    if reason is not None:
+        # The documented --non-interactive outcome rather than a hidden
+        # prompt that blocks forever.
+        log.warn(
+            f"{reason}: not asking for web-app credentials; keeping what is "
+            "stored and leaving anything missing unset. Run the installer "
+            "without a pipe to enter them."
+        )
         return Credentials(api_key=existing_key, endpoint=existing_endpoint)
 
     api_key = existing_key
