@@ -1164,9 +1164,9 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     Iterates `STEP_REGISTRY` (kept sorted by `.order` by `steps.register()`)
     in order. For each step:
 
-    - If its gate (steps 6-8 only, doc 00 §3.4) is off, auto-`COMPLETE` it
-      with a one-line log -- "the same skip discipline as a genuinely
-      completed step".
+    - If its gate (steps 6-8 only, doc 00 §3.4) is off, skip it with a
+      one-line log and record it as skipped, not `COMPLETE`, so it runs on
+      the first launch after the gate is turned on.
     - Else if already `COMPLETE`, skip with the "already complete" log line.
     - Else announce it with doc 08 §3.2's `[ 3/7 ] <title>` banner, run
       its lifecycle (`preflight -> run -> verify`), and record the
@@ -1204,8 +1204,10 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     for position, step in enumerate(STEP_REGISTRY, start=1):
         gate_value = _gate_value_for_step(step, cfg)
         if gate_value is not None and _gate_is_off(gate_value):
-            if sm.status(step.id) is not StepStatus.COMPLETE:
-                sm.mark_complete(step.id)
+            # Recorded as skipped, never as COMPLETE: a step marked complete
+            # here said "already complete" on every later run, so turning
+            # its gate on never installed it.
+            sm.mark_skipped_gate_off(step.id)
             log.info(f"{step.id}: skipped (gate off)")
             continue
 
@@ -1251,7 +1253,11 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
             return 1
 
     if sm.all_complete():
-        log.info("all steps complete")
+        skipped = [step_id for step_id in STEP_IDS if sm.is_skipped_gate_off(step_id)]
+        if skipped:
+            log.info(f"all steps complete (skipped, gate off: {', '.join(skipped)})")
+        else:
+            log.info("all steps complete")
     return 0
 
 
@@ -1272,6 +1278,12 @@ def _print_status(sm: StateMachine) -> int:
         status_value = (
             entry.status.value if entry is not None else StepStatus.PENDING.value
         )
+        if (
+            entry is not None
+            and entry.skipped_gate_off
+            and entry.status is StepStatus.PENDING
+        ):
+            status_value = "SKIPPED (gate off; runs when the gate is turned on)"
         print(f"{step_id}: {status_value}")
     print(f"all complete: {sm.all_complete()}")
     return 0

@@ -809,7 +809,9 @@ def test_dispatch_halts_on_failed(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_dispatch_gate_off_autocompletes_and_never_runs_lifecycle(tmp_path, monkeypatch):
+def test_dispatch_gate_off_skips_without_completing_and_never_runs_lifecycle(
+    tmp_path, monkeypatch
+):
     sm = StateMachine(path=tmp_path / "state.json")
     ctx, cfg = _minimal_ctx(tmp_path)  # remote_supervision defaults to "off"
     step = _DummyStep("step6_remote_supervision", "Remote Supervision", 6)
@@ -818,10 +820,82 @@ def test_dispatch_gate_off_autocompletes_and_never_runs_lifecycle(tmp_path, monk
     rc = app._dispatch(sm, ctx, cfg)
 
     assert rc == 0
-    assert sm.status("step6_remote_supervision") is StepStatus.COMPLETE
+    # A skip is recorded as a skip, not as COMPLETE (see the gate-on test
+    # below for why that matters).
+    assert sm.status("step6_remote_supervision") is StepStatus.PENDING
+    assert sm.is_skipped_gate_off("step6_remote_supervision") is True
     # Gate-off skip never invokes the lifecycle, so report() is never
     # called (mirrors the "already complete" skip discipline exactly).
     assert step.report_calls == 0
+
+
+@pytest.mark.parametrize(
+    "step_id,title,order,gate_attr",
+    [
+        ("step7_webapp_integration", "Web-app Integration", 7, "webapp_integration"),
+        ("step8_tracking_history", "Tracking history", 8, "tracking_history"),
+    ],
+)
+def test_dispatch_gated_step_runs_once_its_gate_is_turned_on(
+    tmp_path, monkeypatch, capsys, step_id, title, order, gate_attr
+):
+    """Live regression: with the gate off a run logged "skipped (gate off)";
+    after the gate was turned on the next run said "already complete" and
+    the step never ran until --reset-step."""
+    sm = StateMachine(path=tmp_path / "state.json")
+    ctx, cfg = _minimal_ctx(tmp_path)
+    step = _DummyStep(step_id, title, order)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+    assert step.report_calls == 0
+
+    setattr(cfg, gate_attr, "on")
+    capsys.readouterr()
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert step.report_calls == 1
+    assert sm.status(step_id) is StepStatus.COMPLETE
+    assert sm.is_skipped_gate_off(step_id) is False
+    assert "already complete" not in capsys.readouterr().err
+
+
+def test_dispatch_all_complete_names_the_gated_off_steps(tmp_path, monkeypatch, capsys):
+    sm = StateMachine(path=tmp_path / "state.json")
+    for step_id in STEP_IDS[:5]:
+        sm.mark_complete(step_id)
+    ctx, cfg = _minimal_ctx(tmp_path)
+    monkeypatch.setattr(
+        app,
+        "STEP_REGISTRY",
+        [
+            _DummyStep("step6_remote_supervision", "Remote Supervision", 6),
+            _DummyStep("step7_webapp_integration", "Web-app Integration", 7),
+            _DummyStep("step8_tracking_history", "Tracking history", 8),
+        ],
+    )
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    err = capsys.readouterr().err
+    assert (
+        "all steps complete (skipped, gate off: step6_remote_supervision, "
+        "step7_webapp_integration, step8_tracking_history)"
+    ) in err
+
+
+def test_status_shows_a_gate_off_skip(tmp_path, capsys):
+    state_path = tmp_path / "state.json"
+    sm = StateMachine(path=state_path)
+    for step_id in STEP_IDS[:-1]:
+        sm.mark_complete(step_id)
+    sm.mark_skipped_gate_off("step8_tracking_history")
+
+    assert app.main(["--status"], state_path=state_path) == 0
+
+    out = capsys.readouterr().out
+    assert "step8_tracking_history: SKIPPED (gate off" in out
+    assert "all complete: True" in out
 
 
 def test_dispatch_gate_on_runs_step7_normally(tmp_path, monkeypatch):
@@ -872,7 +946,8 @@ def test_dispatch_gate_off_skips_step6_explicitly(tmp_path, monkeypatch):
 
     assert rc == 0
     assert step.report_calls == 0
-    assert sm.status("step6_remote_supervision") is StepStatus.COMPLETE
+    assert sm.status("step6_remote_supervision") is StepStatus.PENDING
+    assert sm.is_skipped_gate_off("step6_remote_supervision") is True
 
 
 # ---------------------------------------------------------------------------
