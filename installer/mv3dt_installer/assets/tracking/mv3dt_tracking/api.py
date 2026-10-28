@@ -1,7 +1,9 @@
 """The read-only tracking history API (STEP-8 sections 8 and 9).
 
 `create_app` builds the FastAPI app around a TrackStore, the settings and an
-optional running Recorder. Session endpoints answer with PascalCase keys,
+optional running Recorder. `range` and `export` default to (and `export`
+offers) fused people from `fuse`, cleaned with the workstation's
+`cleaning.json` and `offsets.json`, both re-read when they change on disk. Session endpoints answer with PascalCase keys,
 data endpoints with lowercase keys, and every error is `{"Message": ...}`.
 Data handlers are plain functions, so FastAPI runs them in its threadpool
 and SQLite reads never block the event loop.
@@ -12,6 +14,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
+import os
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,10 +32,15 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__, calib
 from .auth import Claims, ticket_dependency
+from .cleaning import CleaningConfig, CleaningFile, resolve_room
+from .fuse import FusedSample, Fuser, offsets_summary, summarize
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
+from .offsets import read_offsets
 from .settings import Settings
-from .stitch import Stitcher, people_series, raw_series, stitch
-from .store import Detection, TrackStore
+from .stitch import raw_series
+from .store import Detection, TrackStore, bucket_ms
+
+log = logging.getLogger(__name__)
 
 HOUR_MS = 3600 * 1000
 RANGE_MAX_MS = 6 * HOUR_MS
@@ -38,13 +48,14 @@ EXPORT_MAX_MS = 24 * HOUR_MS
 MAX_HZ = 25.0
 # Samples per range request (hz x window seconds): 6 h at 5 Hz, 72 min at 25 Hz.
 RANGE_MAX_SAMPLES = 108_000
-STITCH_HZ = 5.0
-# Export works through the window in epoch-aligned 10-minute stitch windows,
-# reading raw rows one minute at a time, so memory is bounded by a chunk.
-STITCH_CHUNK_MS = 10 * 60 * 1000
+# A fused export feeds one Fuser epoch-aligned 10-minute windows of raw rows;
+# a raw export reads one minute at a time, so memory is bounded by a chunk.
+FUSE_CHUNK_MS = 10 * 60 * 1000
 RAW_CHUNK_MS = 60 * 1000
 SESSION_HEADER = "X-Tracking-Session"
 COLUMNS = ("ts_ms", "sensor", "track_id", "x", "y", "z", "w", "l", "h", "conf")
+FUSED_COLUMNS = ("ts_ms", "person_id", "x", "y", "cameras")
+STITCHED_DEPRECATION = "mode=stitched is an alias of fused and will be removed; use mode=fused"
 
 
 class SessionRequest(BaseModel):
@@ -86,30 +97,177 @@ def _windows(from_ms: int, to_ms: int, width: int) -> Iterator[tuple[int, int]]:
         start = stop + 1
 
 
-def export_records(store: TrackStore, from_ms: int, to_ms: int, stitched: bool) -> Iterator[dict]:
-    """Raw rows of [from_ms, to_ms] in ts order as dicts, with `person_id`
-    added when `stitched`.
+class OffsetsFile:
+    """offsets.json through `read_offsets`, re-read when its mtime changes.
+    A missing file gives None; an unreadable or invalid one gives None with
+    the reason in `error` (no correction, never a failed request)."""
 
-    Person ids match `range` at 5 Hz over the same window: each 10-minute
-    stitch window is downsampled at 5 Hz and fed to one Stitcher whose state
-    carries across windows. The window edges are multiples of the 200 ms
-    bucket, so no bucket is split and the fed rows equal the one-shot query's.
-    A window's raw rows are emitted after it is fed, and a track's first 5 Hz
-    sample is never later than its first raw row, so every positioned track
-    has its id when its rows go out. Tracks never seen with a position get
-    a null person_id.
+    def __init__(self, path: Path | None) -> None:
+        self.path = None if path is None else Path(path)
+        self._stamp: object = object()
+        self._offsets: dict | None = None
+        self.error: str | None = None
+
+    def get(self) -> dict | None:
+        stamp = None
+        if self.path is not None:
+            try:
+                st = os.stat(self.path)
+                stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+            except FileNotFoundError:
+                pass
+        if stamp != self._stamp:
+            self._stamp = stamp
+            self._offsets, self.error = read_offsets(self.path)
+            if self.error:
+                log.error("offsets: %s; not applying a correction", self.error)
+        return self._offsets
+
+
+class Cleaning:
+    """What one fused request runs with: the current cleaning config (with
+    its load error and ignored keys), the learned offsets and the room."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.config_file = CleaningFile(settings.cleaning_file)
+        self.offsets_file = OffsetsFile(settings.offsets_file)
+        self.calib_dir = settings.calib_dir
+
+    def current(self) -> tuple[CleaningConfig, dict | None, object]:
+        config = self.config_file.get()
+        return config, self.offsets_file.get(), resolve_room(config, self.calib_dir)
+
+    @staticmethod
+    def _public(error: str | None, path: Path | None) -> str | None:
+        """An error for web clients: the file's name instead of its absolute
+        path (the full path stays in the service log)."""
+        if error is None or path is None:
+            return error
+        return error.replace(str(path), path.name)
+
+    def summary_extras(self, config: CleaningConfig, offsets: dict | None) -> dict:
+        """Fields every fused summary adds to the engine's own."""
+        return {
+            "config_error": self._public(self.config_file.error, self.config_file.path),
+            "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys],
+            "offsets_extra": {
+                "enabled": config.offsets_apply,
+                "learned": offsets is not None and bool(offsets.get("sensors")),
+                "file_error": self._public(self.offsets_file.error, self.offsets_file.path),
+            },
+        }
+
+
+def finish_summary(summary: dict, extras: dict) -> dict:
+    """Add the request's file state to an engine summary. `offsets.error` is
+    the offsets.json load error when there is one, else the Fuser's own
+    validation error, so there is one error field from either source."""
+    extras = dict(extras)
+    extra = dict(extras.pop("offsets_extra"))
+    file_error = extra.pop("file_error")
+    offsets = summary["offsets"]
+    offsets.update(extra)
+    offsets["error"] = file_error or offsets.get("error")
+    summary.update(extras)
+    return summary
+
+
+def _renumber(people: list[dict], persons: list[dict]) -> None:
+    """Person ids 1..N by first appearance, in place."""
+    order = sorted(people, key=lambda p: (p["t"][0], p["id"]))
+    new = {p["id"]: i for i, p in enumerate(order, 1)}
+    for p in people:
+        p["id"] = new[p["id"]]
+    for p in persons:
+        p["id"] = new[p["id"]]
+    people.sort(key=lambda p: p["id"])
+    persons.sort(key=lambda p: p["id"])
+
+
+def _downsample(person: dict, width: int) -> dict:
+    """A fused person's series re-bucketed to `width` ms: mean position and
+    the largest camera count per bucket."""
+    acc: dict[int, list] = {}
+    for t, x, y, n in zip(person["t"], person["x"], person["y"], person["n_cams"]):
+        cell = acc.setdefault(t - t % width, [0.0, 0.0, 0, 0])
+        cell[0] += x
+        cell[1] += y
+        cell[2] += 1
+        cell[3] = max(cell[3], n)
+    ts = sorted(acc)
+    return {
+        **person,
+        "t": ts,
+        "x": [acc[b][0] / acc[b][2] for b in ts],
+        "y": [acc[b][1] / acc[b][2] for b in ts],
+        "n_cams": [acc[b][3] for b in ts],
+    }
+
+
+def fused_range(store: TrackStore, cleaning: Cleaning, from_ms: int, to_ms: int, hz: float) -> dict:
+    """The fused `range` body (without from/to/mode): people renumbered by
+    first appearance, downsampled when `hz` is coarser than the fusion
+    bucket, and the summary. `hz` in the result is the output rate."""
+    config, offsets, room = cleaning.current()
+    # Streamed like the export, so memory follows a 10-minute chunk rather
+    # than the whole window; the result equals one `fuse` call.
+    fuser = Fuser(config, offsets, room)
+    samples = list(fused_samples(store, fuser, from_ms, to_ms))
+    people, _ = summarize(samples)
+    summary = finish_summary(stream_summary(samples, fuser, offsets), cleaning.summary_extras(config, offsets))
+    _renumber(people, summary["persons"])
+    width = bucket_ms(hz)
+    if width > config.bucket_ms:
+        people = [_downsample(p, width) for p in people]
+    else:
+        width = config.bucket_ms
+    return {"hz": 1000.0 / width, "people": people, "summary": summary}
+
+
+def fused_samples(store: TrackStore, fuser: Fuser, from_ms: int, to_ms: int) -> Iterator[FusedSample]:
+    """Stream [from_ms, to_ms] through one Fuser in epoch-aligned 10-minute
+    windows, yielding samples as their people become final, then the rest.
+    Each finalized group comes out in per-person blocks, each time-ordered
+    (sorted by person id, then ts). Gives the same people and ids as one
+    `fuse` call over the window."""
+    def block(samples: list[FusedSample]) -> list[FusedSample]:
+        return sorted(samples, key=lambda s: (s.person_id, s.ts_ms))
+
+    for start, stop in _windows(from_ms, to_ms, FUSE_CHUNK_MS):
+        yield from block(fuser.feed(_positioned(store.query_range(start, stop))))
+    yield from block(fuser.finish())
+
+
+def stream_summary(samples: list[FusedSample], fuser: Fuser, offsets: dict | None) -> dict:
+    """The engine summary for samples streamed through `fuser`, as `fuse`
+    builds it for a one-shot call."""
+    _, summary = summarize(samples)
+    summary["dropped"] = {**fuser.dropped, "zones": dict(fuser.dropped["zones"])}
+    summary["offsets"] = offsets_summary(offsets, fuser.offsets_applied, fuser.offsets_error)
+    summary["preset"] = fuser.config.preset
+    return summary
+
+
+def export_records(
+    store: TrackStore, from_ms: int, to_ms: int, fused: bool, cleaning: Cleaning | None = None
+) -> Iterator[dict]:
+    """Records of [from_ms, to_ms] as dicts.
+
+    Raw: every stored row, in ts order, read a minute at a time. Fused: one
+    record per person per fusion bucket (`ts_ms, person_id, x, y, cameras`,
+    cameras joined with ";"), in per-person blocks, each time-ordered, as
+    people become final; ids match a fused `range` over the same window.
     """
-    stitcher = Stitcher() if stitched else None
-    person_of: dict[int, int] = {}
-    for w_start, w_stop in _windows(from_ms, to_ms, STITCH_CHUNK_MS):
-        if stitcher is not None:
-            person_of.update(stitcher.feed(_positioned(store.query_range(w_start, w_stop, STITCH_HZ))))
-        for start, stop in _windows(w_start, w_stop, RAW_CHUNK_MS):
-            for row in store.query_range(start, stop):
-                rec = asdict(row)
-                if stitcher is not None:
-                    rec["person_id"] = person_of.get(row.track_id)
-                yield rec
+    if fused:
+        config, offsets, room = (cleaning.current() if cleaning is not None
+                                 else (CleaningConfig(), None, None))
+        for s in fused_samples(store, Fuser(config, offsets, room), from_ms, to_ms):
+            yield {"ts_ms": s.ts_ms, "person_id": s.person_id, "x": s.x, "y": s.y,
+                   "cameras": ";".join(s.cameras)}
+        return
+    for start, stop in _windows(from_ms, to_ms, RAW_CHUNK_MS):
+        for row in store.query_range(start, stop):
+            yield asdict(row)
 
 
 def encode_export(records: Iterator[dict], format: str, columns: tuple[str, ...]) -> Iterator[str]:
@@ -151,6 +309,8 @@ def create_app(
     leases = leases or LeaseManager()
     app.state.leases = leases
     app.state.store = store
+    cleaning = Cleaning(settings)
+    app.state.cleaning = cleaning
 
     app.add_middleware(
         CORSMiddleware,
@@ -252,28 +412,36 @@ def create_app(
         from_ms: int = Query(alias="from"),
         to_ms: int = Query(alias="to"),
         hz: float = Query(5.0),
-        mode: Literal["stitched", "raw"] = Query("stitched"),
+        mode: Literal["fused", "stitched", "raw"] = Query("fused"),
         session: str | None = Header(None, alias=SESSION_HEADER),
         claims: Claims = Depends(ticket),
     ):
         _check_window(from_ms, to_ms, RANGE_MAX_MS)
         if not 0 < hz <= MAX_HZ:
             raise HTTPException(400, f"hz must be > 0 and <= {MAX_HZ:g}")
-        if hz * (to_ms - from_ms) / 1000 > RANGE_MAX_SAMPLES:
+        # Fused output never exceeds the fusion bucket rate (5 Hz at the
+        # default 200 ms), so the cap counts what is actually served.
+        served_hz = hz if mode == "raw" else min(hz, 1000.0 / cleaning.config_file.get().bucket_ms)
+        if served_hz * (to_ms - from_ms) / 1000 > RANGE_MAX_SAMPLES:
             raise HTTPException(
                 400,
                 f"hz x window seconds must not exceed {RANGE_MAX_SAMPLES}"
-                " (6 h at 5 Hz, 72 min at 25 Hz); lower hz or narrow the window",
+                " (6 h at 5 Hz, 72 min at 25 Hz; fused output counts at most 5 Hz);"
+                " lower hz or narrow the window",
             )
         admitted = guard("range", session, claims)
         try:
-            rows = _positioned(store.query_range(from_ms, to_ms, hz))
-            if mode == "stitched":
-                people = people_series(rows, stitch(rows), hz)
+            if mode == "raw":
+                rows = _positioned(store.query_range(from_ms, to_ms, hz))
+                body = {"from": from_ms, "to": to_ms, "hz": hz, "mode": "raw", "people": raw_series(rows, hz)}
             else:
-                people = raw_series(rows, hz)
+                fused = fused_range(store, cleaning, from_ms, to_ms, hz)
+                body = {"from": from_ms, "to": to_ms, "hz": fused["hz"], "mode": "fused",
+                        "people": fused["people"], "summary": fused["summary"]}
+                if mode == "stitched":
+                    body["deprecated"] = STITCHED_DEPRECATION
             # Serialize while the guard is held, so the work counts as in flight.
-            return JSONResponse({"from": from_ms, "to": to_ms, "hz": hz, "mode": mode, "people": people})
+            return JSONResponse(body)
         finally:
             leases.end(admitted)
 
@@ -282,17 +450,18 @@ def create_app(
         request: Request,
         from_ms: int = Query(alias="from"),
         to_ms: int = Query(alias="to"),
-        mode: Literal["stitched", "raw"] = Query("raw"),
+        mode: Literal["fused", "stitched", "raw"] = Query("raw"),
         format: Literal["csv", "jsonl"] = Query("csv"),
         session: str | None = Header(None, alias=SESSION_HEADER),
         claims: Claims = Depends(ticket),
     ):
         _check_window(from_ms, to_ms, EXPORT_MAX_MS)
         admitted = guard("export", session, claims)
-        stitched = mode == "stitched"
-        columns = COLUMNS + (("person_id",) if stitched else ())
+        fused = mode != "raw"
+        mode = "fused" if fused else "raw"
+        columns = FUSED_COLUMNS if fused else COLUMNS
 
-        chunks = encode_export(export_records(store, from_ms, to_ms, stitched), format, columns)
+        chunks = encode_export(export_records(store, from_ms, to_ms, fused, cleaning), format, columns)
 
         async def body() -> AsyncIterator[str]:
             # uvicorn advertises ASGI 2.4, so Starlette does not watch for a

@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import struct
 import time
 import zlib
@@ -26,7 +27,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from mv3dt_tracking import api  # noqa: E402
 from mv3dt_tracking.api import create_app  # noqa: E402
-from mv3dt_tracking.stitch import stitch  # noqa: E402
+from mv3dt_tracking.fuse import fuse  # noqa: E402
 from mv3dt_tracking.lock import LeaseManager  # noqa: E402
 from mv3dt_tracking.settings import Settings  # noqa: E402
 from mv3dt_tracking.store import Detection, TrackStore  # noqa: E402
@@ -346,19 +347,10 @@ def test_range_requires_session(client):
     assert r.status_code == 423
 
 
-def test_range_stitched_shape(client):
+def test_range_default_is_fused(client):
     sid = session(client)
-    r = rng(client, sid)
-    assert r.status_code == 200
-    body = r.json()
-    assert (body["from"], body["to"], body["hz"], body["mode"]) == (T0, T0 + 5000, 5.0, "stitched")
-    people = body["people"]
-    assert [p["trackIds"] for p in people] == [[1, 2], [9]]
-    first = people[0]
-    assert set(first) == {"id", "trackIds", "t", "x", "y"}
-    assert all(type(p["id"]) is int for p in people)
-    assert len(first["t"]) == len(first["x"]) == len(first["y"])
-    assert first["t"][0] == T0 and all(b - a >= 200 for a, b in zip(first["t"], first["t"][1:]))
+    body = rng(client, sid).json()
+    assert body["mode"] == "fused" and "summary" in body and "deprecated" not in body
 
 
 def test_range_raw_shape(client):
@@ -377,7 +369,7 @@ def test_range_raw_shape(client):
         {"hz": 0},
         {"hz": 25.5},
         {"hz": -1},
-        {"mode": "fused"},
+        {"mode": "bogus"},
         {"from": "yesterday"},
     ],
     ids=["over-6h", "backwards", "hz-0", "hz-over-25", "hz-negative", "bad-mode", "bad-from"],
@@ -394,9 +386,15 @@ def test_range_sample_cap(client):
     assert rng(client, sid, to=T0 + 6 * HOUR, hz=5).status_code == 200
     assert rng(client, sid, to=T0 + 72 * 60 * 1000, hz=25).status_code == 200
     for to, hz in ((T0 + 6 * HOUR, 25), (T0 + 72 * 60 * 1000 + 1, 25), (T0 + 6 * HOUR, 5.01)):
-        r = rng(client, sid, to=to, hz=hz)
+        r = rng(client, sid, to=to, hz=hz, mode="raw")
         assert r.status_code == 400
         assert "108000" in r.json()["Message"]
+    # Fused output is served at most at the 5 Hz fusion bucket, so a 6 h
+    # fused request at 25 Hz is within the cap; past 6 h is still refused.
+    for mode in ("fused", "stitched"):
+        r = rng(client, sid, to=T0 + 6 * HOUR, hz=25, mode=mode)
+        assert r.status_code == 200 and r.json()["hz"] == 5.0
+        assert rng(client, sid, to=T0 + 6 * HOUR + 1, hz=25, mode=mode).status_code == 400
 
 
 def test_range_concurrent_request_gets_429(client):
@@ -448,54 +446,12 @@ def test_export_csv_raw(client):
     assert positionless and positionless[0]["x"] == ""
 
 
-def test_export_jsonl_stitched(client):
-    sid = session(client, kind="export")
-    r = export(client, sid, mode="stitched", format="jsonl")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("application/x-ndjson")
-    lines = [json.loads(line) for line in r.text.splitlines()]
-    assert len(lines) == 51
-    assert set(lines[0]) == {"ts_ms", "sensor", "track_id", "x", "y", "z", "w", "l", "h", "conf", "person_id"}
-    person = {d["track_id"]: d["person_id"] for d in lines}
-    assert person[1] == person[2] != person[9]
-    assert person[3] is None
-    ts = [d["ts_ms"] for d in lines]
-    assert ts == sorted(ts)
-
-
 def test_export_spans_chunks_in_order(store, client):
     store.insert_many([Detection(T0 + 2 * HOUR + 5, "cam1", 50, 1.0, 1.0)])
     sid = session(client, kind="export")
     r = export(client, sid, mode="raw", format="jsonl", to=T0 + 3 * HOUR)
     lines = [json.loads(line) for line in r.text.splitlines()]
     assert len(lines) == 52 and lines[-1]["track_id"] == 50
-
-
-def test_export_ids_match_one_shot_stitching_across_chunks(tmp_path):
-    store = TrackStore(tmp_path / "chunked")
-    edge = T0 - T0 % (10 * 60 * 1000) + 10 * 60 * 1000  # a stitch-window edge
-    rows = []
-    # Track 1 ends just before the edge; track 2 starts just after, nearby,
-    # so it continues person 1 across the boundary. Track 3 straddles the
-    # edge on its own; track 4 starts later, far away.
-    for i in range(30):
-        rows.append(Detection(edge - 3000 + i * 50, "cam1", 1, 1.0 + 0.01 * i, 1.0))
-    for i in range(30):
-        rows.append(Detection(edge + 900 + i * 50, "cam2", 2, 1.4, 1.0))
-    for i in range(200):
-        rows.append(Detection(edge - 5000 + i * 50, "cam1", 3, 8.0, 8.0))
-    for i in range(10):
-        rows.append(Detection(edge + 20 * 60 * 1000 + 7 + i * 33, "cam1", 4, -5.0, 0.0))
-    store.insert_many(rows)
-    lo, hi = edge - 60_000 + 13, edge + 25 * 60 * 1000
-
-    one_shot = stitch([r for r in store.query_range(lo, hi, 5) if r.x is not None])
-    recs = list(api.export_records(store, lo, hi, stitched=True))
-    chunked = {r["track_id"]: r["person_id"] for r in recs}
-    assert chunked == one_shot
-    assert chunked[1] == chunked[2] != chunked[3]
-    assert len(recs) == len(rows)
-    assert [r["ts_ms"] for r in recs] == sorted(r["ts_ms"] for r in recs)
 
 
 def test_export_reads_in_bounded_windows(store, monkeypatch):
@@ -507,20 +463,17 @@ def test_export_reads_in_bounded_windows(store, monkeypatch):
         return real(lo, hi, hz)
 
     monkeypatch.setattr(store, "query_range", spy)
-    list(api.export_records(store, T0 - 7, T0 + 3 * HOUR, stitched=True))
-    assert max(w for w, hz in spans if hz is None) < 60 * 1000
-    assert max(w for w, hz in spans if hz is not None) < 10 * 60 * 1000
+    list(api.export_records(store, T0 - 7, T0 + 3 * HOUR, fused=False))
+    assert max(w for w, _ in spans) < 60 * 1000
+    spans.clear()
+    list(api.export_records(store, T0 - 7, T0 + 3 * HOUR, fused=True))
+    assert max(w for w, _ in spans) < 10 * 60 * 1000
+    assert all(hz is None for _, hz in spans)
 
 
 def test_wildcard_origin_rejected(store):
     with pytest.raises(ValueError):
         create_app(Settings(ticket_secret=SECRET, project_id=PID, allowed_origins=["*"]), store)
-
-
-def test_export_csv_stitched_has_person_id(client):
-    sid = session(client, kind="export")
-    rows = list(csv.DictReader(io.StringIO(export(client, sid, mode="stitched").text)))
-    assert "person_id" in rows[0]
 
 
 def test_export_limits_and_session(client):
@@ -679,3 +632,287 @@ def test_abandoned_export_stops_and_releases_guard(clock):
     finally:
         server.should_exit = True
         thread.join(5)
+
+
+# -- fused range and export --------------------------------------------------------
+
+FUSED_TO = T0 + 60_000
+
+
+def _walker(rows, track, cam, t0, seconds, x0, y, vx=0.5, dx=0.0, hz=10):
+    for i in range(int(seconds * hz)):
+        t = i / hz
+        rows.append(Detection(T0 + t0 + int(t * 1000), cam, track, x0 + vx * t + dx, y))
+
+
+@pytest.fixture
+def fused_store(tmp_path):
+    """Person A walks on both cameras under one MV3DT id (camera2 0.2 m off);
+    person B sits still while the tracker churns ids 5 -> 6 across a 4 s gap;
+    a static object is seen by camera2 only under id 20; track 30 lives 1 s."""
+    s = TrackStore(tmp_path / "fused")
+    rows = []
+    _walker(rows, 1, "camera1", 2000, 10, 0.5, -1.0)
+    _walker(rows, 1, "camera2", 2000, 10, 0.5, -1.0, dx=0.2)
+    _walker(rows, 5, "camera1", 0, 10, 5.0, -4.0, vx=0.0)
+    _walker(rows, 6, "camera1", 14_000, 10, 5.2, -4.0, vx=0.0)
+    _walker(rows, 20, "camera2", 0, 40, 3.2, -3.7, vx=0.0)
+    _walker(rows, 30, "camera1", 30_000, 1, 1.0, -2.0, vx=0.0)
+    s.insert_many(rows)
+    return s
+
+
+@pytest.fixture
+def files(tmp_path):
+    return tmp_path / "cleaning.json", tmp_path / "offsets.json"
+
+
+def write_json(path, data):
+    """Write and push the mtime forward so the reload is seen at once."""
+    path.write_text(json.dumps(data) if not isinstance(data, str) else data)
+    st = path.stat()
+    bump = getattr(write_json, "n", 0) + 1
+    write_json.n = bump
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + bump * 1_000_000_000))
+
+
+ROOM = {"x": [0, 7.41], "y": [-5.02, 0]}
+TV = {"name": "tv", "sensors": ["camera2"], "rect": {"x": [2.75, 3.75], "y": [-4.25, -3.25]}}
+
+
+@pytest.fixture
+def fclient(fused_store, clock, files):
+    cleaning, offsets = files
+    write_json(cleaning, {"version": 1, "room": ROOM})
+    return make_client(fused_store, clock, cleaning_file=cleaning, offsets_file=offsets)
+
+
+def frng(client, sid=None, **params):
+    sid = sid or session(client)
+    q = {"from": T0, "to": FUSED_TO, **params}
+    r = client.get("/tracking/range", params=q, headers=data_headers(sid))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_range_fused_shape_and_summary(fclient):
+    body = frng(fclient)
+    assert (body["from"], body["to"], body["hz"], body["mode"]) == (T0, FUSED_TO, 5.0, "fused")
+    people = body["people"]
+    # B (ids 5 and 6 stitched) first, then the static object, then A.
+    assert [p["id"] for p in people] == [1, 2, 3]
+    assert [p["trackIds"] for p in people] == [[5, 6], [20], [1]]
+    for p in people:
+        assert set(p) == {"id", "trackIds", "cameras", "t", "x", "y", "n_cams"}
+        assert len(p["t"]) == len(p["x"]) == len(p["y"]) == len(p["n_cams"])
+        assert all(b - a >= 200 for a, b in zip(p["t"], p["t"][1:]))
+    assert [p["t"][0] for p in people] == sorted(p["t"][0] for p in people)
+    a = people[2]
+    assert a["cameras"] == ["camera1", "camera2"] and max(a["n_cams"]) == 2
+    s = body["summary"]
+    assert {"people", "max_at_once", "occupied_s", "persons", "dropped", "offsets", "preset",
+            "config_error", "config_warnings"} <= set(s)
+    assert s["people"] == 3 and s["max_at_once"] == 3 and s["preset"] == "strict"
+    assert [p["id"] for p in s["persons"]] == [1, 2, 3]
+    assert s["dropped"]["short_tracklet"] == 1 and s["dropped"]["shared_id_joins"] == 1
+    assert s["config_error"] is None and s["config_warnings"] == []
+    assert s["offsets"] == {"applied": False, "needed": None, "gain_m": None, "learned_at_ms": None,
+                            "enabled": True, "learned": False, "error": None}
+
+
+def test_range_stitched_is_a_deprecated_alias_of_fused(fclient):
+    sid = session(fclient)
+    fused = frng(fclient, sid)
+    stitched = frng(fclient, sid, mode="stitched")
+    assert stitched["mode"] == "fused" and "stitched" in stitched["deprecated"]
+    assert stitched["people"] == fused["people"] and stitched["summary"] == fused["summary"]
+
+
+def test_range_raw_mode_is_unchanged(fclient):
+    body = frng(fclient, mode="raw")
+    assert body["mode"] == "raw" and "summary" not in body
+    assert sorted(p["id"] for p in body["people"]) == [1, 5, 6, 20, 30]
+
+
+def test_range_fused_downsamples_only_when_hz_is_coarser(fclient):
+    sid = session(fclient)
+    slow = frng(fclient, sid, hz=1)
+    assert slow["hz"] == 1.0
+    assert all(b - a >= 1000 for p in slow["people"] for a, b in zip(p["t"], p["t"][1:]))
+    assert [p["trackIds"] for p in slow["people"]] == [[5, 6], [20], [1]]
+    fast = frng(fclient, sid, hz=25)
+    assert fast["hz"] == 5.0 and fast["people"] == frng(fclient, sid)["people"]
+
+
+def test_cleaning_reload_changes_results_without_restart(fclient, files):
+    cleaning, _ = files
+    sid = session(fclient)
+    assert frng(fclient, sid)["summary"]["people"] == 3
+    write_json(cleaning, {"version": 1, "room": ROOM, "zones": [TV]})
+    body = frng(fclient, sid)
+    assert body["summary"]["people"] == 2
+    assert body["summary"]["dropped"]["zones"] == {"tv": 400}
+    write_json(cleaning, {"version": 1, "room": ROOM, "zones": [TV], "preset": "relaxed"})
+    assert frng(fclient, sid)["summary"]["preset"] == "relaxed"
+
+
+def test_config_error_and_warnings_are_reported(fclient, files):
+    cleaning, _ = files
+    sid = session(fclient)
+    write_json(cleaning, {"version": 1, "room": ROOM, "zones": [TV], "foo": 1})
+    body = frng(fclient, sid)
+    assert body["summary"]["config_warnings"] == ["ignored unknown key foo"]
+    assert body["summary"]["people"] == 2
+    write_json(cleaning, "{not json")
+    body = frng(fclient, sid)
+    assert "invalid JSON" in body["summary"]["config_error"]
+    # Web clients see the file name, not the workstation's absolute path.
+    assert body["summary"]["config_error"].startswith("cleaning.json: ")
+    assert str(cleaning.parent) not in body["summary"]["config_error"]
+    assert body["summary"]["people"] == 2  # the last valid config still applies
+    write_json(cleaning, {"version": 1, "room": ROOM})
+    assert frng(fclient, sid)["summary"]["config_error"] is None
+
+
+OFFSETS = {
+    "version": 1, "learned_at_ms": 123, "model": "translation", "pairs": 500,
+    "median_dist_before_m": 0.2, "median_dist_after_m": 0.0, "gain_m": 0.2, "needed": True,
+    "sensors": {"camera1": {"dx": 0.1, "dy": 0.0, "theta_deg": 0.0, "scale": 1.0, "sigma_m": 0.05},
+                "camera2": {"dx": -0.1, "dy": 0.0, "theta_deg": 0.0, "scale": 1.0, "sigma_m": 0.05}},
+}
+
+
+def test_offsets_applied_and_toggled(fclient, files):
+    cleaning, offsets = files
+    sid = session(fclient)
+    before = frng(fclient, sid)
+    write_json(offsets, OFFSETS)
+    after = frng(fclient, sid)
+    assert after["summary"]["offsets"] == {"applied": True, "needed": True, "gain_m": 0.2,
+                                           "learned_at_ms": 123, "enabled": True, "learned": True,
+                                           "error": None}
+    seated = lambda body: body["people"][0]["x"][0]  # noqa: E731, person B is camera1 only
+    assert seated(after) == pytest.approx(seated(before) + 0.1)
+    write_json(cleaning, {"version": 1, "room": ROOM, "offsets_apply": False})
+    off = frng(fclient, sid)
+    assert off["summary"]["offsets"]["applied"] is False
+    assert off["summary"]["offsets"]["enabled"] is False and off["summary"]["offsets"]["learned"] is True
+    assert off["people"] == before["people"]
+    write_json(cleaning, {"version": 1, "room": ROOM})
+    write_json(offsets, "[]")
+    bad = frng(fclient, sid)["summary"]["offsets"]
+    assert bad["applied"] is False and bad["learned"] is False
+    assert bad["error"].startswith("offsets.json: ") and str(offsets.parent) not in bad["error"]
+    broken = json.loads(json.dumps(OFFSETS))
+    broken["sensors"]["camera1"]["scale"] = 0
+    write_json(offsets, broken)
+    bad = frng(fclient, sid)
+    assert bad["summary"]["offsets"]["applied"] is False
+    assert "camera1.scale" in bad["summary"]["offsets"]["error"]
+    assert str(offsets.parent) not in bad["summary"]["offsets"]["error"]
+    assert bad["people"] == before["people"]
+
+
+def test_export_fused_rows(fclient):
+    sid = session(fclient, kind="export")
+    q = {"from": T0, "to": FUSED_TO, "mode": "fused"}
+    r = fclient.get("/tracking/export", params=q, headers=data_headers(sid))
+    assert r.status_code == 200
+    assert r.headers["content-disposition"] == f'attachment; filename="tracking_{T0}_{FUSED_TO}_fused.csv"'
+    rows = list(csv.DictReader(io.StringIO(r.text)))
+    assert list(rows[0]) == ["ts_ms", "person_id", "x", "y", "cameras"]
+    body = frng(fclient, sid)
+    assert len(rows) == sum(len(p["t"]) for p in body["people"])
+    a = [row for row in rows if row["person_id"] == "3"]
+    assert {row["cameras"] for row in a} >= {"camera1;camera2"}
+    r = fclient.get("/tracking/export", params={**q, "mode": "stitched", "format": "jsonl"},
+                    headers=data_headers(sid))
+    lines = [json.loads(line) for line in r.text.splitlines()]
+    assert set(lines[0]) == {"ts_ms", "person_id", "x", "y", "cameras"}
+    assert len(lines) == len(rows)
+    assert "_fused.jsonl" in r.headers["content-disposition"]
+
+
+def test_export_fused_chunks_equal_one_shot_and_range_ids(tmp_path, clock):
+    store = TrackStore(tmp_path / "chunked")
+    edge = T0 - T0 % (10 * 60 * 1000) + 10 * 60 * 1000  # a fusion window edge
+    rows = []
+    base = edge - T0
+    # One person whose ids churn across the edge, one far away later, and
+    # one that straddles the edge alone.
+    _walker(rows, 1, "camera1", base - 6000, 5, 1.0, -1.0, vx=0.1)
+    _walker(rows, 2, "camera1", base + 1000, 6, 1.6, -1.0, vx=0.1)
+    _walker(rows, 3, "camera2", base - 8000, 20, 6.0, -4.0, vx=0.0)
+    _walker(rows, 4, "camera1", base + 20 * 60 * 1000 + 7, 5, 2.0, -2.0, vx=0.2)
+    store.insert_many(rows)
+    lo, hi = edge - 60_000 + 13, edge + 25 * 60 * 1000
+
+    one_shot = fuse([r for r in store.query_range(lo, hi)])
+    recs = list(api.export_records(store, lo, hi, fused=True))
+    by_person = {}
+    for rec in recs:
+        by_person.setdefault(rec["person_id"], []).append((rec["ts_ms"], rec["x"], rec["y"]))
+    expected = {p["id"]: list(zip(p["t"], p["x"], p["y"])) for p in one_shot.people}
+    assert {k: sorted(v) for k, v in by_person.items()} == expected
+    assert len(expected) == 3
+
+    client = make_client(store, clock)
+    body = client.get("/tracking/range", params={"from": lo, "to": hi},
+                      headers=data_headers(session(client))).json()
+    assert {p["id"]: p["t"] for p in body["people"]} == {k: [t for t, _, _ in v] for k, v in expected.items()}
+
+
+def _blocks(person_ids):
+    """Person ids in the order their contiguous blocks appear."""
+    out = []
+    for pid in person_ids:
+        if not out or out[-1] != pid:
+            out.append(pid)
+    return out
+
+
+def test_export_fused_is_in_time_ordered_per_person_blocks(fclient):
+    sid = session(fclient, kind="export")
+    q = {"from": T0, "to": FUSED_TO, "mode": "fused", "format": "jsonl"}
+    r = fclient.get("/tracking/export", params=q, headers=data_headers(sid))
+    recs = [json.loads(line) for line in r.text.splitlines()]
+    blocks = _blocks([rec["person_id"] for rec in recs])
+    assert sorted(blocks) == blocks == [1, 2, 3]  # one block per person, by id
+    for pid in blocks:
+        ts = [rec["ts_ms"] for rec in recs if rec["person_id"] == pid]
+        assert ts == sorted(ts) and len(set(ts)) == len(ts)
+    body = frng(fclient, sid)
+    assert {p["id"]: p["t"] for p in body["people"]} == {
+        pid: [rec["ts_ms"] for rec in recs if rec["person_id"] == pid] for pid in blocks
+    }
+
+
+def _chunked_store(tmp_path):
+    store = TrackStore(tmp_path / "streamed")
+    edge = T0 - T0 % (10 * 60 * 1000) + 10 * 60 * 1000
+    base = edge - T0
+    rows = []
+    _walker(rows, 1, "camera1", base - 6000, 5, 1.0, -1.0, vx=0.1)
+    _walker(rows, 1, "camera2", base - 6000, 5, 1.2, -1.0, vx=0.1)
+    _walker(rows, 2, "camera1", base + 1000, 6, 1.6, -1.0, vx=0.1)
+    _walker(rows, 3, "camera2", base - 8000, 20, 6.0, -4.0, vx=0.0)
+    _walker(rows, 4, "camera1", base + 20 * 60 * 1000 + 7, 5, 2.0, -2.0, vx=0.2)
+    _walker(rows, 9, "camera1", base, 1, 3.0, -3.0, vx=0.0)
+    rows.append(Detection(T0 + base + 50, "camera1", 77, 50.0, 50.0))
+    store.insert_many(rows)
+    return store, edge - 60_000 + 13, edge + 25 * 60 * 1000
+
+
+def test_streamed_fused_range_equals_one_shot_fuse(tmp_path, files):
+    store, lo, hi = _chunked_store(tmp_path)
+    cleaning_path, offsets_path = files
+    write_json(cleaning_path, {"version": 1, "room": ROOM})
+    write_json(offsets_path, OFFSETS)
+    cleaning = api.Cleaning(Settings(cleaning_file=cleaning_path, offsets_file=offsets_path))
+    config, offsets, room = cleaning.current()
+    one_shot = fuse(store.query_range(lo, hi), config, offsets, room)
+    streamed = api.fused_range(store, cleaning, lo, hi, 5.0)
+    assert streamed["people"] == one_shot.people and len(one_shot.people) == 3
+    expected = api.finish_summary(one_shot.summary, cleaning.summary_extras(config, offsets))
+    assert streamed["summary"] == expected
+    assert expected["dropped"]["out_of_bounds"] == 1 and expected["offsets"]["applied"] is True

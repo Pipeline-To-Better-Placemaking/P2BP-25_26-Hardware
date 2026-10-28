@@ -112,3 +112,151 @@ def test_wipe_rejects_bad_date(tmp_path):
 def test_serve_refuses_unsafe_config(tmp_path, extra, capsys):
     assert main(["serve"], env=_env(tmp_path, **extra)) == 2
     assert "refusing" in capsys.readouterr().err
+
+
+# -- settings for the cleaning files ---------------------------------------------------
+
+
+def test_cleaning_and_offsets_paths_default_beside_the_package(tmp_path):
+    from mv3dt_tracking import settings as settings_mod
+
+    s = Settings.from_env({})
+    assert s.cleaning_file == settings_mod.TRACKING_DIR / "cleaning.json"
+    assert s.offsets_file == settings_mod.TRACKING_DIR / "offsets.json"
+    assert (settings_mod.TRACKING_DIR / "mv3dt_tracking").is_dir()
+    s = Settings.from_env({"CLEANING_FILE": str(tmp_path / "c.json"), "OFFSETS_FILE": str(tmp_path / "o.json")})
+    assert (s.cleaning_file, s.offsets_file) == (tmp_path / "c.json", tmp_path / "o.json")
+    assert Settings().cleaning_file is None and Settings().offsets_file is None
+
+
+# -- cleaning commands -------------------------------------------------------------------
+
+T0 = DAY1 + 3_600_000
+ROOM = {"x": [0, 7.41], "y": [-5.02, 0]}
+
+
+def _cleaning_env(tmp_path, cleaning=None):
+    path = tmp_path / "cleaning.json"
+    path.write_text(json.dumps(cleaning or {"version": 1, "room": ROOM}))
+    return _env(tmp_path, CLEANING_FILE=str(path), OFFSETS_FILE=str(tmp_path / "offsets.json"))
+
+
+def _static_object(rows, cam="camera2", x=3.2, y=-3.7, minutes=12, life_s=20):
+    """A fixed object one camera sees for `minutes`, its id churning every `life_s`."""
+    for k in range(minutes * 60 // life_s):
+        for i in range(life_s * 5):
+            rows.append(Detection(T0 + (k * life_s) * 1000 + i * 200, cam, 100 + k, x, y))
+
+
+def _shared_walk(rows, seconds=60, offset=0.4):
+    """One person on both cameras under one id; camera2 sits `offset` m east."""
+    for i in range(seconds * 5):
+        t = i / 5
+        x = 1.0 + 0.05 * t
+        rows.append(Detection(T0 + int(t * 1000), "camera1", 1, x, -2.0))
+        rows.append(Detection(T0 + int(t * 1000), "camera2", 1, x + offset, -2.0))
+
+
+def _iso(ms):
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def test_zones_suggest_prints_warning_stats_and_zone(tmp_path, capsys):
+    rows = []
+    _static_object(rows)
+    _shared_walk(rows)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = _cleaning_env(tmp_path)
+    window = ["--from", str(T0 - 1000), "--to", str(T0 + 13 * 60_000)]
+    assert main(["zones-suggest", *window], env=env) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("WARNING") and "seated person" in out and "Replay" in out
+    assert "suggested-1: camera camera2" in out and "36 tracker ids" in out and "median speed" in out
+    zone = json.loads(out.strip().splitlines()[-1].strip().rstrip(","))
+    assert zone["sensors"] == ["camera2"] and zone["name"] == "suggested-1"
+    assert zone["rect"]["x"][0] <= 3.2 <= zone["rect"]["x"][1]
+    assert not (tmp_path / "cleaning.json").read_text().count("suggested")
+
+    assert main(["zones-suggest", "--json", *window], env=env) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "seated person" in data["warning"]
+    assert [s["zone"]["name"] for s in data["suggestions"]] == ["suggested-1"]
+    assert {"occupied_s", "ids", "camera", "median_speed_mps"} <= set(data["suggestions"][0]["stats"])
+
+
+def test_zones_suggest_hours_window_and_existing_zone(tmp_path, capsys):
+    rows = []
+    _static_object(rows)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    zone = {"name": "tv", "sensors": ["camera2"], "rect": {"x": [2.75, 3.75], "y": [-4.25, -3.25]}}
+    env = _cleaning_env(tmp_path, {"version": 1, "room": ROOM, "zones": [zone]})
+    to = str(T0 + 13 * 60_000)
+    assert main(["zones-suggest", "--hours", "1", "--to", to], env=env) == 0
+    assert "no static single-camera hotspots found" in capsys.readouterr().out
+    # The default window (24 h before now) does not reach this old data.
+    assert main(["zones-suggest"], env=_cleaning_env(tmp_path)) == 0
+    assert "no static" in capsys.readouterr().out
+
+
+def test_learn_offsets_prints_and_saves_only_with_save(tmp_path, capsys):
+    rows = []
+    _shared_walk(rows)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = _cleaning_env(tmp_path)
+    window = ["--from", _iso(T0 - 1000), "--to", _iso(T0 + 120_000)]
+    assert main(["learn-offsets", *window], env=env) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["pairs"] >= 200 and report["needed"] is True and report["saved"] is None
+    assert report["median_dist_before_m"] == pytest.approx(0.4, abs=0.01)
+    assert report["median_dist_after_m"] < 0.05 and report["gain_m"] > 0.3
+    assert report["sensors"]["camera1"]["dx"] == pytest.approx(0.2, abs=0.01)
+    assert not (tmp_path / "offsets.json").exists()
+
+    assert main(["learn-offsets", "--model", "similarity", "--save", *window], env=env) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["saved"] == str(tmp_path / "offsets.json")
+    saved = json.loads((tmp_path / "offsets.json").read_text())
+    assert saved["needed"] is True and set(saved["sensors"]) == {"camera1", "camera2"}
+
+
+def test_learn_offsets_refuses_to_save_too_few_pairs(tmp_path, capsys):
+    rows = []
+    _shared_walk(rows, seconds=10)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = _cleaning_env(tmp_path)
+    assert main(["learn-offsets", "--save", "--from", str(T0), "--to", str(T0 + 60_000)], env=env) == 1
+    captured = capsys.readouterr()
+    assert "not saved" in captured.err and json.loads(captured.out)["saved"] is None
+    assert not (tmp_path / "offsets.json").exists()
+
+
+def test_clean_report_prints_summary_and_counters(tmp_path, capsys):
+    rows = []
+    _static_object(rows, minutes=2)
+    _shared_walk(rows)
+    rows.append(Detection(T0 + 5, "camera1", 77, 50.0, 50.0))  # out of the room
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = _cleaning_env(tmp_path, {"version": 1, "room": ROOM, "bogus": True})
+    assert main(["clean-report", "--from", _iso(T0 - 1000), "--to", _iso(T0 + 180_000)], env=env) == 0
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)["summary"]
+    assert out["people"] == 2 and out["dropped"]["out_of_bounds"] == 1
+    assert out["config_warnings"] == ["ignored unknown key bogus"] and "bogus" in captured.err
+    assert out["offsets"]["applied"] is False and out["preset"] == "strict"
+
+
+def test_clean_report_needs_a_window(tmp_path):
+    with pytest.raises(SystemExit):
+        main(["clean-report", "--from", "2025-10-20T00:00"], env=_env(tmp_path))
+    with pytest.raises(SystemExit):
+        main(["clean-report", "--from", "yesterday", "--to", "today"], env=_env(tmp_path))
+
+
+def test_hours_and_from_together_is_a_usage_error(tmp_path, capsys):
+    for cmd in ("zones-suggest", "learn-offsets"):
+        with pytest.raises(SystemExit) as exc:
+            main([cmd, "--hours", "2", "--from", str(T0)], env=_cleaning_env(tmp_path))
+        assert exc.value.code == 2
+        assert "not allowed with argument" in capsys.readouterr().err

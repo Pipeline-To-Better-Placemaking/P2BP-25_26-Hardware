@@ -14,6 +14,8 @@ from typing import Mapping
 
 DEFAULT_BIND = "127.0.0.1:8090"
 DEFAULT_DATA_DIR = "/var/lib/mv3dt-tracking"
+# The install's tracking directory: the package's parent (<install_dir>/tracking).
+TRACKING_DIR = Path(__file__).resolve().parent.parent
 
 
 def _path(value: str | None) -> Path | None:
@@ -39,6 +41,9 @@ class Settings:
     mqtt_topic: str = ""
     bind: str = DEFAULT_BIND
     allow_non_local_bind: bool = False
+    # Missing files mean strict defaults and no offset correction.
+    cleaning_file: Path | None = None
+    offsets_file: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -62,6 +67,8 @@ class Settings:
             mqtt_topic=topic,
             bind=env.get("BIND", "").strip() or DEFAULT_BIND,
             allow_non_local_bind=_truthy(env.get("ALLOW_NON_LOCAL_BIND")),
+            cleaning_file=Path(env.get("CLEANING_FILE", "").strip() or TRACKING_DIR / "cleaning.json"),
+            offsets_file=Path(env.get("OFFSETS_FILE", "").strip() or TRACKING_DIR / "offsets.json"),
         )
 
     def bind_address(self) -> tuple[str, int]:
