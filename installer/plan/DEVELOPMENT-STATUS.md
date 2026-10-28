@@ -140,6 +140,7 @@ the binary and attaches it plus a `.sha256` to the release. The version in
 | Docker pull progress | Not started, open decision | — |
 | Step 8 tracking history (recorder + read-only tailnet API) | Specified, **not implemented, not run on the workstation** | [`STEP-8`](STEP-8-TRACKING-HISTORY.md) |
 | Live baseline and edit protection (managed files, tuned templates, fusion/dewarper/viewer render, AMC 3.3.0, watchdog) | Specified, **not implemented, not run on the workstation** | [`LIVE-BASELINE-AND-EDIT-PROTECTION`](LIVE-BASELINE-AND-EDIT-PROTECTION.md) |
+| Tracking fusion and cleaning (fused people, `cleaning.json`, learned offsets, zone suggestions, upgrade fixes) | Specified, **not implemented, not run on the workstation** | [`TRACKING-FUSION-AND-CLEANING`](TRACKING-FUSION-AND-CLEANING.md) |
 
 "Implemented" means the code exists, has tests, and is merged to `main`.
 "Wired" means a step actually calls it during a real install. The gap between
