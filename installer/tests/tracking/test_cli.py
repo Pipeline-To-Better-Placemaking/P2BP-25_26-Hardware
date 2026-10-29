@@ -6,6 +6,7 @@ Run from installer/: `python3 -m pytest tests/tracking/test_cli.py -v`
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -260,3 +261,68 @@ def test_hours_and_from_together_is_a_usage_error(tmp_path, capsys):
             main([cmd, "--hours", "2", "--from", str(T0)], env=_cleaning_env(tmp_path))
         assert exc.value.code == 2
         assert "not allowed with argument" in capsys.readouterr().err
+
+
+# -- room source ---------------------------------------------------------------
+
+WALLS = {"x": [-1.0, 8.0], "y": [-6.0, 1.0]}
+
+
+def _calib(tmp_path):
+    """A calibration whose floor plan covers x 20..24, y 20..23: none of the
+    test data, so only a config room keeps anything."""
+    d = tmp_path / "calib"
+    d.mkdir()
+    (d / "transforms.yml").write_text(
+        "%YAML:1.0\nT_gt2px: !!opencv-matrix\n  rows: 3\n  cols: 3\n  dt: d\n"
+        "  data: [100.0, 0.0, -2000.0, 0.0, 100.0, -2000.0, 0.0, 0.0, 1.0]\n"
+    )
+    (d / "map.png").write_bytes(b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+                                + struct.pack(">II", 400, 300) + b"\x08\x02\x00\x00\x00")
+    return str(d)
+
+
+@pytest.mark.parametrize("cleaning, source", [
+    ({"version": 1, "room": WALLS}, "config"),
+    ({"version": 1, "zones": []}, "calibration"),
+    ({"version": 1, "room": None}, "calibration"),
+])
+def test_clean_report_states_the_room_source(tmp_path, capsys, cleaning, source):
+    rows = []
+    _shared_walk(rows)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = {**_cleaning_env(tmp_path, cleaning), "CALIB_DIR": _calib(tmp_path)}
+    assert main(["clean-report", "--from", str(T0 - 1000), "--to", str(T0 + 120_000)], env=env) == 0
+    out = json.loads(capsys.readouterr().out)["summary"]
+    assert out["room_source"] == source
+    if source == "config":
+        assert out["room"] == WALLS and out["people"] == 1
+    else:
+        assert out["room"]["x"] == [pytest.approx(20.0), pytest.approx(24.0)]
+        assert out["room"]["y"] == [pytest.approx(20.0), pytest.approx(23.0)]
+        assert out["people"] == 0 and out["dropped"]["out_of_bounds"] > 0
+
+
+def test_clean_report_without_room_or_calibration_reports_none(tmp_path, capsys):
+    rows = []
+    _shared_walk(rows)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = _cleaning_env(tmp_path, {"version": 1, "zones": []})
+    assert main(["clean-report", "--from", str(T0 - 1000), "--to", str(T0 + 120_000)], env=env) == 0
+    out = json.loads(capsys.readouterr().out)["summary"]
+    assert out["room_source"] == "none" and out["room"] is None and out["people"] == 1
+
+
+@pytest.mark.parametrize("room, found", [(WALLS, True), (None, False)])
+def test_zones_suggest_and_learn_offsets_use_the_config_room(tmp_path, capsys, room, found):
+    rows = []
+    _static_object(rows)
+    _shared_walk(rows)
+    TrackStore(tmp_path / "data").insert_many(rows)
+    env = {**_cleaning_env(tmp_path, {"version": 1, "room": room}), "CALIB_DIR": _calib(tmp_path)}
+    window = ["--from", str(T0 - 1000), "--to", str(T0 + 13 * 60_000)]
+    assert main(["zones-suggest", "--json", *window], env=env) == 0
+    assert bool(json.loads(capsys.readouterr().out)["suggestions"]) is found
+    assert main(["learn-offsets", *window], env=env) == 0
+    pairs = json.loads(capsys.readouterr().out)["pairs"]
+    assert (pairs >= 200) if found else pairs == 0

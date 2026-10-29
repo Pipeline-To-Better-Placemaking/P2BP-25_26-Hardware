@@ -711,7 +711,8 @@ def test_range_fused_shape_and_summary(fclient):
     assert a["cameras"] == ["camera1", "camera2"] and max(a["n_cams"]) == 2
     s = body["summary"]
     assert {"people", "max_at_once", "occupied_s", "persons", "dropped", "offsets", "preset",
-            "config_error", "config_warnings"} <= set(s)
+            "config_error", "config_warnings", "room_source", "room"} <= set(s)
+    assert s["room_source"] == "config" and s["room"] == ROOM
     assert s["people"] == 3 and s["max_at_once"] == 3 and s["preset"] == "strict"
     assert [p["id"] for p in s["persons"]] == [1, 2, 3]
     assert s["dropped"]["short_tracklet"] == 1 and s["dropped"]["shared_id_joins"] == 1
@@ -909,10 +910,54 @@ def test_streamed_fused_range_equals_one_shot_fuse(tmp_path, files):
     write_json(cleaning_path, {"version": 1, "room": ROOM})
     write_json(offsets_path, OFFSETS)
     cleaning = api.Cleaning(Settings(cleaning_file=cleaning_path, offsets_file=offsets_path))
-    config, offsets, room = cleaning.current()
+    config, offsets, room, room_source = cleaning.current()
+    assert room_source == "config"
     one_shot = fuse(store.query_range(lo, hi), config, offsets, room)
     streamed = api.fused_range(store, cleaning, lo, hi, 5.0)
     assert streamed["people"] == one_shot.people and len(one_shot.people) == 3
-    expected = api.finish_summary(one_shot.summary, cleaning.summary_extras(config, offsets))
+    expected = api.finish_summary(one_shot.summary, cleaning.summary_extras(config, offsets, room, room_source))
     assert streamed["summary"] == expected
     assert expected["dropped"]["out_of_bounds"] == 1 and expected["offsets"]["applied"] is True
+
+
+# -- room source ---------------------------------------------------------------
+
+# The walls an operator draws; the `calib_dirs` calibration maps its image to
+# a small area none of `fused_store` falls in, so only the config room keeps
+# anyone.
+WALLS = {"x": [-1.0, 8.0], "y": [-6.0, 1.0]}
+
+
+@pytest.mark.parametrize("cleaning_json, source, people", [
+    ({"version": 1, "room": WALLS}, "config", 3),
+    ({"version": 1}, "calibration", 0),
+    ({"version": 1, "room": None}, "calibration", 0),
+])
+def test_range_and_export_use_the_config_room_over_calibration(
+    fused_store, clock, files, calib_dirs, cleaning_json, source, people
+):
+    cleaning, offsets = files
+    write_json(cleaning, cleaning_json)
+    client = make_client(fused_store, clock, *calib_dirs, cleaning_file=cleaning, offsets_file=offsets)
+    sid = session(client)
+    s = frng(client, sid)["summary"]
+    assert s["room_source"] == source and s["people"] == people
+    if source == "config":
+        assert s["room"] == WALLS
+    else:
+        # u = 10 x + 5 and v = -10 y + 300 over the 4 x 3 image.
+        assert s["room"]["x"] == [pytest.approx(-0.5), pytest.approx(-0.1)]
+        assert s["room"]["y"] == [pytest.approx(29.7), pytest.approx(30.0)]
+        assert s["dropped"]["out_of_bounds"] > 0
+    q = {"from": T0, "to": FUSED_TO, "mode": "fused", "format": "jsonl"}
+    r = client.get("/tracking/export", params=q, headers=data_headers(session(client, kind="export")))
+    assert r.status_code == 200
+    assert len({json.loads(line)["person_id"] for line in r.text.splitlines()}) == people
+
+
+def test_range_without_room_or_calibration_reports_none(fused_store, clock, files):
+    cleaning, offsets = files
+    write_json(cleaning, {"version": 1})
+    client = make_client(fused_store, clock, cleaning_file=cleaning, offsets_file=offsets)
+    s = frng(client)["summary"]
+    assert s["room_source"] == "none" and s["room"] is None and s["dropped"]["out_of_bounds"] == 0

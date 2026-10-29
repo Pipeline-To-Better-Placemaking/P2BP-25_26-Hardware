@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 STRICT: dict = {
     "version": 1,
     "room_margin_m": 0.3,
-    "room": None,              # fallback {"x": [a, b], "y": [a, b]} when there is no calibration
+    "room": None,              # {"x": [a, b], "y": [a, b]}; overrides the calibration bounds when set
     "zones": [],
     "vmax_mps": 3.0,           # fastest plausible walk between samples of one track
     "speed_slack_m": 0.3,      # jitter allowance added to every speed check
@@ -347,10 +347,32 @@ def room_from_calib(calib_dir: Path | None) -> tuple[tuple[float, float], tuple[
     return (min(xs), max(xs)), (min(ys), max(ys))
 
 
+def resolve_room_source(config: CleaningConfig, calib_dir: Path | None = None):
+    """(room, source) to filter with. An explicit `room` in the config wins
+    (the drawn walls can sit inside the floor-plan image); else the bounds
+    of the calibration's floor plan; else None (no bounds filter). `source`
+    is "config", "calibration" or "none"."""
+    if config.room is not None:
+        return config.room, "config"
+    room = room_from_calib(calib_dir)
+    if room is not None:
+        return room, "calibration"
+    return None, "none"
+
+
 def resolve_room(config: CleaningConfig, calib_dir: Path | None = None):
-    """Room bounds to filter with: calibration first, then the configured
-    fallback room, else None (no bounds filter)."""
-    return room_from_calib(calib_dir) or config.room
+    """Room bounds to filter with, as `resolve_room_source` picks them."""
+    return resolve_room_source(config, calib_dir)[0]
+
+
+def room_summary(room, source: str) -> dict:
+    """The summary fields naming the room filter: `room_source` and `room`
+    as `{"x": [x0, x1], "y": [y0, y1]}` (null when there are no bounds)."""
+    bounds = None
+    if room is not None:
+        (x0, x1), (y0, y1) = room
+        bounds = {"x": [x0, x1], "y": [y0, y1]}
+    return {"room_source": source, "room": bounds}
 
 
 # -- zone suggestions --------------------------------------------------------

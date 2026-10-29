@@ -22,7 +22,9 @@ from mv3dt_tracking.cleaning import (
     parse_config,
     parse_zone,
     resolve_room,
+    resolve_room_source,
     room_from_calib,
+    room_summary,
     suggest_zones,
 )
 from mv3dt_tracking.store import Detection
@@ -177,7 +179,28 @@ def test_room_from_calibration_inverse_homography(tmp_path):
     (x0, x1), (y0, y1) = room_from_calib(d)
     assert (x0, x1) == (pytest.approx(-0.5), pytest.approx(7.41))
     assert (y0, y1) == (pytest.approx(-5.02), pytest.approx(0.2))
-    assert resolve_room(parse_config({"room": {"x": [0, 1], "y": [0, 1]}}), d) == room_from_calib(d)
+    assert resolve_room(parse_config({}), d) == room_from_calib(d)
+
+
+def test_config_room_overrides_calibration(tmp_path):
+    d = _calib(tmp_path)
+    cfg = parse_config({"room": {"x": [0.2, 6.5], "y": [-4.6, -0.1]}})
+    assert resolve_room_source(cfg, d) == (((0.2, 6.5), (-4.6, -0.1)), "config")
+    assert resolve_room(cfg, d) == ((0.2, 6.5), (-4.6, -0.1))
+
+
+@pytest.mark.parametrize("data", [{}, {"room": None}, {"preset": "relaxed", "room": None}])
+def test_absent_or_null_room_keeps_calibration(tmp_path, data):
+    d = _calib(tmp_path)
+    room, source = resolve_room_source(parse_config(data), d)
+    assert source == "calibration" and room == room_from_calib(d)
+    assert resolve_room_source(parse_config(data), None) == (None, "none")
+
+
+def test_room_summary_names_the_source_and_bounds():
+    assert room_summary(((0.2, 6.5), (-4.6, -0.1)), "config") == {
+        "room_source": "config", "room": {"x": [0.2, 6.5], "y": [-4.6, -0.1]}}
+    assert room_summary(None, "none") == {"room_source": "none", "room": None}
 
 
 def test_room_falls_back_to_config_then_none(tmp_path):

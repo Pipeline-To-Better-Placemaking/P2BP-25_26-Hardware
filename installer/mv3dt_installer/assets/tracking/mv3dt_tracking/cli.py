@@ -154,23 +154,24 @@ def _chunks(store: TrackStore, from_ms: int, to_ms: int) -> Iterator[list[Detect
 
 
 def _context(settings: Settings):
-    """Store, cleaning state and the current (config, offsets, room)."""
+    """Store, cleaning state and the current (config, offsets, room,
+    room_source), resolved by `Cleaning.current` as the API does."""
     from .api import Cleaning
 
     cleaning = Cleaning(settings)
-    config, offsets, room = cleaning.current()
+    config, offsets, room, room_source = cleaning.current()
     if cleaning.config_file.error:
         print(f"warning: {cleaning.config_file.error}; using the last valid config", file=sys.stderr)
     for k in config.ignored_keys:
         print(f"warning: cleaning.json: ignored unknown key {k}", file=sys.stderr)
-    return TrackStore(settings.data_dir), cleaning, config, offsets, room
+    return TrackStore(settings.data_dir), cleaning, config, offsets, room, room_source
 
 
 def _zones_suggest(settings: Settings, args) -> int:
     from .cleaning import suggest_zones
     from .fuse import prefilter
 
-    store, _, config, _, room = _context(settings)
+    store, _, config, _, room, _ = _context(settings)
     from_ms, to_ms = _window(args, 24)
     rows = itertools.chain.from_iterable(_chunks(store, from_ms, to_ms))
     found = suggest_zones(prefilter(rows, config, room, through="speed"))
@@ -197,7 +198,7 @@ def _learn_offsets(settings: Settings, args) -> int:
     from .fuse import prefilter
     from .offsets import learn_offsets, save_offsets
 
-    store, _, config, _, room = _context(settings)
+    store, _, config, _, room, _ = _context(settings)
     from_ms, to_ms = _window(args, 72)
     rows = itertools.chain.from_iterable(_chunks(store, from_ms, to_ms))
     rows = prefilter(rows, config, room, through="short_tracklet")
@@ -225,10 +226,11 @@ def _clean_report(settings: Settings, args) -> int:
     from .api import finish_summary, fused_samples, stream_summary
     from .fuse import Fuser
 
-    store, cleaning, config, offsets, room = _context(settings)
+    store, cleaning, config, offsets, room, room_source = _context(settings)
     fuser = Fuser(config, offsets, room)
     samples = list(fused_samples(store, fuser, args.from_ms, args.to_ms))
-    summary = finish_summary(stream_summary(samples, fuser, offsets), cleaning.summary_extras(config, offsets))
+    summary = finish_summary(stream_summary(samples, fuser, offsets),
+                             cleaning.summary_extras(config, offsets, room, room_source))
     print(json.dumps({"from": args.from_ms, "to": args.to_ms, "summary": summary}, indent=2))
     return 0
 
