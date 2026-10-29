@@ -48,7 +48,10 @@ Cleaning files (TRACKING-FUSION-AND-CLEANING.md section 10):
   `serve` uses `LOCATION_ID`, for the MQTT topic).
 - **Upgrade.** Re-running the step re-syncs the package (which never
   touches files beside it), re-renders the unit and restarts the service
-  when anything changed; both cleaning files stay as they are.
+  when anything changed; both cleaning files stay as they are. A completed
+  step re-runs on its own when `pending_update()` finds the installed
+  package, requirements or unit differing from what this release would
+  install, so an upgrade needs no `--reset-step 8`.
 """
 
 from __future__ import annotations
@@ -83,6 +86,7 @@ __all__ = [
     "UNIT_NAME",
     "bundled_version",
     "sync_package",
+    "update_reason",
     "ensure_venv",
     "ensure_tracking_env",
     "render_tracking_unit",
@@ -219,11 +223,22 @@ def bundled_version(ctx: Any) -> str:
 
 
 def _tree_digest(root: pathlib.Path) -> dict:
+    """`{relative path: sha256}` of every file under `root`.
+
+    Content only: file order and mtimes never change it. Byte-code is left
+    out (`__pycache__`, `*.pyc`), matching what `sync_package` copies, so a
+    compiled bundle or a package the service has already imported compares
+    equal to its source.
+    """
     digest = {}
     if not root.is_dir():
         return digest
     for path in sorted(root.rglob("*")):
-        if "__pycache__" in path.parts or not path.is_file():
+        if (
+            "__pycache__" in path.parts
+            or path.suffix == ".pyc"
+            or not path.is_file()
+        ):
             continue
         digest[path.relative_to(root).as_posix()] = hashlib.sha256(
             path.read_bytes()
@@ -267,6 +282,37 @@ def sync_package(ctx: Any) -> bool:
     _chown_tree(ctx, dest)
     _chown(ctx, dest_requirements)
     return changed
+
+
+def update_reason(ctx: Any) -> Optional[str]:
+    """Why a completed install is out of date with this release, or None.
+
+    Read only. Compares the bundled package and requirements with the
+    installed copies, and, when `ctx` carries the invoking user, the unit
+    this release would render with the one on disk. `--status` passes no
+    user, so it checks the package and requirements only. Never looks at
+    `cleaning.json`, `offsets.json`, `tracking.env` or the data directory.
+    """
+    tracking_dir = _tracking_dir(ctx)
+    source = pathlib.Path(ctx.asset_path("tracking", PACKAGE_NAME))
+    if _tree_digest(source) != _tree_digest(tracking_dir / PACKAGE_NAME):
+        return "bundled tracking package changed"
+    requirements = pathlib.Path(ctx.asset_path("tracking", "requirements.txt"))
+    try:
+        installed = (tracking_dir / "requirements.txt").read_bytes()
+    except OSError:
+        installed = None
+    if installed != requirements.read_bytes():
+        return "bundled tracking requirements changed"
+    if getattr(ctx, "user", None) is not None:
+        unit = systemd.UNIT_DIR / UNIT_NAME
+        try:
+            current = unit.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current != render_tracking_unit(ctx):
+            return f"{UNIT_NAME} differs from this release"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -931,6 +977,14 @@ class Step8TrackingHistory:
                 "the pipeline is probably not running. Recording starts when it does."
             )
         return StepResult(status=StepStatus.COMPLETE)
+
+    def pending_update(self, ctx: Any) -> Optional[str]:
+        """The dispatch loop's upgrade check for a completed step: a reason
+        to re-run `run()`, or None to leave the install alone. Never
+        prompts; a gated-off install is never updated."""
+        if not _gate_on(ctx):
+            return None
+        return update_reason(ctx)
 
     def report(self, ctx: Any) -> None:
         if not _gate_on(ctx):

@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from mv3dt_installer import app, config as config_mod, logs, report, shellout, systemd  # noqa: E402
+from mv3dt_installer.state import StateMachine  # noqa: E402
 from mv3dt_installer.steps import StepStatus  # noqa: E402
 from mv3dt_installer.steps import step8_tracking_history as s8  # noqa: E402
 
@@ -894,3 +895,175 @@ def test_tracking_help_lists_the_cleaning_commands(capsys):
     out = capsys.readouterr().out
     for name in s8.CLEANING_COMMANDS:
         assert name in out
+
+
+# ---------------------------------------------------------------------------
+# Upgrade without a step reset (section 11.5)
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_ctx(tmp_path, monkeypatch, *, gate="on"):
+    """A completed Step 8 install driven through the real dispatch loop."""
+    monkeypatch.setenv(s8.KEY_PROJECT, "proj-1")
+    monkeypatch.setenv(s8.KEY_ORIGINS, "https://app.example.org")
+    monkeypatch.setattr(s8, "_HTTP_GET", _health([
+        {"connected": True, "messages": 1, "rows_flushed": 1},
+    ]))
+    ctx = Context(tmp_path, runner=Runner(tailscale_status=_logged_in()))
+    ctx.progress = SimpleNamespace(
+        phase=lambda n: None, task=lambda n: None,
+        begin_step=lambda step, position: None, end_step=lambda: None,
+    )
+    step = s8.Step8TrackingHistory()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    ctx.conf[GATE] = gate
+    cfg = config_mod.Config(
+        install_dir=ctx.install_dir, tracking_history=gate, values=ctx.conf
+    )
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete(s8.STEP_ID)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+    ctx.runner.calls.clear()
+    ctx.reported.clear()
+    return ctx, cfg, sm
+
+
+def _operator_files(ctx):
+    tracking = ctx.install_dir / "tracking"
+    files = {
+        tracking / "cleaning.json": '{"preset": "relaxed", "zones": []}\n',
+        tracking / "offsets.json": '{"version": 1}\n',
+        s8.DATA_DIR / "2026-01-01.sqlite": "rows\n",
+    }
+    for path, text in files.items():
+        path.write_text(text, encoding="utf-8")
+    env = s8._tracking_env_path(ctx)
+    return files, env, env.read_bytes()
+
+
+def test_upgrade_with_a_changed_bundle_resyncs_and_restarts(tmp_path, monkeypatch, capsys):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch)
+    files, env, env_bytes = _operator_files(ctx)
+    installed = ctx.install_dir / "tracking" / "mv3dt_tracking" / "cleaning.py"
+    installed.write_text("# previous release\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    err = capsys.readouterr().err
+    assert "step8_tracking_history: bundled tracking package changed; updating" in err
+    assert "already complete" not in err
+    bundled = shellout.asset_path("tracking", "mv3dt_tracking", "cleaning.py")
+    assert installed.read_bytes() == bundled.read_bytes()
+    assert ("systemctl", "restart", s8.UNIT_NAME) in ctx.runner.calls
+    assert sm.status(s8.STEP_ID) is StepStatus.COMPLETE
+    for path, text in files.items():
+        assert path.read_text(encoding="utf-8") == text
+    assert env.read_bytes() == env_bytes
+    assert not ctx.runner.named("python3", "-m")  # venv kept
+
+
+def test_upgrade_with_changed_requirements_rebuilds_pip_and_restarts(
+    tmp_path, monkeypatch, capsys
+):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch)
+    # What the previous release installed: its requirements and the venv
+    # marker pip left for them.
+    (ctx.install_dir / "tracking" / "requirements.txt").write_text("old==1\n")
+    marker = ctx.install_dir / "tracking" / "venv" / s8.REQUIREMENTS_MARKER
+    marker.write_text("0" * 64 + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert "bundled tracking requirements changed; updating" in capsys.readouterr().err
+    assert any("pip" in call for call in ctx.runner.calls)
+    assert ("systemctl", "restart", s8.UNIT_NAME) in ctx.runner.calls
+
+
+def test_upgrade_with_a_stale_unit_rerenders_it(tmp_path, monkeypatch, capsys):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch)
+    unit = systemd.UNIT_DIR / s8.UNIT_NAME
+    unit.write_text("[Unit]\nDescription=old\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert f"{s8.UNIT_NAME} differs from this release; updating" in capsys.readouterr().err
+    assert unit.read_text(encoding="utf-8") == s8.render_tracking_unit(ctx)
+    assert ("systemctl", "restart", s8.UNIT_NAME) in ctx.runner.calls
+
+
+def test_upgrade_with_an_identical_bundle_runs_nothing(tmp_path, monkeypatch, capsys):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch)
+    files, env, env_bytes = _operator_files(ctx)
+    capsys.readouterr()
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert "step8_tracking_history: already complete" in capsys.readouterr().err
+    assert ctx.runner.calls == []
+    assert ctx.reported == []
+    for path, text in files.items():
+        assert path.read_text(encoding="utf-8") == text
+    assert env.read_bytes() == env_bytes
+
+
+def test_upgrade_with_the_gate_off_stays_skipped(tmp_path, monkeypatch, capsys):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch, gate="off")
+    installed = ctx.install_dir / "tracking" / "mv3dt_tracking" / "cleaning.py"
+    installed.write_text("# previous release\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert "step8_tracking_history: skipped (gate off)" in capsys.readouterr().err
+    assert installed.read_text(encoding="utf-8") == "# previous release\n"
+    assert ctx.runner.calls == []
+    assert s8.Step8TrackingHistory().pending_update(ctx) is None
+
+
+def test_update_reason_ignores_bytecode_order_and_mtimes(tmp_path, monkeypatch):
+    ctx, _cfg, _sm = _dispatch_ctx(tmp_path, monkeypatch)
+    assert s8.update_reason(ctx) is None
+    dest = ctx.install_dir / "tracking" / "mv3dt_tracking"
+    cache = dest / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    (cache / "cli.cpython-312.pyc").write_bytes(b"\x00compiled")
+    (dest / "stray.pyc").write_bytes(b"\x00compiled")
+    for path in dest.rglob("*.py"):
+        os.utime(path, (1_000_000, 1_000_000))
+    assert s8.update_reason(ctx) is None
+
+    first = s8._tree_digest(dest)
+    # Recreate the tree in reverse order: same content, new inodes.
+    copy = tmp_path / "copy"
+    for rel in sorted(first, reverse=True):
+        target = copy / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((dest / rel).read_bytes())
+    assert s8._tree_digest(copy) == first
+
+    (dest / "cli.py").write_text("# edited\n", encoding="utf-8")
+    assert s8.update_reason(ctx) == "bundled tracking package changed"
+
+
+def test_status_shows_a_pending_tracking_update(tmp_path, monkeypatch, capsys):
+    ctx, _cfg, sm = _dispatch_ctx(tmp_path, monkeypatch)
+    (ctx.install_dir / config_mod.CONF_FILENAME).write_text(
+        f"{GATE}=on\nLOCATION_ID=site-42\n", encoding="utf-8"
+    )
+    state = sm.load()
+    state.install_dir = str(ctx.install_dir)
+    sm.save(state)
+
+    assert app.main(["--status"], state_path=sm.path) == 0
+    assert f"{s8.STEP_ID}: COMPLETE\n" in capsys.readouterr().out
+
+    (ctx.install_dir / "tracking" / "mv3dt_tracking" / "cli.py").write_text("# old\n")
+    assert app.main(["--status"], state_path=sm.path) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"{s8.STEP_ID}: COMPLETE, update pending (bundled tracking package "
+        "changed): runs on next install run"
+    ) in out

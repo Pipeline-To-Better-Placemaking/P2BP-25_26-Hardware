@@ -66,6 +66,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from mv3dt_installer import __version__, build_stamp
@@ -1206,6 +1207,25 @@ def _refresh_installed_binary(ctx: Context) -> None:
         ctx.log.warn(f"could not refresh the installed mv3dt-installer copy: {exc}")
 
 
+def _pending_update(step: Step, ctx: Any) -> Optional[str]:
+    """A completed step's reason to run again after an upgrade, or None.
+
+    Optional per-step hook: a step that installs files it bundles defines
+    `pending_update(ctx)`, a read-only check that never prompts and returns
+    a short reason when what is installed differs from what this release
+    would install. Steps without the hook stay "already complete". A check
+    that raises is a warning, never a failed run.
+    """
+    check = getattr(step, "pending_update", None)
+    if check is None:
+        return None
+    try:
+        return check(ctx)
+    except Exception as exc:  # noqa: BLE001 -- a probe, never fatal
+        log.warn(f"{step.id}: could not check for an update ({exc})")
+        return None
+
+
 def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     """The core state-machine dispatch loop (doc 00 §3.2).
 
@@ -1215,7 +1235,10 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     - If its gate (steps 6-8 only, doc 00 §3.4) is off, skip it with a
       one-line log and record it as skipped, not `COMPLETE`, so it runs on
       the first launch after the gate is turned on.
-    - Else if already `COMPLETE`, skip with the "already complete" log line.
+    - Else if already `COMPLETE`, skip with the "already complete" log line,
+      unless the step's optional `pending_update` hook reports that this
+      release would install something different: then log the reason, put
+      the step back to `PENDING` and run it like any other.
     - Else announce it with doc 08 §3.2's `[ 3/7 ] <title>` banner, run
       its lifecycle (`preflight -> run -> verify`), and record the
       effective `StepResult`. On `COMPLETE`, call `report()` and
@@ -1260,8 +1283,15 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
             continue
 
         if sm.status(step.id) is StepStatus.COMPLETE:
-            log.info(f"{step.id}: already complete")
-            continue
+            reason = _pending_update(step, ctx)
+            if reason is None:
+                log.info(f"{step.id}: already complete")
+                continue
+            # Put back to PENDING before running, so an update that fails
+            # part way is retried in full on the next run instead of being
+            # hidden behind a COMPLETE whose files already match.
+            log.info(f"{step.id}: {reason}; updating")
+            sm.set_status(step.id, StepStatus.PENDING)
 
         # Bind the step before its first lifecycle method runs: `run_root`
         # streams into the region this opens (doc 08 §4.2), and
@@ -1317,6 +1347,24 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _status_pending_update(
+    step_id: str, install_dir: str, conf: dict[str, str]
+) -> Optional[str]:
+    """`--status`'s view of `_pending_update`: the same hook, given only
+    what a read without root has. There is no invoking user here, so a
+    step checks only what it can without one."""
+    step = next((s for s in STEP_REGISTRY if s.id == step_id), None)
+    if step is None or getattr(step, "pending_update", None) is None:
+        return None
+    view = SimpleNamespace(
+        install_dir=pathlib.Path(install_dir),
+        conf=conf,
+        asset_path=shellout.asset_path,
+        user=None,
+    )
+    return _pending_update(step, view)
+
+
 def _print_status(sm: StateMachine) -> int:
     """`--status`: print the state table and exit (doc 00 §3.3). Reads
     directly from `state.json` via the `StateMachine` -- a missing/corrupt
@@ -1348,6 +1396,13 @@ def _print_status(sm: StateMachine) -> int:
                 status_value = "SKIPPED, gate now on: runs on next install run"
             else:
                 status_value = "SKIPPED (gate off; runs when the gate is turned on)"
+        elif entry is not None and entry.status is StepStatus.COMPLETE:
+            reason = _status_pending_update(step_id, state.install_dir, conf)
+            if reason:
+                status_value = (
+                    f"COMPLETE, update pending ({reason}): "
+                    "runs on next install run"
+                )
         print(f"{step_id}: {status_value}")
     print(f"all complete: {sm.all_complete()}")
     return 0
