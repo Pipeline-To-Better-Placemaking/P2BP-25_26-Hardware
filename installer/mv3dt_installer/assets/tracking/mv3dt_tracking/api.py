@@ -32,7 +32,7 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__, calib
 from .auth import Claims, ticket_dependency
-from .cleaning import CleaningConfig, CleaningFile, resolve_room
+from .cleaning import CleaningConfig, CleaningFile, resolve_room_source, room_summary
 from .fuse import FusedSample, Fuser, offsets_summary, summarize
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
 from .offsets import read_offsets
@@ -126,16 +126,20 @@ class OffsetsFile:
 
 class Cleaning:
     """What one fused request runs with: the current cleaning config (with
-    its load error and ignored keys), the learned offsets and the room."""
+    its load error and ignored keys), the learned offsets and the room with
+    its source. Every fused path (range, export, the CLI) resolves the room
+    here, so they all filter with the same bounds."""
 
     def __init__(self, settings: Settings) -> None:
         self.config_file = CleaningFile(settings.cleaning_file)
         self.offsets_file = OffsetsFile(settings.offsets_file)
         self.calib_dir = settings.calib_dir
 
-    def current(self) -> tuple[CleaningConfig, dict | None, object]:
+    def current(self) -> tuple[CleaningConfig, dict | None, object, str]:
+        """(config, offsets, room, room_source); see `resolve_room_source`."""
         config = self.config_file.get()
-        return config, self.offsets_file.get(), resolve_room(config, self.calib_dir)
+        room, source = resolve_room_source(config, self.calib_dir)
+        return config, self.offsets_file.get(), room, source
 
     @staticmethod
     def _public(error: str | None, path: Path | None) -> str | None:
@@ -145,9 +149,10 @@ class Cleaning:
             return error
         return error.replace(str(path), path.name)
 
-    def summary_extras(self, config: CleaningConfig, offsets: dict | None) -> dict:
+    def summary_extras(self, config: CleaningConfig, offsets: dict | None, room, room_source: str) -> dict:
         """Fields every fused summary adds to the engine's own."""
         return {
+            **room_summary(room, room_source),
             "config_error": self._public(self.config_file.error, self.config_file.path),
             "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys],
             "offsets_extra": {
@@ -208,13 +213,14 @@ def fused_range(store: TrackStore, cleaning: Cleaning, from_ms: int, to_ms: int,
     """The fused `range` body (without from/to/mode): people renumbered by
     first appearance, downsampled when `hz` is coarser than the fusion
     bucket, and the summary. `hz` in the result is the output rate."""
-    config, offsets, room = cleaning.current()
+    config, offsets, room, room_source = cleaning.current()
     # Streamed like the export, so memory follows a 10-minute chunk rather
     # than the whole window; the result equals one `fuse` call.
     fuser = Fuser(config, offsets, room)
     samples = list(fused_samples(store, fuser, from_ms, to_ms))
     people, _ = summarize(samples)
-    summary = finish_summary(stream_summary(samples, fuser, offsets), cleaning.summary_extras(config, offsets))
+    summary = finish_summary(stream_summary(samples, fuser, offsets),
+                             cleaning.summary_extras(config, offsets, room, room_source))
     _renumber(people, summary["persons"])
     width = bucket_ms(hz)
     if width > config.bucket_ms:
@@ -259,8 +265,8 @@ def export_records(
     people become final; ids match a fused `range` over the same window.
     """
     if fused:
-        config, offsets, room = (cleaning.current() if cleaning is not None
-                                 else (CleaningConfig(), None, None))
+        config, offsets, room, _ = (cleaning.current() if cleaning is not None
+                                    else (CleaningConfig(), None, None, "none"))
         for s in fused_samples(store, Fuser(config, offsets, room), from_ms, to_ms):
             yield {"ts_ms": s.ts_ms, "person_id": s.person_id, "x": s.x, "y": s.y,
                    "cameras": ";".join(s.cameras)}

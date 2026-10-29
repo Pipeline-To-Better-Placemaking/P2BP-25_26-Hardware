@@ -169,7 +169,7 @@ operator has not pinned. An unknown key is ignored, logged, and listed in
 | `version` | `1` | | | schema version |
 | `preset` | `"strict"` | | | `strict` \| `relaxed` |
 | `room_margin_m` | `0.3` | m | 1 | margin around the room rectangle |
-| `room` | `null` | m | 1 | fallback `{"x": [min, max], "y": [min, max]}` used only when calibration is unavailable |
+| `room` | `null` | m | 1 | `{"x": [min, max], "y": [min, max]}`; when set, overrides the calibration bounds (room bounds below) |
 | `zones` | `[]` | | 1 | ignore zones ([section 4.4](#44-zone-entries)) |
 | `vmax_mps` | `3.0` | m/s | 2, 7 | max speed between kept samples |
 | `speed_slack_m` | `0.3` | m | 2, 7 | distance allowed on top of `vmax_mps * dt` |
@@ -199,12 +199,30 @@ seated same-id distance (about 1.2 m) so the hint keeps today's behavior,
 and below the room's smallest plausible separation between two people who
 were merged by an id mistake.
 
-The room rectangle comes from the calibration: the floor plan size from
-`calib.png_size` on `map.png` and the inverse of `calib.read_t_gt2px` from
-`transforms.yml`
-([`STEP-8` section 2.1](STEP-8-TRACKING-HISTORY.md#21-inputs-via-context)).
-Without calibration output the configured `room` is used; when that is also
-`null`, stage 1 skips the bounds check and counts nothing.
+**Room bounds (REQUIRED).** `cleaning.resolve_room_source` picks the room
+rectangle and names its source. `Cleaning.current` in `api.py` is its only
+caller, so `range`, `export`, `clean-report`, `zones-suggest` and
+`learn-offsets` all filter with the same bounds. The first row that applies
+wins:
+
+| Order | Source | `room_source` | Bounds |
+|---|---|---|---|
+| 1 | `room` in `cleaning.json` is set | `"config"` | the configured rectangle |
+| 2 | calibration output is readable | `"calibration"` | the floor plan image mapped to world: `calib.png_size` on `map.png`, inverse of `calib.read_t_gt2px` from `transforms.yml` ([`STEP-8` section 2.1](STEP-8-TRACKING-HISTORY.md#21-inputs-via-context)) |
+| 3 | neither | `"none"` | no bounds; stage 1 skips the check and counts nothing |
+
+An absent `room` and `"room": null` both fall through to row 2, so a
+seeded `cleaning.json` keeps the calibration bounds.
+
+> **RESOLVED (config room overrides calibration):** the calibration bounds
+> cover the whole floor plan image, and the drawn walls can sit well inside
+> its edges. With calibration first, the filter then keeps points past the
+> walls by that gap plus `room_margin_m`, and the operator could not tighten
+> it: `room` was ignored and `room_margin_m` must be `>= 0`. Zones are no
+> substitute, since stage 1 checks zones before the offset correction while
+> stage 4 re-checks only the room. Offline on a real recording, the drawn
+> walls as `room` cut the people count by about a tenth; the same rectangle
+> as zones did not.
 
 ### 4.3 Relaxed preset (flagged decision)
 
@@ -270,7 +288,8 @@ stream a 24 h window without loading it. The stages run in this order
 - **Offset correction** (stage 4); the prototype has none.
 - **Inverse-variance weighted mean** across sensors (stage 6) instead of
   the prototype's per-person median.
-- **Room bounds from the calibration** (stage 1) instead of hard-coded room
+- **Room bounds from `cleaning.json` or the calibration** (stage 1,
+  [section 4.2](#42-keys-and-strict-defaults)) instead of hard-coded room
   dimensions.
 - **An empty default `zones` list**; the prototype hard-coded one zone
   around the TV.
@@ -467,6 +486,8 @@ output rate (`5.0` at the strict 200 ms bucket). A fused response adds
 | `preset` | string | the active preset |
 | `config_error` | string or null | the last `cleaning.json` load error; names the file only, never its path |
 | `config_warnings` | array of strings | non-fatal load warnings, e.g. `"ignored unknown key foo"` |
+| `room_source` | string | `"config"`, `"calibration"` or `"none"` ([section 4.2](#42-keys-and-strict-defaults)) |
+| `room` | object or null | the bounds stage 1 used, `{"x": [min, max], "y": [min, max]}` before `room_margin_m`; `null` with `"none"` |
 
 An invalid `offsets.json` means no correction: `applied` is `false` and
 `offsets.error` carries the load error. This differs on purpose from
@@ -702,7 +723,9 @@ Repo files referenced:
   the `Stitcher` the resumable `Fuser` follows and the stitching it
   replaces.
 - `installer/mv3dt_installer/assets/tracking/mv3dt_tracking/calib.py` —
-  `read_t_gt2px` and `png_size`, the room bounds source.
+  `read_t_gt2px` and `png_size`, the calibration room bounds.
+- `installer/mv3dt_installer/assets/tracking/mv3dt_tracking/cleaning.py` —
+  `resolve_room_source`, the one room resolution every path uses.
 - `installer/mv3dt_installer/assets/tracking/mv3dt_tracking/api.py`,
   `cli.py`, `settings.py` — the routes, commands and env settings changed
   here.
