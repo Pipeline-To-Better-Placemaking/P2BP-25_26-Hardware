@@ -119,6 +119,11 @@ class StepEntry:
     # gate was off. The step stays PENDING, so it runs on the first launch
     # after the gate is turned on, and `all_complete()` does not wait on it.
     skipped_gate_off: bool = False
+    # Set when a COMPLETE step was put back to PENDING because this release
+    # would install something different (the dispatch loop's
+    # `pending_update` hook). Cleared only by `mark_complete`, so an update
+    # that stopped part way is still known to be one on the next run.
+    update_pending: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"status": self.status.value}
@@ -126,6 +131,8 @@ class StepEntry:
             d["finished_utc"] = self.finished_utc
         if self.skipped_gate_off:
             d["skipped"] = "gate off"
+        if self.update_pending:
+            d["update_pending"] = self.update_pending
         return d
 
     @staticmethod
@@ -134,6 +141,7 @@ class StepEntry:
             status=StepStatus(d.get("status", StepStatus.PENDING.value)),
             finished_utc=d.get("finished_utc"),
             skipped_gate_off=d.get("skipped") == "gate off",
+            update_pending=d.get("update_pending") or None,
         )
 
 
@@ -300,6 +308,24 @@ class StateMachine:
         entry = self.load().steps.get(step_id)
         return entry is not None and entry.skipped_gate_off
 
+    def mark_update_pending(self, step_id: str, reason: str) -> None:
+        """Put a COMPLETE `step_id` back to `PENDING` and record why: this
+        release would install something different. The reason survives
+        until `mark_complete`, however the update run ends."""
+        state = self.load()
+        entry = state.steps.get(step_id)
+        if entry is None:
+            entry = state.steps[step_id] = StepEntry(status=StepStatus.PENDING)
+        entry.status = StepStatus.PENDING
+        entry.skipped_gate_off = False
+        entry.update_pending = reason
+        self.save(state)
+
+    def update_pending(self, step_id: str) -> str | None:
+        """The recorded reason of an update that has not completed yet."""
+        entry = self.load().steps.get(step_id)
+        return entry.update_pending if entry is not None else None
+
     def mark_complete(self, step_id: str) -> None:
         """Set `step_id` to `COMPLETE` and stamp `finished_utc` (doc 00 §6.3)."""
         state = self.load()
@@ -313,6 +339,7 @@ class StateMachine:
             entry.status = StepStatus.COMPLETE
             entry.finished_utc = finished
             entry.skipped_gate_off = False
+            entry.update_pending = None
         self.save(state)
 
     def set_reboot_pending(self, step_id: str, boot_id: str) -> None:

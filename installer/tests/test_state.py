@@ -324,3 +324,22 @@ def test_state_round_trips_through_json(tmp_path):
     assert reloaded.install_dir == "/custom/dir"
     assert reloaded.schema_version == 1
     assert set(reloaded.steps.keys()) == set(STEP_IDS)
+
+
+def test_update_pending_survives_until_mark_complete(tmp_path):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete("step8_tracking_history")
+
+    sm.mark_update_pending("step8_tracking_history", "bundle changed")
+    assert sm.status("step8_tracking_history") is StepStatus.PENDING
+    assert sm.update_pending("step8_tracking_history") == "bundle changed"
+    # Persisted, and kept by a plain status change such as --reset-step.
+    sm.set_status("step8_tracking_history", StepStatus.PENDING)
+    assert StateMachine(path=sm.path).update_pending("step8_tracking_history") == (
+        "bundle changed"
+    )
+
+    sm.mark_complete("step8_tracking_history")
+    assert sm.update_pending("step8_tracking_history") is None
+    raw = json.loads(sm.path.read_text(encoding="utf-8"))
+    assert "update_pending" not in raw["steps"]["step8_tracking_history"]

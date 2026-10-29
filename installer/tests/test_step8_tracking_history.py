@@ -351,7 +351,7 @@ def test_secret_created_600_never_overwritten_never_logged(tmp_path, env_values,
     assert len(secret) >= 64
     assert values[s8.KEY_PROJECT] == "proj-1"
     assert values[s8.KEY_ORIGINS] == "https://app.example.org,http://localhost:5173"
-    assert s8.KEY_ISSUER not in values
+    assert s8.KEY_ISSUER not in values  # never asked, so left unset
 
     assert s8.ensure_tracking_env(ctx) == (False, [])
     assert s8._read_env_file(path)[s8.KEY_SECRET] == secret
@@ -389,7 +389,7 @@ def test_interactive_prompts_for_values(tmp_path, monkeypatch):
     values = s8._read_env_file(ctx.install_dir / "secrets" / "tracking.env")
     assert values[s8.KEY_PROJECT] == "proj-3"
     assert values[s8.KEY_ORIGINS] == "https://b.example.org"
-    assert s8.KEY_ISSUER not in values
+    assert values[s8.KEY_ISSUER] == ""  # answered blank: never asked again
 
 
 def test_non_interactive_without_values_stops_before_the_unit(tmp_path):
@@ -902,7 +902,7 @@ def test_tracking_help_lists_the_cleaning_commands(capsys):
 # ---------------------------------------------------------------------------
 
 
-def _dispatch_ctx(tmp_path, monkeypatch, *, gate="on"):
+def _dispatch_ctx(tmp_path, monkeypatch, *, gate="on", non_interactive=True):
     """A completed Step 8 install driven through the real dispatch loop."""
     monkeypatch.setenv(s8.KEY_PROJECT, "proj-1")
     monkeypatch.setenv(s8.KEY_ORIGINS, "https://app.example.org")
@@ -923,6 +923,7 @@ def _dispatch_ctx(tmp_path, monkeypatch, *, gate="on"):
     sm = StateMachine(path=tmp_path / "state.json")
     sm.mark_complete(s8.STEP_ID)
     monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+    ctx.non_interactive = non_interactive
     ctx.runner.calls.clear()
     ctx.reported.clear()
     return ctx, cfg, sm
@@ -1067,3 +1068,125 @@ def test_status_shows_a_pending_tracking_update(tmp_path, monkeypatch, capsys):
         f"{s8.STEP_ID}: COMPLETE, update pending (bundled tracking package "
         "changed): runs on next install run"
     ) in out
+
+
+def _age_the_package(ctx):
+    installed = ctx.install_dir / "tracking" / "mv3dt_tracking" / "cleaning.py"
+    installed.write_text("# previous release\n", encoding="utf-8")
+    return installed
+
+
+def _restarts(ctx):
+    return ctx.runner.calls.count(("systemctl", "restart", s8.UNIT_NAME))
+
+
+def test_interactive_update_never_prompts_for_an_absent_optional_key(
+    tmp_path, monkeypatch, capsys
+):
+    # Installed without TICKET_ISSUER; the autouse _PROMPT raises if asked.
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch, non_interactive=False)
+    env = s8._tracking_env_path(ctx)
+    assert s8.KEY_ISSUER not in s8._read_env_file(env)
+    _age_the_package(ctx)
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert _restarts(ctx) == 1
+    assert sm.status(s8.STEP_ID) is StepStatus.COMPLETE
+    assert sm.update_pending(s8.STEP_ID) is None
+    assert s8.KEY_ISSUER not in s8._read_env_file(env)
+
+
+def test_interactive_install_records_a_blank_issuer_and_never_asks_again(
+    tmp_path, monkeypatch
+):
+    answers = iter(["proj-3", "https://b.example.org", ""])
+    monkeypatch.setattr(s8, "_PROMPT", lambda msg: next(answers))
+    ctx = Context(tmp_path, non_interactive=False)
+    s8.ensure_tracking_env(ctx)
+    path = s8._tracking_env_path(ctx)
+    assert f"{s8.KEY_ISSUER}=\n" in path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(s8, "_PROMPT", _no_prompt)
+    assert s8.ensure_tracking_env(ctx) == (False, [])
+
+
+def test_update_missing_a_required_key_stops_without_prompting_then_restarts(
+    tmp_path, monkeypatch
+):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch, non_interactive=False)
+    env = s8._tracking_env_path(ctx)
+    secret = s8._read_env_file(env)[s8.KEY_SECRET]
+    # A release that needs a key this install never had.
+    env.write_text(
+        f"{s8.KEY_SECRET}={secret}\n{s8.KEY_ORIGINS}=https://app.example.org\n",
+        encoding="utf-8",
+    )
+    env.chmod(0o600)
+    monkeypatch.delenv(s8.KEY_PROJECT)
+    installed = _age_the_package(ctx)
+
+    assert app._dispatch(sm, ctx, cfg) == 0  # USER-ACTION, not a prompt
+
+    bundled = shellout.asset_path("tracking", "mv3dt_tracking", "cleaning.py")
+    assert installed.read_bytes() == bundled.read_bytes()  # synced already
+    assert _restarts(ctx) == 0
+    assert sm.status(s8.STEP_ID) is StepStatus.PENDING
+    assert sm.update_pending(s8.STEP_ID) == "bundled tracking package changed"
+
+    # The operator adds the key; the files already match, yet the service
+    # still runs the previous release, so the retry restarts it.
+    with env.open("a", encoding="utf-8") as f:
+        f.write(f"{s8.KEY_PROJECT}=proj-1\n")
+    ctx.runner.calls.clear()
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert _restarts(ctx) == 1
+    assert sm.status(s8.STEP_ID) is StepStatus.COMPLETE
+    assert sm.update_pending(s8.STEP_ID) is None
+
+    # Completed: the next run is a no-op again.
+    ctx.runner.calls.clear()
+    assert app._dispatch(sm, ctx, cfg) == 0
+    assert ctx.runner.calls == []
+
+
+def test_update_interrupted_before_the_unit_restarts_on_the_next_run(
+    tmp_path, monkeypatch, capsys
+):
+    ctx, cfg, sm = _dispatch_ctx(tmp_path, monkeypatch)
+    _age_the_package(ctx)
+    real = s8.ensure_tracking_env
+
+    def interrupted(ctx, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(s8, "ensure_tracking_env", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        app._dispatch(sm, ctx, cfg)
+    assert _restarts(ctx) == 0
+    assert sm.update_pending(s8.STEP_ID) == "bundled tracking package changed"
+    assert s8.update_reason(ctx) is None  # the files already match
+
+    monkeypatch.setattr(s8, "ensure_tracking_env", real)
+    ctx.runner.calls.clear()
+    capsys.readouterr()
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert "resuming an update that did not finish" in capsys.readouterr().err
+    assert _restarts(ctx) == 1
+    assert ctx.reported == [("installed", s8.UNIT_NAME, s8.bundled_version(ctx))]
+    assert sm.status(s8.STEP_ID) is StepStatus.COMPLETE
+    assert sm.update_pending(s8.STEP_ID) is None
+
+
+def test_status_shows_an_update_that_did_not_finish(tmp_path, capsys):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete(s8.STEP_ID)
+    sm.mark_update_pending(s8.STEP_ID, "bundled tracking package changed")
+
+    assert app.main(["--status"], state_path=sm.path) == 0
+    assert (
+        f"{s8.STEP_ID}: PENDING, update did not finish (bundled tracking "
+        "package changed): runs on next install run"
+    ) in capsys.readouterr().out

@@ -586,6 +586,10 @@ class Context:
     reboot: RebootHandle
     progress: ProgressHandle
     non_interactive: bool
+    # The recorded reason when the step being run is an update of a
+    # completed install (`_dispatch`, `pending_update`), else None. Set by
+    # the dispatch loop before each step's lifecycle, never by a step.
+    update_pending: Optional[str] = None
 
     def run_as_user(
         self, *args: str, stream: Optional[bool] = None, **kwargs: Any
@@ -1238,7 +1242,9 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
     - Else if already `COMPLETE`, skip with the "already complete" log line,
       unless the step's optional `pending_update` hook reports that this
       release would install something different: then log the reason, put
-      the step back to `PENDING` and run it like any other.
+      the step back to `PENDING` with the reason recorded, and run it with
+      `ctx.update_pending` set. The record stays until the step completes,
+      so an update that stopped part way runs as an update again.
     - Else announce it with doc 08 §3.2's `[ 3/7 ] <title>` banner, run
       its lifecycle (`preflight -> run -> verify`), and record the
       effective `StepResult`. On `COMPLETE`, call `report()` and
@@ -1282,16 +1288,26 @@ def _dispatch(sm: StateMachine, ctx: Context, cfg: config_mod.Config) -> int:
             log.info(f"{step.id}: skipped (gate off)")
             continue
 
+        ctx.update_pending = None
         if sm.status(step.id) is StepStatus.COMPLETE:
             reason = _pending_update(step, ctx)
             if reason is None:
                 log.info(f"{step.id}: already complete")
                 continue
-            # Put back to PENDING before running, so an update that fails
-            # part way is retried in full on the next run instead of being
-            # hidden behind a COMPLETE whose files already match.
+            # Put back to PENDING with the reason recorded before running,
+            # so an update that stops part way (a USER-ACTION, a failure,
+            # Ctrl-C) is still run as an update next time, restart included,
+            # rather than as a re-run whose files already match.
             log.info(f"{step.id}: {reason}; updating")
-            sm.set_status(step.id, StepStatus.PENDING)
+            sm.mark_update_pending(step.id, reason)
+            ctx.update_pending = reason
+        else:
+            ctx.update_pending = sm.update_pending(step.id)
+            if ctx.update_pending:
+                log.info(
+                    f"{step.id}: resuming an update that did not finish "
+                    f"({ctx.update_pending})"
+                )
 
         # Bind the step before its first lifecycle method runs: `run_root`
         # streams into the region this opens (doc 08 §4.2), and
@@ -1396,6 +1412,11 @@ def _print_status(sm: StateMachine) -> int:
                 status_value = "SKIPPED, gate now on: runs on next install run"
             else:
                 status_value = "SKIPPED (gate off; runs when the gate is turned on)"
+        elif entry is not None and entry.update_pending:
+            status_value = (
+                f"{status_value}, update did not finish "
+                f"({entry.update_pending}): runs on next install run"
+            )
         elif entry is not None and entry.status is StepStatus.COMPLETE:
             reason = _status_pending_update(step_id, state.install_dir, conf)
             if reason:

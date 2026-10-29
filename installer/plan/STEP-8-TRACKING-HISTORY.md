@@ -223,6 +223,12 @@ never open a listener the operator did not ask for.
 
 The file is mode `600` and owned by the invoking user.
 
+**RESOLVED — a blank issuer is asked once.** A blank answer to the
+interactive `TICKET_ISSUER` prompt is written as `TICKET_ISSUER=`, which the
+package reads as unset, so a later run does not ask again. Under
+`--non-interactive` with no `TICKET_ISSUER` in the environment the key is
+left out of the file.
+
 **RESOLVED — the secret is never printed.** It is written only to
 `tracking.env`. `report` tells the operator to read it once with
 `sudo cat <install_dir>/secrets/tracking.env` and copy the value into the
@@ -619,28 +625,48 @@ optional `pending_update(ctx)` hook, which the dispatch loop asks for every
    The package digest maps each relative path to its SHA-256 and skips
    `__pycache__/` and `*.pyc`, the same set `sync_package` copies. File
    order and mtimes never change it.
-3. **Re-run**: on a reason the loop logs one line, sets the step back to
-   `PENDING`, and runs `preflight`, `run`, `verify` as for a first install.
-   `run` is already idempotent ([section 11.2](#112-runctx)): pip runs only
-   when the requirements changed and the service restarts only when
-   something did. A run that stops part way leaves the step `PENDING`, so
-   the next run repeats it in full.
-4. **No reason**: the step stays `COMPLETE`, nothing runs, nothing restarts.
+3. **Record**: on a reason the loop logs one line, sets the step back to
+   `PENDING` and records the reason in `state.json` as the step's
+   `update_pending`. Only `mark_complete` clears it.
+4. **Re-run as an update**: the loop runs `preflight`, `run`, `verify` with
+   `ctx.update_pending` set to the recorded reason. `run` stays idempotent
+   ([section 11.2](#112-runctx)), so pip runs only when the requirements
+   changed, with two differences for an update:
+   - **REQUIRED — it never prompts.** `tracking.env` keys already in the
+     file are kept and an absent optional key stays unset. A missing
+     required key stops the step with `USER_ACTION_REQUIRED` naming the key
+     and the file, never with a prompt.
+   - **REQUIRED — it always restarts the unit.** An earlier attempt may
+     have replaced the files and stopped before its restart.
+5. **Resume**: an update that stopped part way (a `USER_ACTION_REQUIRED`, a
+   failure, Ctrl-C or SIGTERM) leaves the step `PENDING` with the reason
+   still recorded. The next run logs that it is resuming the update and
+   runs it as one, restart included, although the files now match.
+6. **No reason**: the step stays `COMPLETE`, nothing runs, nothing restarts.
 
 ```
 step8_tracking_history: bundled tracking package changed; updating
 ```
 
-> **Never touched by the check:** `cleaning.json`, `offsets.json`,
-> `secrets/tracking.env` and `/var/lib/mv3dt-tracking/`. The check never
-> prompts, so it behaves the same under `--non-interactive`, and a hook
-> that raises is logged as a warning and treated as no update.
+```
+step8_tracking_history: resuming an update that did not finish (bundled tracking package changed)
+```
+
+> **Never touched by an update:** `cleaning.json`, `offsets.json` and
+> `/var/lib/mv3dt-tracking/`. `secrets/tracking.env` keeps every key it
+> has; it is rewritten only to add a key from the environment or a missing
+> ticket secret ([section 4.3](#43-trackingenv)). Neither the check nor
+> the update run prompts, so both behave the same with and without
+> `--non-interactive`. A hook that raises is logged as a warning and
+> treated as no update.
 
 `--status` asks the same hook without an invoking user, so it compares the
-package and requirements only, and shows a pending update as:
+package and requirements only, and also shows an update that did not
+finish:
 
 ```
 step8_tracking_history: COMPLETE, update pending (bundled tracking package changed): runs on next install run
+step8_tracking_history: PENDING, update did not finish (bundled tracking package changed): runs on next install run
 ```
 
 ---
