@@ -2566,3 +2566,91 @@ def test_dispatch_cleanup_failure_does_not_mask_the_interrupt(tmp_path, monkeypa
     monkeypatch.setattr(ctx.progress, "end_step", _broken_pipe)
     with pytest.raises(KeyboardInterrupt):
         app._dispatch(sm, ctx, cfg)
+
+
+# ---------------------------------------------------------------------------
+# Optional `pending_update` hook: a completed step re-runs after an upgrade
+# ---------------------------------------------------------------------------
+
+
+class _UpdatingStep(_DummyStep):
+    def __init__(self, *args, reason=None, raises=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reason = reason
+        self.raises = raises
+        self.run_calls = 0
+
+    def pending_update(self, ctx):
+        if self.raises:
+            raise OSError("unreadable")
+        return self.reason
+
+    def run(self, ctx):
+        self.run_calls += 1
+        return super().run(ctx)
+
+
+def test_dispatch_reruns_a_complete_step_with_a_pending_update(
+    tmp_path, monkeypatch, capsys
+):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete("step1_prerequisites")
+    ctx, cfg = _minimal_ctx(tmp_path, non_interactive=True)
+    step = _UpdatingStep("step1_prerequisites", "Prerequisites", 1, reason="bundle changed")
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert step.run_calls == 1
+    assert step.report_calls == 1
+    assert sm.status("step1_prerequisites") is StepStatus.COMPLETE
+    err = capsys.readouterr().err
+    assert "step1_prerequisites: bundle changed; updating" in err
+    assert "already complete" not in err
+
+
+def test_dispatch_keeps_a_complete_step_without_a_pending_update(
+    tmp_path, monkeypatch, capsys
+):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete("step1_prerequisites")
+    ctx, cfg = _minimal_ctx(tmp_path)
+    step = _UpdatingStep("step1_prerequisites", "Prerequisites", 1, reason=None)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert step.run_calls == 0
+    assert "step1_prerequisites: already complete" in capsys.readouterr().err
+
+
+def test_dispatch_failed_update_leaves_the_step_pending(tmp_path, monkeypatch):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete("step1_prerequisites")
+    ctx, cfg = _minimal_ctx(tmp_path)
+    step = _UpdatingStep(
+        "step1_prerequisites", "Prerequisites", 1, reason="bundle changed",
+        run=StepResult(status=StepStatus.FAILED, message="pip failed"),
+    )
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+
+    assert app._dispatch(sm, ctx, cfg) == 1
+    # Retried in full next run, not hidden behind a COMPLETE.
+    assert sm.status("step1_prerequisites") is StepStatus.PENDING
+
+
+def test_dispatch_update_check_that_raises_is_only_a_warning(
+    tmp_path, monkeypatch, capsys
+):
+    sm = StateMachine(path=tmp_path / "state.json")
+    sm.mark_complete("step1_prerequisites")
+    ctx, cfg = _minimal_ctx(tmp_path)
+    step = _UpdatingStep("step1_prerequisites", "Prerequisites", 1, raises=True)
+    monkeypatch.setattr(app, "STEP_REGISTRY", [step])
+
+    assert app._dispatch(sm, ctx, cfg) == 0
+
+    assert step.run_calls == 0
+    err = capsys.readouterr().err
+    assert "could not check for an update (unreadable)" in err
+    assert "step1_prerequisites: already complete" in err

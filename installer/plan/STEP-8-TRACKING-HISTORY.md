@@ -223,6 +223,12 @@ never open a listener the operator did not ask for.
 
 The file is mode `600` and owned by the invoking user.
 
+**RESOLVED — a blank issuer is asked once.** A blank answer to the
+interactive `TICKET_ISSUER` prompt is written as `TICKET_ISSUER=`, which the
+package reads as unset, so a later run does not ask again. Under
+`--non-interactive` with no `TICKET_ISSUER` in the environment the key is
+left out of the file.
+
 **RESOLVED — the secret is never printed.** It is written only to
 `tracking.env`. `report` tells the operator to read it once with
 `sudo cat <install_dir>/secrets/tracking.env` and copy the value into the
@@ -566,7 +572,8 @@ repeats steps 1 to 5: it re-syncs the package (only the `mv3dt_tracking/`
 directory is replaced), re-renders the unit, and restarts the service when
 the package, venv, `tracking.env` or unit changed. With nothing changed it
 reports the unit as already installed. `cleaning.json` and `offsets.json`
-stay as they are.
+stay as they are. A completed step re-runs these on its own after an
+upgrade, without `--reset-step 8`; see [section 11.5](#115-upgrade-check).
 
 ### 11.3 `verify(ctx)`
 
@@ -592,6 +599,75 @@ for the web app's `WORKSTATION_TRACKING_URL`, built from the machine's
 Tailscale DNS name as `https://<name>:8443`, or with a placeholder for the
 name when Tailscale is not logged in. That is the one other setting the
 operator copies into the web app's environment.
+
+### 11.5 Upgrade check
+
+**RESOLVED — a completed step updates itself.** Up to 0.4.19 the
+dispatch loop
+([`00` section 3.2](00-FRAMEWORK-AND-BOOTSTRAP.md#32-entrypoint-and-dispatch))
+logged `step8_tracking_history: already complete` after an upgrade and left
+the installed package on the previous release's code until the operator
+ran `--reset-step 8`. The package `__version__` is not bumped every
+release, so it cannot tell the two copies apart. The step now defines the
+optional `pending_update(ctx)` hook, which the dispatch loop asks for every
+`COMPLETE` step that has it:
+
+1. **Gate**: gate `off` is skipped before the hook is asked, as before, and
+   the hook itself returns no reason when the gate is off.
+2. **Compare**: `update_reason(ctx)` checks, read only, in this order:
+
+   | Check | Installed | Compared with |
+   |---|---|---|
+   | Package | `<install_dir>/tracking/mv3dt_tracking/` | bundled `mv3dt_tracking/` |
+   | Requirements | `<install_dir>/tracking/requirements.txt` | bundled `requirements.txt` |
+   | Unit | `/etc/systemd/system/mv3dt-tracking.service` | the unit this release renders |
+
+   The package digest maps each relative path to its SHA-256 and skips
+   `__pycache__/` and `*.pyc`, the same set `sync_package` copies. File
+   order and mtimes never change it.
+3. **Record**: on a reason the loop logs one line, sets the step back to
+   `PENDING` and records the reason in `state.json` as the step's
+   `update_pending`. Only `mark_complete` clears it.
+4. **Re-run as an update**: the loop runs `preflight`, `run`, `verify` with
+   `ctx.update_pending` set to the recorded reason. `run` stays idempotent
+   ([section 11.2](#112-runctx)), so pip runs only when the requirements
+   changed, with two differences for an update:
+   - **REQUIRED — it never prompts.** `tracking.env` keys already in the
+     file are kept and an absent optional key stays unset. A missing
+     required key stops the step with `USER_ACTION_REQUIRED` naming the key
+     and the file, never with a prompt.
+   - **REQUIRED — it always restarts the unit.** An earlier attempt may
+     have replaced the files and stopped before its restart.
+5. **Resume**: an update that stopped part way (a `USER_ACTION_REQUIRED`, a
+   failure, Ctrl-C or SIGTERM) leaves the step `PENDING` with the reason
+   still recorded. The next run logs that it is resuming the update and
+   runs it as one, restart included, although the files now match.
+6. **No reason**: the step stays `COMPLETE`, nothing runs, nothing restarts.
+
+```
+step8_tracking_history: bundled tracking package changed; updating
+```
+
+```
+step8_tracking_history: resuming an update that did not finish (bundled tracking package changed)
+```
+
+> **Never touched by an update:** `cleaning.json`, `offsets.json` and
+> `/var/lib/mv3dt-tracking/`. `secrets/tracking.env` keeps every key it
+> has; it is rewritten only to add a key from the environment or a missing
+> ticket secret ([section 4.3](#43-trackingenv)). Neither the check nor
+> the update run prompts, so both behave the same with and without
+> `--non-interactive`. A hook that raises is logged as a warning and
+> treated as no update.
+
+`--status` asks the same hook without an invoking user, so it compares the
+package and requirements only, and also shows an update that did not
+finish:
+
+```
+step8_tracking_history: COMPLETE, update pending (bundled tracking package changed): runs on next install run
+step8_tracking_history: PENDING, update did not finish (bundled tracking package changed): runs on next install run
+```
 
 ---
 

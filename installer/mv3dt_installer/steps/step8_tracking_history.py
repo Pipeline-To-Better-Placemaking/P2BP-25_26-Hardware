@@ -48,7 +48,12 @@ Cleaning files (TRACKING-FUSION-AND-CLEANING.md section 10):
   `serve` uses `LOCATION_ID`, for the MQTT topic).
 - **Upgrade.** Re-running the step re-syncs the package (which never
   touches files beside it), re-renders the unit and restarts the service
-  when anything changed; both cleaning files stay as they are.
+  when anything changed; both cleaning files stay as they are. A completed
+  step re-runs on its own when `pending_update()` finds the installed
+  package, requirements or unit differing from what this release would
+  install, so an upgrade needs no `--reset-step 8`. That update run never
+  prompts and always restarts the unit, and the dispatch loop keeps it
+  marked as an update until it completes.
 """
 
 from __future__ import annotations
@@ -83,6 +88,7 @@ __all__ = [
     "UNIT_NAME",
     "bundled_version",
     "sync_package",
+    "update_reason",
     "ensure_venv",
     "ensure_tracking_env",
     "render_tracking_unit",
@@ -219,11 +225,22 @@ def bundled_version(ctx: Any) -> str:
 
 
 def _tree_digest(root: pathlib.Path) -> dict:
+    """`{relative path: sha256}` of every file under `root`.
+
+    Content only: file order and mtimes never change it. Byte-code is left
+    out (`__pycache__`, `*.pyc`), matching what `sync_package` copies, so a
+    compiled bundle or a package the service has already imported compares
+    equal to its source.
+    """
     digest = {}
     if not root.is_dir():
         return digest
     for path in sorted(root.rglob("*")):
-        if "__pycache__" in path.parts or not path.is_file():
+        if (
+            "__pycache__" in path.parts
+            or path.suffix == ".pyc"
+            or not path.is_file()
+        ):
             continue
         digest[path.relative_to(root).as_posix()] = hashlib.sha256(
             path.read_bytes()
@@ -267,6 +284,37 @@ def sync_package(ctx: Any) -> bool:
     _chown_tree(ctx, dest)
     _chown(ctx, dest_requirements)
     return changed
+
+
+def update_reason(ctx: Any) -> Optional[str]:
+    """Why a completed install is out of date with this release, or None.
+
+    Read only. Compares the bundled package and requirements with the
+    installed copies, and, when `ctx` carries the invoking user, the unit
+    this release would render with the one on disk. `--status` passes no
+    user, so it checks the package and requirements only. Never looks at
+    `cleaning.json`, `offsets.json`, `tracking.env` or the data directory.
+    """
+    tracking_dir = _tracking_dir(ctx)
+    source = pathlib.Path(ctx.asset_path("tracking", PACKAGE_NAME))
+    if _tree_digest(source) != _tree_digest(tracking_dir / PACKAGE_NAME):
+        return "bundled tracking package changed"
+    requirements = pathlib.Path(ctx.asset_path("tracking", "requirements.txt"))
+    try:
+        installed = (tracking_dir / "requirements.txt").read_bytes()
+    except OSError:
+        installed = None
+    if installed != requirements.read_bytes():
+        return "bundled tracking requirements changed"
+    if getattr(ctx, "user", None) is not None:
+        unit = systemd.UNIT_DIR / UNIT_NAME
+        try:
+            current = unit.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current != render_tracking_unit(ctx):
+            return f"{UNIT_NAME} differs from this release"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +420,7 @@ def _ask(question: str, validate: Callable[[str], Optional[str]], *, optional=Fa
     while True:
         answer = _PROMPT(question).strip()
         if not answer and optional:
-            return None
+            return ""  # an explicit blank, recorded so it is not asked again
         cleaned = validate(answer) if answer else None
         if cleaned is not None:
             return cleaned
@@ -387,9 +435,16 @@ def _resolve_value(
     question: str,
     *,
     optional: bool = False,
+    prompt: bool = True,
 ) -> Optional[str]:
-    """Existing file value, then the environment, then a prompt."""
-    if existing.get(key):
+    """Existing file value, then the environment, then a prompt.
+
+    An optional key already in the file counts as answered even when blank,
+    so a blank answer is asked once. With `prompt=False` (an update of a
+    completed install) a value found nowhere stays unset instead of being
+    asked for; a missing required key is then reported by the caller.
+    """
+    if existing.get(key) or (optional and key in existing):
         return existing[key]
     env_value = os.environ.get(key, "")
     if env_value:
@@ -397,16 +452,19 @@ def _resolve_value(
         if cleaned is not None:
             return cleaned
         log.warn(f"ignoring invalid {key} from the environment")
-    if ctx.non_interactive:
+    if ctx.non_interactive or not prompt:
         return None
     return _ask(question, validate, optional=optional)
 
 
-def ensure_tracking_env(ctx: Any) -> tuple:
+def ensure_tracking_env(ctx: Any, *, prompt: bool = True) -> tuple:
     """Create or complete `secrets/tracking.env`.
 
     The secret is generated only when absent and is never overwritten. Keys
-    already present are kept as they are. Returns `(changed, missing_keys)`.
+    already present are kept as they are. A blank answer to the optional
+    `TICKET_ISSUER` prompt is written as `TICKET_ISSUER=`, which the package
+    reads as unset, so later runs do not ask again. `prompt=False` never
+    asks anything. Returns `(changed, missing_keys)`.
     """
     path = _tracking_env_path(ctx)
     existing = _read_env_file(path)
@@ -418,23 +476,28 @@ def ensure_tracking_env(ctx: Any) -> tuple:
     project = _resolve_value(
         ctx, KEY_PROJECT, existing, _clean_single_line,
         "Web app project id whose tickets this workstation accepts: ",
+        prompt=prompt,
     )
     origins = _resolve_value(
         ctx, KEY_ORIGINS, existing, normalize_origins,
         "Allowed web app origins, comma separated (https://app.example.org): ",
+        prompt=prompt,
     )
     issuer = _resolve_value(
         ctx, KEY_ISSUER, existing, _clean_single_line,
         "Ticket issuer (the web app's JWT_ISSUER), blank to skip: ",
         optional=True,
+        prompt=prompt,
     )
-    for key, value in ((KEY_PROJECT, project), (KEY_ORIGINS, origins), (KEY_ISSUER, issuer)):
+    for key, value in ((KEY_PROJECT, project), (KEY_ORIGINS, origins)):
         if value:
             values[key] = value
+    if issuer is not None:
+        values[KEY_ISSUER] = issuer
 
     missing = [key for key in REQUIRED_ENV_KEYS if not values.get(key)]
 
-    ordered = [k for k in (KEY_SECRET, KEY_PROJECT, KEY_ORIGINS, KEY_ISSUER) if values.get(k)]
+    ordered = [k for k in (KEY_SECRET, KEY_PROJECT, KEY_ORIGINS, KEY_ISSUER) if k in values]
     ordered += sorted(k for k in values if k not in ordered)
     content = (
         "# secrets/tracking.env -- generated by mv3dt-installer (STEP-8 section 4.3).\n"
@@ -814,6 +877,11 @@ class Step8TrackingHistory:
         if not _gate_on(ctx):
             return StepResult(status=StepStatus.COMPLETE)
 
+        # An update of a completed install (section 11.5) never prompts and
+        # always restarts the unit: the files may have been replaced by an
+        # earlier attempt that stopped before its restart.
+        updating = bool(getattr(ctx, "update_pending", None))
+
         ctx.progress.phase(1)
         ctx.progress.task("copying the tracking package")
         package_changed = sync_package(ctx)
@@ -831,12 +899,13 @@ class Step8TrackingHistory:
                 f"step8: {_cleaning_file(ctx)} was not seeded ({seed_error}); the "
                 "service uses the strict defaults until the file exists"
             )
-        env_changed, missing = ensure_tracking_env(ctx)
+        env_changed, missing = ensure_tracking_env(ctx, prompt=not updating)
         if missing:
             path = _tracking_env_path(ctx)
+            during = "; the tracking update is not finished" if updating else ""
             return StepResult(
                 status=StepStatus.USER_ACTION_REQUIRED,
-                message=f"{', '.join(missing)} not set in {path}",
+                message=f"{', '.join(missing)} not set in {path}{during}",
                 user_actions=[
                     UserAction(
                         text=f"Add {', '.join(missing)} to tracking.env, then re-run "
@@ -849,7 +918,7 @@ class Step8TrackingHistory:
         ctx.progress.phase(3)
         ctx.progress.task(f"installing {UNIT_NAME}")
         unit_changed = _install_unit(
-            ctx, restart=package_changed or venv_changed or env_changed
+            ctx, restart=package_changed or venv_changed or env_changed or updating
         )
 
         ctx.progress.phase(4)
@@ -857,7 +926,7 @@ class Step8TrackingHistory:
         _expose(ctx)
 
         version = bundled_version(ctx)
-        if package_changed or unit_changed or venv_changed:
+        if package_changed or unit_changed or venv_changed or updating:
             ctx.report_installed(UNIT_NAME, version)
         else:
             ctx.report_already_installed(UNIT_NAME, version)
@@ -931,6 +1000,14 @@ class Step8TrackingHistory:
                 "the pipeline is probably not running. Recording starts when it does."
             )
         return StepResult(status=StepStatus.COMPLETE)
+
+    def pending_update(self, ctx: Any) -> Optional[str]:
+        """The dispatch loop's upgrade check for a completed step: a reason
+        to re-run `run()`, or None to leave the install alone. Never
+        prompts; a gated-off install is never updated."""
+        if not _gate_on(ctx):
+            return None
+        return update_reason(ctx)
 
     def report(self, ctx: Any) -> None:
         if not _gate_on(ctx):
