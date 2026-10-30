@@ -15,8 +15,8 @@ connected across the step modules.** A reader who finds `report.py` can
 reasonably conclude the diagnostic work is done. It is not.
 [Section 5](#5-what-remains) is the honest list.
 
-Current release: **v0.4.19**. Current version string:
-`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.19"`.
+Current release: **v0.4.20**. Current version string:
+`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.20"`.
 The release is published with a checksum-verified binary.
 
 ### Current workstation state (last verified 2026-10-20)
@@ -451,8 +451,8 @@ For the current state to be what this document claims:
 - [ ] Every step declares `phases` and calls exactly `phase(1)` through
       `phase(len(phases))` — pinned by
       `tests/test_steps_protocol.py::test_every_step_declares_phases_that_match_the_indices_it_uses`.
-- [x] `__version__` equals the most recent `v*` tag (`v0.4.19`).
-- [x] `gh pr list --state open` is empty at the v0.4.19 release cut.
+- [x] `__version__` equals the most recent `v*` tag (`v0.4.20`).
+- [x] `gh pr list --state open` is empty at the v0.4.20 release cut.
 
 ---
 
@@ -477,7 +477,7 @@ Settled exclusions, carried from [`08` §11](08-PROGRESS-AND-OBSERVABILITY.md#11
 ## References
 
 Facts in this document are drawn from the repository through release
-`v0.4.19`, the operator's supplied **v0.4.6**, **v0.4.7**, and **v0.4.8**
+`v0.4.20`, the operator's supplied **v0.4.6**, **v0.4.7**, and **v0.4.8**
 workstation runs, and earlier workstation runs of `mv3dt-installer` 0.1.2 through
 0.1.9, which are the source of the observed-failure inventory in
 [`08` §2](08-PROGRESS-AND-OBSERVABILITY.md#2-observed-failures-this-doc-exists-to-fix).
