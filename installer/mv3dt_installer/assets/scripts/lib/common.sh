@@ -4,11 +4,12 @@
 # binary (doc 00 §4.2). Sourced by every script under
 # installer/mv3dt_installer/assets/scripts/. Never executed on its own.
 #
-# This is a purpose-written sibling of laptop/scripts/lib/common.sh, not a
-# copy of it: the logging block below is carried over verbatim, but the two
-# functions that assumed a repo checkout on disk (repo_root, load_env) are
-# replaced with staged-asset equivalents (asset_root, load_installer_conf).
-# Everything laptop/scripts/lib/common.sh has for bootstrap-phase state,
+# This is a purpose-written successor to the removed
+# laptop/scripts/lib/common.sh, not a copy of it: the logging block below is
+# carried over verbatim, but the two functions that assumed a repo checkout
+# on disk (repo_root, load_env) are replaced with staged-asset equivalents
+# (asset_root, load_installer_conf).
+# Everything laptop/scripts/lib/common.sh had for bootstrap-phase state,
 # .deb discovery, version comparison, and config-file announcement is owned
 # by state.py / report.py in the Python layer now and is not ported here.
 #

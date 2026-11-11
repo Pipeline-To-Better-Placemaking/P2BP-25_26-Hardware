@@ -6,8 +6,8 @@ secrecy rules, different consumer). The desktop talks to a cloud web app over
 HTTP with a bearer API key; this module owns the credential + endpoint
 contract only -- the transport and routes belong to STEP-7, and the separate
 MQTT control plane belongs to STEP-6. This module is a self-contained sibling
-of laptop/ and of the other framework modules (doc 00 §3.1) -- it does not
-import from steps/, app.py, config.py, ngc.py, or reboot.py.
+of the other framework modules (doc 00 §3.1) -- it does not import from
+steps/, app.py, config.py, ngc.py, or reboot.py.
 
 Public API:
     Credentials              -- dataclass(api_key: str | None, endpoint: str | None).

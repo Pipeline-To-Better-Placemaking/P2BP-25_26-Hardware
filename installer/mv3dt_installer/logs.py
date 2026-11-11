@@ -5,9 +5,8 @@ log_error/die: colour-aware, level-prefixed lines to stderr, so stdout stays
 reserved for machine-parsable output. Every emitted line is also appended to
 the transcript log file once one is open (see open_transcript()).
 
-This module is a self-contained sibling of laptop/ (doc 00 §3.1) — it does
-not import or source anything under laptop/scripts/lib/common.sh or any
-other laptop/ path.
+This module is self-contained (doc 00 §3.1) — it imports or sources no
+shell code; the laptop/ harness it was modelled on has been removed.
 
 Public API:
     log.info(msg)      -- level "info", coloured green when stderr is a tty.

@@ -50,14 +50,14 @@ control; `STEP-7` adds the HTTP web-app data plane. Start at
   verifies the checksum, and runs it. **Nothing clones this repo onto a
   workstation** — don't write a doc, script, or step that assumes a checkout
   is present at run time.
-- **Exactly two shell scripts ship inside the binary:**
-  `10_setup_mosquitto.sh` (owned by `STEP-1` §3.2) and `60_record_tracking.sh`
-  (producer of the `tracks.jsonl` / `tracks.csv` / `summary.json` artifacts
-  `STEP-7` §E.1 uploads). They live under
-  `installer/mv3dt_installer/assets/scripts/` with a purpose-written
-  `lib/common.sh`, and are the only copies. Every other former
-  `laptop/scripts/` entry was ported into a step or dropped; the per-script
-  table is
+- **The binary bundles the whole `installer/mv3dt_installer/assets/` tree**,
+  shell helpers included. Exactly two former harness scripts were ported into
+  it: `10_setup_mosquitto.sh` (owned by `STEP-1` §3.2) and
+  `60_record_tracking.sh` (producer of the `tracks.jsonl` / `tracks.csv` /
+  `summary.json` artifacts `STEP-7` §E.1 uploads). They now exist only under
+  `assets/scripts/`, alongside a purpose-written `lib/common.sh`. Every other
+  former `laptop/scripts/` entry was ported into a step or dropped; the
+  per-script table is
   [`DELETION-REVIEW.md` §8](installer/plan/DELETION-REVIEW.md#8-script-disposition-under-the-binary-distribution).
 - PeopleNet is the only detector wired into the DeepStream pipeline; `yolo11n`
   is reserved for future work — don't add YOLO wiring without being asked.

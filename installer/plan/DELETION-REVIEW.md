@@ -18,8 +18,8 @@ does **not** restate those contracts — it links back.
 The triage is complete: **14,692 files removed**, working tree down from ~1 GB
 to ~23 MB. What remained was `laptop/` (the DeepStream harness), `installer/`
 (these specs), `CLAUDE.md`, and `README.md`;
-[§9](#9-removal-of-the-laptop-harness) has since removed `laptop/` as well, so the
-repo is now `installer/`, `CLAUDE.md`, and `README.md`.
+[§9](#9-removal-of-the-laptop-harness) has since removed `laptop/` as well,
+so the repo is now `installer/`, `CLAUDE.md`, and `README.md`.
 
 Everything removed remains recoverable via `git revert` or from the parent
 repository; no history rewrite has been performed, so `.git` is still ~892 MB
@@ -295,11 +295,12 @@ text is retained in each item so the reason the script was kept is not lost.
    API every 60 seconds. That replaced the interim design of a systemd `.path`
    unit watching an export directory AMC 3.2.1 does not create, and it
    supersedes the watcher's `inotifywait` loop operationally.
-   [`40_export_watcher.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/40_export_watcher.sh) was
-   retained in git as a developer tool at the time, on the grounds that its
-   standalone watch mode had no installer equivalent; it was not load-bearing
-   for the installer's own ingest path, and [§9](#9-removal-of-the-laptop-harness) removed it with the
-   rest of the harness. It is recoverable from git history at `57adf5d`.
+   [`40_export_watcher.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/40_export_watcher.sh)
+   was retained in git as a developer tool at the time, on the grounds that
+   its standalone watch mode had no installer equivalent; it was not
+   load-bearing for the installer's own ingest path, and
+   [§9](#9-removal-of-the-laptop-harness) removed it with the rest of the
+   harness. It is recoverable from git history at `57adf5d`.
 
 ---
 
@@ -342,11 +343,12 @@ deletion in this document is destructive to the object store.
 ## 8. Script disposition under the binary distribution
 
 > **Superseded by [§9](#9-removal-of-the-laptop-harness) (historical).** The
-> bundling decisions below still describe which scripts ship inside the binary and where each was
-> ported. The "Retained in git?" column and the two-copy rule in
-> [§8.1](#81-which-copy-do-i-edit) no longer hold: the `laptop/` originals
-> were removed, so `installer/mv3dt_installer/assets/scripts/` is the only
-> copy of each bundled script.
+> bundling decisions below still describe which scripts ship inside the
+> binary and where each was ported. The "Retained in git?" column and the
+> two-copy rule in [§8.1](#81-which-copy-do-i-edit) no longer hold: the
+> `laptop/` originals were removed, so
+> `installer/mv3dt_installer/assets/scripts/` is the only copy of each
+> bundled script.
 
 **LOCKED.** The operator artifact is a **prebuilt binary downloaded from the
 repo's GitHub Releases page** ([`00` §5](00-FRAMEWORK-AND-BOOTSTRAP.md#5-distribution-the-github-release-binary)).
@@ -380,7 +382,8 @@ still how this repo is exercised from a clone.
 ### 8.1 Which copy do I edit?
 
 > **RESOLVED by [§9](#9-removal-of-the-laptop-harness):** only the
-> `assets/scripts/` copy exists now; edit it. The rule below is kept as the record of the two-copy period.
+> `assets/scripts/` copy exists now; edit it. The rule below is kept as the
+> record of the two-copy period.
 
 **REQUIRED.** Two of these scripts exist in two places, and the answer is
 not "whichever one you opened".
@@ -412,11 +415,13 @@ staging runner sets ([`00` §11.2](00-FRAMEWORK-AND-BOOTSTRAP.md#112-persistence
 ## 9. Removal of the `laptop/` harness
 
 **EXECUTED (2026-11-11).** The `laptop/` tree — the developer-only scripted
-workflow the binary superseded ([§8](#8-script-disposition-under-the-binary-distribution))
-— is removed in full. Under the [§1](#1-scope-and-the-deletion-test) test no
+workflow the binary superseded
+([§8](#8-script-disposition-under-the-binary-distribution)) — is removed in
+full. Under the [§1](#1-scope-and-the-deletion-test) test no
 file in it still earns retention: everything the plans needed was already
 ported, bundled, or dropped, and the one doc still cited as a source of truth
-was relocated rather than deleted ([§9.3](#93-the-deepstream-setupmd-relocation)).
+was relocated rather than deleted
+([§9.3](#93-the-deepstream-setupmd-relocation)).
 The tree as it stood is browsable at
 [`57adf5d`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop).
 
@@ -481,11 +486,11 @@ from link fixes: relative links to harness files are now permalinks pinned to
 `57adf5d`. Passages that walk through the scripted harness are historical;
 the pins are what it remains authoritative for.
 
-### 9.4 What changed in the same commit
+### 9.4 What changed in the same PR
 
 Matching [§3.3](#33-documentation-that-must-change-in-the-same-commit), the
-references move atomically with the deletion so no doc points at a missing
-path:
+references move in the same PR as the deletion so nothing on `main` points at
+a missing path:
 
 - [`CLAUDE.md`](../../CLAUDE.md), [`installer/README.md`](../README.md), and
   every `installer/plan/*.md` — links to `DEEPSTREAM-SETUP.md` repointed;
@@ -496,10 +501,19 @@ path:
   `assets/mosquitto/mv3dt.conf`, and the four `assets/deepstream/` templates
   — they now name the installer as their consumer. Settings are
   byte-identical.
+- Python comments and docstrings in `installer/mv3dt_installer/`
+  (`cameras.py`, `config.py`, `logs.py`, `ngc.py`, `preflight.py`,
+  `privilege.py`, `webapp.py`) and in `assets/scripts/lib/common.sh` — no
+  longer describe `laptop/` as present; "ported from" provenance stays.
+- Three user-facing strings repointed: the Step 1 unsupported-platform error
+  now cites `installer/plan/DEEPSTREAM-SETUP.md`, the Step 5 validation
+  banner cites `STEP-5` §6 instead of `SCRIPTED-WORKFLOW.md`, and the
+  generated `installer.conf` header describes its own shape instead of
+  naming `laptop.env.example`.
 - `.gitignore` and `installer/.gitignore` — the `laptop/` allowlist and
   cross-reference removed.
 
-**Rollback:** `git revert` the removal commit, or restore the tree with
+**Rollback:** `git revert` the PR's commits, or restore the tree with
 `git checkout 57adf5d -- laptop/`.
 
 ---
@@ -546,7 +560,8 @@ Repo files referenced:
   Rewritten again with the [§9](#9-removal-of-the-laptop-harness) harness
   removal.
 - [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md) — the DS 9.1 setup reference
-  relocated from `laptop/docs/` by [§9.3](#93-the-deepstream-setupmd-relocation).
+  relocated from `laptop/docs/` by
+  [§9.3](#93-the-deepstream-setupmd-relocation).
 - [`installer/README.md`](../README.md) — the operator guide that replaces the
   harness guides removed by [§9](#9-removal-of-the-laptop-harness).
 - [`mv3dt_installer/assets/`](../mv3dt_installer/assets/) — the new home of
