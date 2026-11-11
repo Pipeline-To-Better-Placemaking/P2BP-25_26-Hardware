@@ -450,7 +450,7 @@ validation helpers to run in a second TTY **before** handing off to
 `deepstream-app`:
 
 ```
-[validation helpers — SCRIPTED-WORKFLOW §10.2]
+[validation helpers — STEP-5 §6]
   # MV3DT/SV3DT tracks (topic base <MQTT_TOPIC_BASE>, default mv3dt):
   mosquitto_sub -h 127.0.0.1 -t 'mv3dt/#' -v
 

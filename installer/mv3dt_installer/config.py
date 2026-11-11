@@ -1,7 +1,7 @@
 """Install-location config + opt-in step gate persistence (doc 00 §11, §3.4).
 
 Owns `<install_dir>/installer.conf` — a small, plain `KEY=VALUE` file (same
-shape as [`laptop/config/laptop.env.example`](../../laptop/config/laptop.env.example):
+shape as [`laptop/config/laptop.env.example`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/laptop.env.example):
 no quoting, no shell expansion) that mirrors `state.json`'s `install_dir`
 (§6.2) for human inspection and for bundled bash fragments
 (`set -a; . installer.conf`). This module is framework-only: it has no
