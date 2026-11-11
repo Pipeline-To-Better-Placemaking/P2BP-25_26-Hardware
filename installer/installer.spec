@@ -11,15 +11,11 @@
 # self-contained executable.
 #
 # Bundled data is unpacked at runtime into sys._MEIPASS and resolved via
-# mv3dt_installer.shellout.asset_path() (doc 00 §4.2). This spec ships two
-# kinds of data:
-#   1. Everything already under mv3dt_installer/assets/ (bundled bash
-#      fragments, the tracked mosquitto/mv3dt.conf and cameras/cameras.yml
-#      copies, and the systemd and polkit unit templates).
-#   2. The DeepStream config templates that still live under laptop/
-#      (tracker/infer/app/msgconv), pulled in directly from the laptop/
-#      harness at build time so the single binary is self-contained
-#      without duplicating those files by hand.
+# mv3dt_installer.shellout.asset_path() (doc 00 §4.2). This spec ships
+# everything under mv3dt_installer/assets/: bundled bash fragments, the
+# tracked mosquitto/mv3dt.conf and cameras/cameras.yml copies, the DeepStream
+# config templates (tracker/infer/app/msgconv) under deepstream/, and the
+# systemd and polkit unit templates.
 #
 # NOTE: this file is executed by PyInstaller's own runtime, which injects
 # `Analysis`, `PYZ`, `EXE`, and `SPECPATH` as globals before running it —
@@ -36,7 +32,6 @@ ROOT = os.path.dirname(os.path.abspath(SPECPATH))  # noqa: F821 (PyInstaller glo
 INSTALLER_DIR = os.path.join(ROOT, "installer")
 PACKAGE_DIR = os.path.join(INSTALLER_DIR, "mv3dt_installer")
 ASSETS_DIR = os.path.join(PACKAGE_DIR, "assets")
-LAPTOP_DEEPSTREAM_DIR = os.path.join(ROOT, "laptop", "deepstream")
 
 
 def _collect_tree_datas(src_dir: str, dest_prefix: str) -> list[tuple[str, str]]:
@@ -64,20 +59,8 @@ def _collect_tree_datas(src_dir: str, dest_prefix: str) -> list[tuple[str, str]]
 
 datas: list[tuple[str, str]] = []
 
-# 1. installer/mv3dt_installer/assets/** -> assets/
+# installer/mv3dt_installer/assets/** -> assets/ (deepstream/ templates included)
 datas += _collect_tree_datas(ASSETS_DIR, "assets")
-
-# 2. DeepStream config templates from laptop/deepstream/ (tracker/infer/app/
-#    msgconv) -> assets/deepstream/
-for _fname in (
-    "config_tracker_NvMOT.yml",
-    "config_infer_primary.txt",
-    "deepstream_app_config.txt",
-    "msgconv_config.txt",
-):
-    _fpath = os.path.join(LAPTOP_DEEPSTREAM_DIR, _fname)
-    if os.path.isfile(_fpath):
-        datas.append((_fpath, "assets/deepstream"))
 
 a = Analysis(  # noqa: F821 (PyInstaller global)
     [os.path.join(PACKAGE_DIR, "__main__.py")],

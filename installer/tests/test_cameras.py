@@ -18,7 +18,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from mv3dt_installer import cameras  # noqa: E402
 
-_SEED_PATH = pathlib.Path(__file__).resolve().parents[2] / "laptop" / "config" / "cameras.yml"
+_SEED_PATH = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "mv3dt_installer"
+    / "assets"
+    / "cameras"
+    / "cameras.yml"
+)
 
 
 def _cp(argv, returncode=0, stdout="", stderr=""):
