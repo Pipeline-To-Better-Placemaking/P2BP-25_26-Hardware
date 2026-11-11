@@ -1,12 +1,12 @@
-# laptop/config/cameras.yml
+# installer/mv3dt_installer/assets/cameras/cameras.yml
 #
-# Per-camera static assignment for the DS 9.0 laptop scripted testing harness.
+# Seed camera inventory bundled into mv3dt-installer (assets/cameras/).
 # Synced with deployed fleet: link-local 169.254.*, Hikvision main stream path.
 #
-# Consumed by:
-#   - laptop/scripts/20_verify_cameras.sh: ping + ffprobe each enabled entry.
-#   - laptop/scripts/40_export_watcher.sh: one [sourceN] uri per enabled row.
-#   - laptop/scripts/50_start_pipeline.sh: ping-sweep before deepstream-app.
+# Consumed by the installer:
+#   - cameras.py first-run scan: this header is copied into every generated
+#     <install_dir>/cameras.yml and the pinned IPs below prime the ARP-cache
+#     fallback for MAC discovery (framework doc 00 §15).
 #
 # Credentials: captured by the installer in secrets/camera.env (not here).
 #
@@ -35,7 +35,7 @@
 # Main stream (/Streaming/Channels/101) as configured: H.264, 1920x1080 at
 #   22 fps (operator, 2026-10-20; previously left at the native 3072x1728).
 #   1080p matches AutoMagicCalib's input requirement and the [streammux]
-#   width=1920 height=1080 in laptop/deepstream/deepstream_app_config.txt, so
+#   width=1920 height=1080 in the bundled deepstream_app_config.txt, so
 #   the pipeline no longer downscales; detection still runs at 1080p, not
 #   sensor resolution. The stream also carries G.711 mu-law audio, which the
 #   installer's footage recorder drops (-an).

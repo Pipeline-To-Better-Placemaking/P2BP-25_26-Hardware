@@ -35,7 +35,7 @@ Per the step-module interface in
   `state.json` directly.
 
 This step is the port of Phases 0–4 and Phase 8 of
-[`laptop/scripts/00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh)
+[`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh)
 (preflight, base deps, nouveau cleanup, NVIDIA stack, runtime/GStreamer
 prereqs, version audit), rebuilt against the framework contract and the DS 9.1
 GA equality pins.
@@ -50,7 +50,7 @@ Ubuntu → Prerequisites`) pins. They are **equality pins**, not minimums — DS
 `libnvinfer*`. Per the DS 9.1 Installation page: *"Before installing the
 DeepStream SDK, ensure you have Ubuntu 24.04, GStreamer 1.24.2, NVIDIA driver
 595.58.03, CUDA 13.2, and TensorRT 10.16.0.72 installed."* Also transcribed in
-[`DEEPSTREAM-SETUP.md` §4](../../laptop/docs/DEEPSTREAM-SETUP.md).
+[`DEEPSTREAM-SETUP.md` §4](DEEPSTREAM-SETUP.md).
 
 | Component | Pinned version | Install source | Verify command | `verify_pinned` label / expected |
 |-----------|----------------|----------------|----------------|----------------------------------|
@@ -133,7 +133,7 @@ returns `COMPLETE` when all match.
 ## 3. DS 9.1 §4.1 apt prerequisite package list
 
 Transcribed from
-[`DEEPSTREAM-SETUP.md` §4.1](../../laptop/docs/DEEPSTREAM-SETUP.md) and
+[`DEEPSTREAM-SETUP.md` §4.1](DEEPSTREAM-SETUP.md) and
 cross-checked against the DS 9.1 Installation page "Install prerequisite
 packages" block. `run()` installs these in a single apt
 transaction, reporting each with the §8.3 strings.
@@ -161,8 +161,8 @@ libjansson4 libyaml-cpp-dev libmosquitto1
 ```
 
 The following are **repo additions** carried by
-[`DEEPSTREAM-SETUP.md` §4.1](../../laptop/docs/DEEPSTREAM-SETUP.md) and
-[`00_bootstrap.sh` Phase 4](../../laptop/scripts/00_bootstrap.sh), not on the
+[`DEEPSTREAM-SETUP.md` §4.1](DEEPSTREAM-SETUP.md) and
+[`00_bootstrap.sh` Phase 4](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh), not on the
 DS 9.1 §4.1 authoritative list, but harmless/required downstream:
 `libgles2-mesa-dev`, `libjsoncpp-dev`, `protobuf-compiler`, `gcc`, `make`,
 `git`, `python3`. Keep them (they satisfy build tooling and the DS msgconv /
@@ -182,14 +182,14 @@ rather than for DeepStream itself. They are on the §3 list, are not on the DS
 
 > `libmosquitto1` MUST NOT be omitted — it is the DS MQTT protocol client lib
 > required by `Gst-nvmsgbroker`
-> ([`DEEPSTREAM-SETUP.md` §4.1](../../laptop/docs/DEEPSTREAM-SETUP.md)). It is
+> ([`DEEPSTREAM-SETUP.md` §4.1](DEEPSTREAM-SETUP.md)). It is
 > **not** the broker: it is a shared library that `libnvds_mqtt_proto.so`
 > links against, and installing it leaves nothing listening on port `1883`.
 > The broker daemon is the separate `mosquitto` package — see
 > [§3.2](#32-mosquitto-broker).
 
 `gstreamer1.0-plugins-rtp` / `gstreamer1.0-rtsp` from
-[`00_bootstrap.sh` Phase 4](../../laptop/scripts/00_bootstrap.sh) are optional
+[`00_bootstrap.sh` Phase 4](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) are optional
 extras and may be included in the same transaction; they are not on the DS 9.1
 §4.1 list.
 
@@ -252,8 +252,9 @@ interactive behavior.
 #### What the script actually does, in order
 
 Read against
-[`10_setup_mosquitto.sh`](../../laptop/scripts/10_setup_mosquitto.sh), the
-developer-harness original. Step 1 runs the bundled copy at
+[`10_setup_mosquitto.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/10_setup_mosquitto.sh), the
+former developer-harness original (removed with the harness; permalink to
+`57adf5d`). Step 1 runs the bundled copy at
 `installer/mv3dt_installer/assets/scripts/10_setup_mosquitto.sh`, a ported
 variant functionally equivalent to the original but not byte-identical — it
 resolves its source config from the staged `asset_root` rather than the repo
@@ -308,7 +309,7 @@ ones.
 version: `systemctl is-active --quiet mosquitto` succeeds and
 `/etc/mosquitto/conf.d/mv3dt.conf` is byte-identical to the bundled asset.
 Ubuntu 24.04's `mosquitto` version is not pinned — nothing in the DS 9.1 docs or in
-[`mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf) depends on a specific
+[`mv3dt.conf`](../mv3dt_installer/assets/mosquitto/mv3dt.conf) depends on a specific
 broker minor, so an equality pin here would create false failures with no
 corresponding benefit.
 
@@ -321,9 +322,9 @@ toolchain, no previous NVIDIA stack, Secure Boot disabled, and `nouveau`
 already out of the way. On a brand-new Ubuntu 24.04 box those assumptions do
 not hold. Step 1 MUST satisfy each of the following **before** running the
 `.run` driver installer (§5 step 4). These mirror the caveat table in
-[`DEEPSTREAM-SETUP.md` §4 first-install caveats](../../laptop/docs/DEEPSTREAM-SETUP.md)
+[`DEEPSTREAM-SETUP.md` §4 first-install caveats](DEEPSTREAM-SETUP.md)
 and Phases 1–2 of
-[`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh).
+[`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh).
 
 | # | Precondition | Action Step 1 takes | Outcome |
 |---|--------------|---------------------|---------|
@@ -339,7 +340,7 @@ Notes:
 
 - **Nouveau blacklist + `update-initramfs -u`** and the **distro-`nvidia-*`
   purge** are the two reboot triggers (§5). They match Phase 2 of
-  [`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh).
+  [`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh).
 - **Secure Boot / MOK enrollment and any BIOS interaction are out of scope**
   ([`00` §13](00-FRAMEWORK-AND-BOOTSTRAP.md#13-out-of-scope--defer-to-human));
   Step 1 detects and surfaces them as `USER_ACTION_REQUIRED`, it does not
@@ -431,8 +432,8 @@ $ sudo ./NVIDIA-Linux-x86_64-595.58.03.run --no-cc-version-check
 
 The DS 9.1 Installation page documents **no** `.deb`/apt path for the *driver*
 — only CUDA Toolkit `13.2`, TensorRT `10.16.0.72`, and cuDNN `9.20.0.48` are
-installed from apt/deb packages (§3, §5). The existing
-[`00_bootstrap.sh` Phase 3](../../laptop/scripts/00_bootstrap.sh) diverges by
+installed from apt/deb packages (§3, §5). The former
+[`00_bootstrap.sh` Phase 3](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) diverged by
 using the NVIDIA **local-repo `.deb`** (an older `cuda-drivers-590` pin); Step
 1 supersedes that and uses the `.run` because "use what the NVIDIA docs say"
 is the ruling constraint. Only the `.run` path is documented.
@@ -629,7 +630,7 @@ Against the protocol in
 
 - Assert Ubuntu 24.04 + `x86_64` (`lsb_release`, `uname -m`); NVIDIA GPU via
   `lspci`. On mismatch → `FAILED` with a pointer to
-  [`DEEPSTREAM-SETUP.md` §2–3](../../laptop/docs/DEEPSTREAM-SETUP.md).
+  [`DEEPSTREAM-SETUP.md` §2–3](DEEPSTREAM-SETUP.md).
 - Determine internal stage: **Stage A** (driver not yet installed/loaded) vs
   **Stage B** (driver `595.58.03` present and `nvidia-smi` loads). The probe
   is idempotent so re-runs are safe.
@@ -676,7 +677,7 @@ gst-inspect-1.0 --version   (parse "version X.Y.Z")
 Any `verify_pinned` returning `False` → `verify()` returns
 `USER_ACTION_REQUIRED` (or `FAILED`) with the mismatch, never `COMPLETE`. This
 is the hard gate that Phase 8 of
-[`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) performs, ported to
+[`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) performs, ported to
 the framework helper.
 
 ### 7.4 `report(ctx)`
@@ -736,7 +737,7 @@ LOCKED constraints):
    runfile for the driver (`NVIDIA-Linux-x86_64-595.58.03.run --no-cc-version-check`);
    there is no documented `.deb`/apt driver path. Step 1 uses the `.run`
    accordingly and supersedes the local-repo `.deb` driver install in the
-   existing [`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh). This
+   former [`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh). This
    accepts the GDM-stop / TTY / MOK friction (caveats 5–6) as the documented
    cost. The residual bundled-vs-download choice is now also **RESOLVED:
    installer-fetched** from the version-stamped NVIDIA runfile mirror, with
@@ -759,27 +760,32 @@ LOCKED constraints):
 
 ## 10. Documented drift from `00_bootstrap.sh`
 
-The existing
-[`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) preflight and
-[`laptop/deepstream/*`](../../laptop/deepstream/) still target the older DS
-9.0 pins and NGC-based acquisition — that script/config tree has not yet been
-updated to match this spec (noted in
-[`DEEPSTREAM-SETUP.md` §5.2 "Known drift"](../../laptop/docs/DEEPSTREAM-SETUP.md)).
+The former
+[`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) preflight and
+[`laptop/deepstream/*`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop/deepstream/) targeted the older DS
+9.0 pins and NGC-based acquisition (noted in
+[`DEEPSTREAM-SETUP.md` §5.2 "Known drift"](DEEPSTREAM-SETUP.md)). The
+templates have since moved to `installer/mv3dt_installer/assets/deepstream/`
+and the script was removed with the harness
+([`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness)).
 
 **Step 1 targets the DS 9.1 GA equality pins in §2**: driver
 **`== 595.58.03`**, CUDA **`== 13.2`**, cuDNN `== 9.20.0.48`, TRT
 `== 10.16.0.72-1+cuda13.2`, GStreamer `== 1.24.2`, all enforced through
-`verify_pinned` (§7.3). Until `00_bootstrap.sh` is updated to match, running it
-against this spec's expectations will under-provision the driver/CUDA/TRT/cuDNN
-stack and `verify()` will fail.
+`verify_pinned` (§7.3). Running the former `00_bootstrap.sh` against this
+spec's expectations would have under-provisioned the driver/CUDA/TRT/cuDNN
+stack and `verify()` would fail.
 
-Note: Phase 8 of the current script hard-gates equality values via
-`require_version_eq`, but those values are still the DS 9.0 pins — the drift
-now spans the full stack (driver, CUDA, cuDNN, TensorRT, DS SDK acquisition),
+Note: Phase 8 of that script hard-gated equality values via
+`require_version_eq`, but those values were still the DS 9.0 pins — the drift
+spanned the full stack (driver, CUDA, cuDNN, TensorRT, DS SDK acquisition),
 not just the preflight thresholds. Step 1 makes the DS 9.1 equality pin the
-single, consistent gate from preflight through verify; bringing
-`00_bootstrap.sh` up to match is a follow-up implementation task, not
-something this spec change performs by itself.
+single, consistent gate from preflight through verify.
+
+> **RESOLVED (harness removed):** bringing `00_bootstrap.sh` up to match is
+> no longer a follow-up task. The script was removed with the `laptop/`
+> harness rather than updated
+> ([`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness)).
 
 ---
 
@@ -861,15 +867,15 @@ Repo files referenced:
 
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md)
   — shared framework contracts consumed by this step.
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md) —
+- [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md) —
   §4 pins, §4.1 apt list, first-install caveats, §5.2 known drift.
-- [`laptop/scripts/00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) —
+- [`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) —
   Phases 0–4 + Phase 8 this step ports; source of the `>= 550` / `>= 12.4`
   preflight drift.
-- [`laptop/scripts/lib/common.sh`](../../laptop/scripts/lib/common.sh) —
+- [`laptop/scripts/lib/common.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/lib/common.sh) —
   `require_version_eq` (ported to `verify_pinned`), logging, `require_root`.
-- [`laptop/scripts/10_setup_mosquitto.sh`](../../laptop/scripts/10_setup_mosquitto.sh)
-  — the original of the bundled broker-setup script this step now owns and
-  runs (§3.2).
-- [`laptop/mosquitto/mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf) — the
-  drop-in installed to `/etc/mosquitto/conf.d/mv3dt.conf` (§3.2).
+- [`laptop/scripts/10_setup_mosquitto.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/10_setup_mosquitto.sh)
+  — the removed original of the bundled broker-setup script this step now
+  owns and runs (§3.2).
+- [`installer/mv3dt_installer/assets/mosquitto/mv3dt.conf`](../mv3dt_installer/assets/mosquitto/mv3dt.conf)
+  — the drop-in installed to `/etc/mosquitto/conf.d/mv3dt.conf` (§3.2).

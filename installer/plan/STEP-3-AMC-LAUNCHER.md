@@ -386,4 +386,4 @@ Repo files referenced:
 
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — shared framework, reporting, privilege, configuration, and step contracts.
 - [`installer/plan/STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md) — downstream calibration-result consumer.
-- [`laptop/scripts/30_start_amc.sh`](../../laptop/scripts/30_start_amc.sh) — superseded developer harness launcher.
+- [`laptop/scripts/30_start_amc.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/30_start_amc.sh) — superseded developer harness launcher (removed; permalink to `57adf5d`).

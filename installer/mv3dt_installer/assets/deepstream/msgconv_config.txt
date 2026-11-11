@@ -1,7 +1,8 @@
-# laptop/deepstream/msgconv_config.txt
+# installer/mv3dt_installer/assets/deepstream/msgconv_config.txt
 #
-# Gst-nvmsgconv configuration for the DS 9.0 MV3DT laptop pipeline. Consumed
-# by [sink1] in deepstream_app_config.txt (msg-conv-config=msgconv_config.txt),
+# Gst-nvmsgconv configuration for the DS 9.0 MV3DT pipeline, bundled into
+# mv3dt-installer and copied verbatim to <install_dir>/deepstream/ by Step 4.
+# Consumed by [sink1] in deepstream_app_config.txt (msg-conv-config=msgconv_config.txt),
 # then handed to libnvds_mqtt_proto.so for publication to Mosquitto.
 #
 # Field names verified via the deepstream-9-docs skill:

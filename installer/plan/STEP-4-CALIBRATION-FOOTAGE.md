@@ -11,7 +11,7 @@ and Step 4's project-state polling in
 **not** restate those contracts — link back to them.
 
 AMC's browser workflow needs one video per camera before it can calibrate
-([`DEEPSTREAM-SETUP` §8.6](../../laptop/docs/DEEPSTREAM-SETUP.md), step 2
+([`DEEPSTREAM-SETUP` §8.6](DEEPSTREAM-SETUP.md), step 2
 "Video Upload"). Until now the operator produced those clips by hand. This
 spec makes Step 4 **record a synchronized five-minute clip from every enabled
 camera** into the operator's `~/Downloads`, where the AMC upload dialog can
@@ -320,7 +320,7 @@ while it waits. State changes are still logged once each, as today.
 - Uploading the clips into AMC through its API. The operator still selects
   them in the Video Upload dialog.
 - Transcoding or downscaling. Clips are stream copies; the VGGT VRAM note in
-  [`DEEPSTREAM-SETUP` §8.6](../../laptop/docs/DEEPSTREAM-SETUP.md) is left to
+  [`DEEPSTREAM-SETUP` §8.6](DEEPSTREAM-SETUP.md) is left to
   the operator.
 - Audio, which AMC does not use.
 - Deleting footage for any outcome other than a successful ingest (§6).
@@ -375,7 +375,7 @@ Repo files referenced:
 
 - [`installer/plan/STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md) — the step this extends: polling, wait outcomes, ingest, re-ingest.
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — camera inventory and probe (§15), privilege (§9.2), atomic JSON (§6.3), redaction (§14.4), config keys (§11.2).
-- [`installer/plan/DELETION-REVIEW.md`](DELETION-REVIEW.md) — §8 records `record_cameras_mp4.sh` as dropped for lack of plan coverage.
-- [`laptop/scripts/record_cameras_mp4.sh`](../../laptop/scripts/record_cameras_mp4.sh) — the developer script whose `ffmpeg` recording this ports.
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md) — §8.6, the AMC workflow and the per-camera MP4 upload.
+- [`installer/plan/DELETION-REVIEW.md`](DELETION-REVIEW.md) — §8 records `record_cameras_mp4.sh` as not bundled; §9 records its removal with the `laptop/` harness.
+- [`laptop/scripts/record_cameras_mp4.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/record_cameras_mp4.sh) — the removed developer script whose `ffmpeg` recording this ports (permalink to `57adf5d`).
+- [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md) — §8.6, the AMC workflow and the per-camera MP4 upload.
 - [`installer/mv3dt_installer/cameras.py`](../mv3dt_installer/cameras.py) — the `Camera` type and RTSP URL shape reused here.

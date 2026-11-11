@@ -64,7 +64,7 @@ code it produces.
 
 | Skill | Relevant to | Why |
 |-------|-------------|-----|
-| `deepstream-generate-pipeline` | [`laptop/deepstream/deepstream_app_config.txt`](../../laptop/deepstream/deepstream_app_config.txt) | Validate/regenerate this repo's committed pipeline template against NVIDIA's 270+ verified examples rather than hand-editing it against docs alone. |
+| `deepstream-generate-pipeline` | [`deepstream_app_config.txt`](../mv3dt_installer/assets/deepstream/deepstream_app_config.txt) | Validate/regenerate this repo's committed pipeline template against NVIDIA's 270+ verified examples rather than hand-editing it against docs alone. |
 | `deepstream-run-mv3dt` | [`STEP-4`](STEP-4-CALIB-OUTPUT-WIRING.md), [`STEP-5`](STEP-5-PER-PROJECT-EXES.md) | Directly exercises the MV3DT reference app these steps wire the installer's own pipeline around. |
 | `amc-setup-calibration-stack`, `amc-run-sample-calibration`, `amc-run-video-calibration` | [`STEP-3`](STEP-3-AMC-LAUNCHER.md) | Cover exactly what Step 3 automates by hand today (AMC bring-up, sample verification, MP4-based calibration) — useful both to sanity-check Step 3's design and to unblock a developer before the installer exists. |
 | `deepstream-import-vision-model` | [`STEP-2` §5.4](STEP-2-DEEPSTREAM-SDK.md#54-peoplenet-model-acquisition-resolved), [`STEP-4` §6.2](STEP-4-CALIB-OUTPUT-WIRING.md#62-application-config) | The PeopleNet acquisition gap this row once flagged is closed: `STEP-2` §5.4 specifies and implements the NGC download. Still useful when a second detector is imported (`yolo11n` is reserved for future work). |
@@ -81,7 +81,7 @@ skill automatically from a natural-language request — no manual file
 referencing needed. Example prompts written against this repo's actual
 files:
 
-1. `"Use deepstream-generate-pipeline to check laptop/deepstream/deepstream_app_config.txt against the verified pipeline catalog and flag anything non-idiomatic."`
+1. `"Use deepstream-generate-pipeline to check installer/mv3dt_installer/assets/deepstream/deepstream_app_config.txt against the verified pipeline catalog and flag anything non-idiomatic."`
 2. `"Use deepstream-run-mv3dt to sanity-check config_tracker_NvMOT.yml's SV3DT/MV3DT blocks against the DS 9.1 MV3DT reference app."`
 3. `"Use amc-run-video-calibration to walk through calibrating a test rig from the sample MP4s, so I can compare its flow against STEP-3-AMC-LAUNCHER.md's design."`
 
@@ -169,6 +169,6 @@ Repo files referenced:
 - [`installer/plan/STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md)
   and [`STEP-5-PER-PROJECT-EXES.md`](STEP-5-PER-PROJECT-EXES.md) — the
   MV3DT pipeline `deepstream-run-mv3dt` exercises.
-- [`laptop/deepstream/deepstream_app_config.txt`](../../laptop/deepstream/deepstream_app_config.txt)
+- [`installer/mv3dt_installer/assets/deepstream/deepstream_app_config.txt`](../mv3dt_installer/assets/deepstream/deepstream_app_config.txt)
   — the committed pipeline template `deepstream-generate-pipeline` could
   validate.

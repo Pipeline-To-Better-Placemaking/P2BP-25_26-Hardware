@@ -281,14 +281,15 @@ whichever install-method branch (§3.1–§3.3) completes — the model Step 5's
 method was chosen.
 
 - **Target location:** `<install_dir>/deepstream/models/peoplenet/` — where
-  [`config_infer_primary.txt`](../../laptop/deepstream/config_infer_primary.txt)'s
+  [`config_infer_primary.txt`](../mv3dt_installer/assets/deepstream/config_infer_primary.txt)'s
   relative `onnx-file=models/peoplenet/resnet34_peoplenet.onnx` and
   `labelfile-path=models/peoplenet/labels.txt` resolve once Step 5 execs
   `deepstream-app` with `cwd=<install_dir>/deepstream`
   ([`STEP-4` §6.2](STEP-4-CALIB-OUTPUT-WIRING.md#62-application-config)).
 - **Tag:** `installer.conf`'s `peoplenet_ngc_tag` key, defaulting to
   `nvidia/tao/peoplenet:deployable_quantized_onnx_v2.6.3` — the same value
-  `laptop/config/laptop.env.example`'s `PEOPLENET_NGC_TAG` pins.
+  the former `laptop/config/laptop.env.example`'s `PEOPLENET_NGC_TAG`
+  pinned.
 - **Idempotency:** skipped entirely if `resnet34_peoplenet.onnx` already
   exists non-empty at the target location.
 - **Acquisition client:** **RESOLVED** — use NVIDIA's authenticated NGC
@@ -402,22 +403,23 @@ method-aware.
 
 ## 8. Reconciling the DOCUMENTED DRIFT vs `00_bootstrap.sh`
 
-[`laptop/scripts/00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh)
-still targets DS 9.0 in ways Step 2 must **not** inherit (cross-referenced in
-[`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md)
-§5.2 "Known drift"):
+[`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh)
+targeted DS 9.0 in ways Step 2 must **not** inherit (cross-referenced in
+[`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md)
+§5.2 "Known drift"). The script was removed with the `laptop/` harness
+([`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness));
+the drift is kept here as the record of what Step 2 deliberately does not
+port:
 
-1. **Acquisition model has changed.** The script downloads the DS 9.0 `.deb`
-   via `ngc registry resource download-version` and installs it with
+1. **Acquisition model has changed.** The script downloaded the DS 9.0
+   `.deb` via `ngc registry resource download-version` and installed it with
    `apt-get install ./...deb`. Step 2 targets DS 9.1, whose deb/tar are public
    **GitHub Release** assets (§5.1) — no NGC key needed for those two methods;
-   only the Docker image stays NGC-gated (§5.2). Bringing the script in line
-   with this spec is a follow-up implementation task, not performed by this
-   document change.
+   only the Docker image stays NGC-gated (§5.2).
 2. **Prereq pins are Step 1's job.** Step 1's DS 9.1 equality pins (driver
    `595.58.03` / CUDA `13.2` / cuDNN `9.20.0.48` / TensorRT
-   `10.16.0.72-1+cuda13.2`) supersede whatever the bootstrap script currently
-   checks. Step 2 only *consumes* those pins (§2), it does not install or
+   `10.16.0.72-1+cuda13.2`) supersede whatever the bootstrap script
+   checked. Step 2 only *consumes* those pins (§2), it does not install or
    loosen them.
 
 Extra scope beyond installing the DS SDK (e.g. re-syncing the legacy bash) is
@@ -480,7 +482,7 @@ PeopleNet model path (or `MISSING`). No side effects.
 
 ## 11. DS 9.1 breaking changes relevant to install/verify
 
-From [`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md)
+From [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md)
 "DS 9.1 breaking changes" — only the parts that affect *this step's*
 install/verify:
 
@@ -583,9 +585,9 @@ Repo files referenced:
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md)
   — framework contract (module interface, state machine, NGC handoff,
   config, reporting).
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md)
+- [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md)
   — §5 DS 9.1 install (deb/tar/docker), GitHub Release vs. NGC acquisition
   split, breaking changes, documented drift.
-- [`laptop/scripts/00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh)
-  — Phases 5–7 (NGC gate, DS `.deb` NGC download + install, post-install
+- [`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh)
+  (removed; permalink to `57adf5d`) — Phases 5–7 (NGC gate, DS `.deb` NGC download + install, post-install
   `update_rtpmanager.sh` + `/etc/profile.d/deepstream.sh`) that Step 2 ports.

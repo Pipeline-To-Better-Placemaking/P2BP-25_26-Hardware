@@ -15,7 +15,7 @@
 # limitations under the License.
 ################################################################################
 #
-# laptop/deepstream/config_tracker_NvMOT.yml
+# installer/mv3dt_installer/assets/deepstream/config_tracker_NvMOT.yml
 #
 # NvMultiObjectTracker configuration for the MV3DT pipeline: NvDCF + ReID +
 # single-view 3D tracking (ObjectModelProjection). This is NVIDIA's

@@ -154,7 +154,8 @@ identical (`camInfo/`, `transforms.yml`, `map.png`).
 
 ## 3. Pinned baseline values
 
-**REQUIRED:** the bundled templates under `laptop/deepstream/` (packaged by
+**REQUIRED:** the bundled templates under
+`installer/mv3dt_installer/assets/deepstream/` (packaged by
 `installer/installer.spec`) carry these exact values, taken from the live
 snapshot. "Template" is the value shipped today.
 
@@ -665,8 +666,7 @@ Repo files referenced:
   `_wire_download()`, `handle_ingest_subcommand()`.
 - `installer/mv3dt_installer/assets/systemd/mv3dt-pipeline@.service.in` — the
   unit whose rate limit changes.
-- `laptop/deepstream/config_tracker_NvMOT.yml`,
-  `laptop/deepstream/config_infer_primary.txt`,
-  `laptop/deepstream/deepstream_app_config.txt` — the templates of
+- `installer/mv3dt_installer/assets/deepstream/config_tracker_NvMOT.yml`,
+  `config_infer_primary.txt`, `deepstream_app_config.txt` — the templates of
   [section 3](#3-pinned-baseline-values).
 - `installer/installer.spec` — bundles the templates into the binary.

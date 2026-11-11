@@ -423,6 +423,6 @@ Repo files referenced:
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — shared step, wait, privilege, and camera-discovery contracts.
 - [`installer/plan/STEP-3-AMC-LAUNCHER.md`](STEP-3-AMC-LAUNCHER.md) — pinned AMC version and persisted project identity.
 - [`installer/plan/STEP-4-CALIBRATION-FOOTAGE.md`](STEP-4-CALIBRATION-FOOTAGE.md) — calibration footage capture before the wait and deletion after ingest.
-- [`laptop/scripts/40_export_watcher.sh`](../../laptop/scripts/40_export_watcher.sh) — superseded filesystem-export watcher.
-- [`laptop/deepstream/config_tracker_NvMOT.yml`](../../laptop/deepstream/config_tracker_NvMOT.yml) — tracker template and pinned fields.
-- [`laptop/deepstream/deepstream_app_config.txt`](../../laptop/deepstream/deepstream_app_config.txt) — application template.
+- [`laptop/scripts/40_export_watcher.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/40_export_watcher.sh) — superseded filesystem-export watcher (removed; permalink to `57adf5d`).
+- [`installer/mv3dt_installer/assets/deepstream/config_tracker_NvMOT.yml`](../mv3dt_installer/assets/deepstream/config_tracker_NvMOT.yml) — tracker template and pinned fields.
+- [`installer/mv3dt_installer/assets/deepstream/deepstream_app_config.txt`](../mv3dt_installer/assets/deepstream/deepstream_app_config.txt) — application template.
