@@ -77,7 +77,7 @@ defects, and not re-verified since 2026-09-25:
   cause was not identified. Do not modify `Wired connection 1`, `UCFKiosk`,
   or `tailscale0` while investigating.
 - The OSD pre-flight (disable "Display Name" and "Display Date") from
-  [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) must be done
+  [`assets/cameras/cameras.yml`](../mv3dt_installer/assets/cameras/cameras.yml) must be done
   on each connected camera before recording.
 
 The acceptance target is a real calibration export installed by Step 4
@@ -112,10 +112,11 @@ x86_64 workstation.
 
 **Nothing clones this repository onto a workstation.** No step, script, or
 doc may assume a checkout is present at run time
-([`00` §4.1](00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)). Two
-`laptop/scripts/` entries are bundled *into* the binary as assets; the rest
-of `laptop/` is a developer harness exercised from a clone and is not how
-anything installs.
+([`00` §4.1](00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)). The
+two shell scripts the binary needs are bundled *into* it as assets under
+`installer/mv3dt_installer/assets/scripts/`; the former `laptop/` developer
+harness has been removed
+([`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness)).
 
 The build and release path is `.github/workflows/`: pushing a `v*` tag builds
 the binary and attaches it plus a `.sha256` to the release. The version in
@@ -226,7 +227,7 @@ ran. Do not "simplify" this.
 The version pins are equality pins, not minimums: DS 9.1 refuses older and
 newer minors alike. They live in
 [`STEP-1` §2](STEP-1-PREREQUISITES.md#2-the-ds-91-dgpu-prerequisite-pins-equality) and in
-`laptop/docs/DEEPSTREAM-SETUP.md`.
+[`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md).
 
 ### 3.3 The progress and observability subsystem
 

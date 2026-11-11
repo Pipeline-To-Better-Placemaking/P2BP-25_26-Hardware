@@ -748,7 +748,7 @@ def generate_preview_config(source_text: str, *, source_label: str = "<config>")
 def render_validation_banner(entry: ProjectEntry, *, topic_base: str = "mv3dt") -> str:
     """Section 6, verbatim wording."""
     return (
-        "\n[validation helpers -- SCRIPTED-WORKFLOW section 10.2]\n"
+        "\n[validation helpers -- STEP-5 section 6]\n"
         f"  # Per-frame 3D track messages (binary protobuf, nv.Frame; topic base {topic_base}):\n"
         f"  mosquitto_sub -h 127.0.0.1 -t '{topic_base}/#' -F '%t %l bytes'\n\n"
         "  # GPU utilization / memory / temperature:\n"

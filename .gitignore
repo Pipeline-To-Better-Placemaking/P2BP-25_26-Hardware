@@ -12,8 +12,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 config/
-!laptop/config/
-!laptop/config/**
 .cursor/
 .DS_Store
 

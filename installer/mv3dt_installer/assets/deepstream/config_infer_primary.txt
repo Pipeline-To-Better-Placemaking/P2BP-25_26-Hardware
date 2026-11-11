@@ -1,6 +1,7 @@
-# laptop/deepstream/config_infer_primary.txt
+# installer/mv3dt_installer/assets/deepstream/config_infer_primary.txt
 #
-# Gst-nvinfer configuration for the DS 9.0 MV3DT laptop pipeline.
+# Gst-nvinfer configuration for the MV3DT pipeline, bundled into
+# mv3dt-installer and copied verbatim to <install_dir>/deepstream/ by Step 4.
 #
 # Detector: PeopleNet — the ONLY detector wired into this pipeline. This
 # matches NVIDIA's DS 9.0 MV3DT reference documentation and is intentionally
@@ -8,7 +9,7 @@
 # §9.3 Option A.
 #
 # Precision: FP16 (network-mode=2). Model artifacts are the ONNX deployable
-# from NGC tag deployable_quantized_onnx_v2.6.3 (see laptop.env PEOPLENET_NGC_TAG).
+# from NGC tag deployable_quantized_onnx_v2.6.3 (installer.conf key peoplenet_ngc_tag).
 #
 # Field names verified via:
 #   - Context7 /websites/nvidia_metropolis_deepstream_dev-guide
@@ -31,8 +32,8 @@ gpu-id=0
 net-scale-factor=0.0039215697906911373
 model-color-format=0
 
-# Model artifacts (Phase 10 of laptop/scripts/00_bootstrap.sh →
-# laptop/deepstream/models/peoplenet/). ONNX from NGC
+# Model artifacts (downloaded by Step 2 →
+# <install_dir>/deepstream/models/peoplenet/). ONNX from NGC
 # nvidia/tao/peoplenet:deployable_quantized_onnx_v2.6.3 includes
 # resnet34_peoplenet.onnx.
 onnx-file=models/peoplenet/resnet34_peoplenet.onnx

@@ -2,8 +2,7 @@
 #
 # This file intentionally lives at installer/.gitignore (NOT at the repo
 # root) so the mv3dt-installer package stays isolated from the rest of the
-# repo and does not force a change to the root .gitignore — same pattern as
-# laptop/.gitignore (which isolates the laptop/ subtree for the same reason).
+# repo and does not force a change to the root .gitignore.
 
 # Operator secrets written under <install_dir>/secrets/ (ngc.env,
 # webapp.env — doc 00 §10.1, §14.1). NEVER committed, regardless of where

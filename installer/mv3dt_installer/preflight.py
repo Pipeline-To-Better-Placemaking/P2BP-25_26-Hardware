@@ -4,7 +4,7 @@ Mirrors the *behavior* of installer/bootstrap/bootstrap.sh's
 `preflight_os_arch()` and `preflight_root_and_user()`, re-expressed in
 Python. Nothing here sources or executes that script — this module is a
 self-contained sibling of it, the same discipline logs.py, privilege.py and
-report.py already follow with laptop/scripts/lib/common.sh.
+report.py follow.
 
 These two gates exist because the installer binary is downloaded and run
 directly on a bare workstation: nothing upstream of it validates the

@@ -28,7 +28,7 @@ and (d) exposes the reusable **AMC exe** flows for new/existing projects.
 - The **rendered per-project DeepStream config** produced by Step 4 under
   `<install_dir>/deepstream/` (framework §12.4). This is the successor to the
   repo-tree `deepstream_app_config.rendered.txt` produced by
-  [`laptop/scripts/40_export_watcher.sh`](../../laptop/scripts/40_export_watcher.sh).
+  [`laptop/scripts/40_export_watcher.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/40_export_watcher.sh).
 - `PROJECT_NAME` and `LOCATION_ID` — established by Step 4. `PROJECT_NAME`
   is the human name the operator typed into the AMC calibration GUI
   (AMC "Project Setup" step); `LOCATION_ID` keys the calibration directory.
@@ -165,7 +165,7 @@ exec "<install_dir>/bin/mv3dt-installer" pipeline --project "<PROJECT_NAME>" "$@
 ### 3.3 What the exe does at runtime (`pipeline` subcommand)
 
 The `pipeline --project <NAME>` subcommand is a faithful Python port of
-[`laptop/scripts/50_start_pipeline.sh`](../../laptop/scripts/50_start_pipeline.sh),
+[`laptop/scripts/50_start_pipeline.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/50_start_pipeline.sh),
 resolving the config from the registry rather than the repo tree:
 
 1. **Resolve the project** — look up `<NAME>` in `registry.json`
@@ -181,9 +181,9 @@ resolving the config from the registry rather than the repo tree:
    and ping each enabled entry; warn on misses, do not block (port lines
    137–196). The inventory is produced by camera discovery
    ([`00` §15](00-FRAMEWORK-AND-BOOTSTRAP.md#15-camera-discovery)); the
-   `pipeline` subcommand never reads
-   [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) and never
-   compiles in a path. If `CAMERAS_FILE` is unset or missing, the sweep is
+   `pipeline` subcommand never reads the bundled seed
+   [`assets/cameras/cameras.yml`](../mv3dt_installer/assets/cameras/cameras.yml)
+   and never compiles in a path. If `CAMERAS_FILE` is unset or missing, the sweep is
    skipped with a warning pointing at the discovery scan — a stale inventory
    must not block a pipeline start.
 
@@ -192,7 +192,7 @@ resolving the config from the registry rather than the repo tree:
    > has always drawn still holds: *a ping proves the host is up, not that it
    > serves a decodable RTSP stream.* What changed is where that stronger check
    > lives. The `ffprobe`-over-RTSP probe from
-   > [`20_verify_cameras.sh`](../../laptop/scripts/20_verify_cameras.sh) is
+   > [`20_verify_cameras.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/20_verify_cameras.sh) is
    > ported into the camera discovery module
    > ([`00` §15](00-FRAMEWORK-AND-BOOTSTRAP.md#15-camera-discovery)), which
    > probes every discovered camera and records the result as a `stream_ok`
@@ -236,7 +236,7 @@ resolving the config from the registry rather than the repo tree:
 
 ### 3.4 Stopping the pipeline
 
-Port [`laptop/scripts/99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh)
+Port [`laptop/scripts/99_stop_all.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/99_stop_all.sh)
 behavior as a `pipeline --project <NAME> --stop` mode (and surface it in the
 start-or-close summary and validation banner):
 
@@ -321,7 +321,7 @@ The `amc` exe from Step 3 (`<install_dir>/bin/amc`) is the single entry point
 for calibration. Step 5 defines how it feeds new and existing projects back
 through Step 4's ingest/wiring and this step's exe generation. AutoMagicCalib
 is a web-based, human-driven workflow (see
-[`30_start_amc.sh`](../../laptop/scripts/30_start_amc.sh) and the DS 9.1
+[`30_start_amc.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/30_start_amc.sh) and the DS 9.1
 AutoMagicCalib doc); the exe only brings the operator to the UI and then
 ingests the result.
 
@@ -343,7 +343,7 @@ already deleted in the AMC GUI is cleaned up and never shown as runnable.
 
 1. `[N]` brings up the AMC UI exactly as Step 3 does (docker compose up +
    open `http://localhost:<UI_PORT>`; port of
-   [`30_start_amc.sh`](../../laptop/scripts/30_start_amc.sh)). The operator
+   [`30_start_amc.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/30_start_amc.sh)). The operator
    completes the 6-step AMC workflow in the browser (Project Setup → Video
    Upload → Parameters → Manual Align → Execute → Results/Export) and defines
    a brand-new `PROJECT_NAME` in "Project Setup".
@@ -394,7 +394,7 @@ project exe → start-or-close.
 Removal is driven by the operator deleting/removing a project in the AMC
 calibration GUI — not by a destructive command in this installer. AMC owns the
 project under `$HOME/auto-magic-calib/projects/<PROJECT_NAME>/` (the
-`PROJECT_DIR` templated by [`30_start_amc.sh`](../../laptop/scripts/30_start_amc.sh)),
+`PROJECT_DIR` templated by [`30_start_amc.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/30_start_amc.sh)),
 so that directory is the **source of truth** for whether a project still exists.
 
 Expected happy path: when a project is removed in the AMC GUI, its
@@ -444,13 +444,13 @@ disappear from the list.
 
 ## 6. Validation / monitoring
 
-Per [`SCRIPTED-WORKFLOW.md`](../../laptop/docs/SCRIPTED-WORKFLOW.md) §10.2 and
+Per [`SCRIPTED-WORKFLOW.md`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/docs/SCRIPTED-WORKFLOW.md) §10.2 and
 the tail of `50_start_pipeline.sh`, the `pipeline` subcommand prints the
 validation helpers to run in a second TTY **before** handing off to
 `deepstream-app`:
 
 ```
-[validation helpers — SCRIPTED-WORKFLOW §10.2]
+[validation helpers — STEP-5 §6]
   # MV3DT/SV3DT tracks (topic base <MQTT_TOPIC_BASE>, default mv3dt):
   mosquitto_sub -h 127.0.0.1 -t 'mv3dt/#' -v
 
@@ -540,22 +540,22 @@ DeepStream 9.1 official documentation only.
 
 Repo files referenced (ported/reused by this step):
 
-- [`laptop/scripts/50_start_pipeline.sh`](../../laptop/scripts/50_start_pipeline.sh)
+- [`laptop/scripts/50_start_pipeline.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/50_start_pipeline.sh)
   — pipeline launcher logic ported into the `pipeline` subcommand (§3.3).
-- [`laptop/scripts/30_start_amc.sh`](../../laptop/scripts/30_start_amc.sh)
+- [`laptop/scripts/30_start_amc.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/30_start_amc.sh)
   — AMC bring-up reused by the `amc` exe flows (§5).
-- [`laptop/scripts/99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh)
+- [`laptop/scripts/99_stop_all.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/99_stop_all.sh)
   — teardown logic ported into the `--stop` / `--stop-all` modes (§3.4).
-- [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml)
+- [`installer/mv3dt_installer/assets/cameras/cameras.yml`](../mv3dt_installer/assets/cameras/cameras.yml)
   — camera inventory format; the ping sweep consumes the **generated**
   inventory named by `CAMERAS_FILE`, not this committed file (§3.3).
-- [`laptop/scripts/60_record_tracking.sh`](../../laptop/scripts/60_record_tracking.sh)
+- [`installer/mv3dt_installer/assets/scripts/60_record_tracking.sh`](../mv3dt_installer/assets/scripts/60_record_tracking.sh)
   — the tracking recorder bundled into the installer binary and owned by the
   generated `record-<slug>` exe (§1.2).
-- [`laptop/scripts/20_verify_cameras.sh`](../../laptop/scripts/20_verify_cameras.sh)
+- [`laptop/scripts/20_verify_cameras.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/20_verify_cameras.sh)
   — origin of the `ffprobe`-over-RTSP check, now carried by the camera
   discovery module's `stream_ok` probe (§3.3).
-- [`laptop/docs/SCRIPTED-WORKFLOW.md`](../../laptop/docs/SCRIPTED-WORKFLOW.md)
+- [`laptop/docs/SCRIPTED-WORKFLOW.md`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/docs/SCRIPTED-WORKFLOW.md)
   — §10 startup sequence and §10.2 validation helpers (§6).
 
 ---

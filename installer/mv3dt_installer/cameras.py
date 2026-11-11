@@ -5,7 +5,7 @@ LOCKED: the MAC is the camera's identity. Every merge, every lookup, and
 every persisted binding keys on the MAC address, never on the IP -- the
 fleet self-assigns volatile 169.254.0.0/16 link-local addresses with no
 DHCP server, so a camera can (and does) land on a different address after a
-power cycle. See laptop/config/cameras.yml's own header for the fleet
+power cycle. See assets/cameras/cameras.yml's own header for the fleet
 facts this module exists to survive.
 
 Public API (doc 00 §15.6):
@@ -15,7 +15,7 @@ Public API (doc 00 §15.6):
     parse_inventory(text) -> list[Camera] -- hand-rolled parser (not
         PyYAML-backed, matching the packaging reason doc 00 §4.1 gives for
         avoiding new PyInstaller hidden-import surface); tolerant of the
-        committed laptop/config/cameras.yml seed, which has no `mac:` field.
+        committed assets/cameras/cameras.yml seed, which has no `mac:` field.
     render_inventory(cameras, *, header) -> str -- round-trips with
         parse_inventory.
     candidate_interfaces(*, runner=..., net_dir=...) -> list[str]
@@ -86,7 +86,7 @@ Runner = Callable[..., "subprocess.CompletedProcess"]
 CAMERA_OUI = "d0:3b:f4"
 # doc 00 §15.2: the fleet's self-assigned link-local range.
 DEFAULT_SCAN_CIDR = "169.254.0.0/16"
-# Seed inventory positions (laptop/config/cameras.yml), doc 00 §15.4.
+# Seed inventory positions (assets/cameras/cameras.yml), doc 00 §15.4.
 KNOWN_POSITIONS = (
     "top-left",
     "top-right",

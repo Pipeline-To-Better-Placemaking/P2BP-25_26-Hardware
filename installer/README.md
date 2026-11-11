@@ -35,7 +35,9 @@ installer from a clone want [§8](#8-developer-workflow).
 [`00` §2](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#2-executable-form-locked): one
 PyInstaller `--onefile` executable containing the Python framework, the
 bundled bash fragments, and the DeepStream/Mosquitto config templates it
-needs. It supersedes the numbered `laptop/scripts/` harness for operator use.
+needs. It superseded the numbered `laptop/scripts/` developer harness, which
+has since been removed from the repo
+([`DELETION-REVIEW` §9](plan/DELETION-REVIEW.md#9-removal-of-the-laptop-harness)).
 
 It is a **resumable state machine**
 ([`00` §6](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#6-resumable-state-machine)):
@@ -59,7 +61,7 @@ it a second time is always safe.
 | OS | Ubuntu 24.04 LTS | The release binary is built on a pinned `ubuntu-24.04` runner and links against that release's glibc ([`00` §4.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#41-what-builds-the-binary)) |
 | Architecture | `x86_64` | The only architecture the release build targets |
 | Privilege | `sudo` from a real login user, not a bare root shell | Package installs and writes to `/etc/profile.d` and `/var/lib` ([`00` §9.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#91-privilege-handling)) |
-| GPU | NVIDIA, Ampere or newer | DeepStream 9.1 pins ([`laptop/docs/DEEPSTREAM-SETUP.md`](../laptop/docs/DEEPSTREAM-SETUP.md)) |
+| GPU | NVIDIA, Ampere or newer | DeepStream 9.1 pins ([`DEEPSTREAM-SETUP.md`](plan/DEEPSTREAM-SETUP.md)) |
 | Network | Outbound HTTPS | Package repositories, the DS SDK release assets, and the NGC model fetch |
 
 Run the installer under `sudo` from your normal user account. It resolves the
@@ -233,8 +235,8 @@ required value that is missing fails the run rather than blocking on a human.
 > tool before the installer runs. See
 > [`00` §13](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#13-out-of-scope--defer-to-human)
 > and the header of
-> [`laptop/config/cameras.yml`](../laptop/config/cameras.yml), which is the
-> record of the fleet's hardware facts.
+> [`assets/cameras/cameras.yml`](mv3dt_installer/assets/cameras/cameras.yml),
+> which is the record of the fleet's hardware facts.
 
 ---
 
@@ -375,11 +377,8 @@ release job for anything an operator will run.
   that: [`STEP-1`](plan/STEP-1-PREREQUISITES.md) through
   [`STEP-7`](plan/STEP-7-WEBAPP-INTEGRATION.md).
 - **The DeepStream 9.1 version pins** and the manual NVIDIA prerequisites —
-  [`laptop/docs/DEEPSTREAM-SETUP.md`](../laptop/docs/DEEPSTREAM-SETUP.md) is
-  the source of truth.
-- **The scripted `laptop/` harness**, which remains a developer tool and is
-  not the operator path; see
-  [`laptop/docs/SCRIPTED-WORKFLOW.md`](../laptop/docs/SCRIPTED-WORKFLOW.md).
+  [`plan/DEEPSTREAM-SETUP.md`](plan/DEEPSTREAM-SETUP.md) is the source of
+  truth.
 - **Camera activation, OSD, and stream-profile setup**, which stay manual
   ([`00` §13](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#13-out-of-scope--defer-to-human)).
 
@@ -414,10 +413,10 @@ Repo files referenced:
   release job: tag-triggered build, version gate, and asset publish.
 - [`installer/plan/DEVELOPMENT-STATUS.md`](plan/DEVELOPMENT-STATUS.md) —
   what remains, and what has actually been proven on the workstation.
-- [`laptop/config/cameras.yml`](../laptop/config/cameras.yml) — the camera
-  inventory and the record of the fleet's hardware facts and required manual
-  pre-flight.
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](../laptop/docs/DEEPSTREAM-SETUP.md) —
-  DS 9.1 package pins and the manual NVIDIA prerequisites.
-- [`laptop/docs/SCRIPTED-WORKFLOW.md`](../laptop/docs/SCRIPTED-WORKFLOW.md) —
-  the developer-side scripted harness the binary supersedes for operators.
+- [`installer/mv3dt_installer/assets/cameras/cameras.yml`](mv3dt_installer/assets/cameras/cameras.yml)
+  — the bundled camera inventory seed and the record of the fleet's hardware
+  facts and required manual pre-flight.
+- [`installer/plan/DEEPSTREAM-SETUP.md`](plan/DEEPSTREAM-SETUP.md) — DS 9.1
+  package pins and the manual NVIDIA prerequisites.
+- [`installer/plan/DELETION-REVIEW.md`](plan/DELETION-REVIEW.md) — §9 records
+  the removal of the `laptop/` developer harness the binary superseded.

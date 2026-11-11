@@ -4,9 +4,9 @@
 The key is captured once in the onboarding stage (doc 00 §5.2) and consumed
 later by Step 2 (PeopleNet model fetch, Docker install method) and any other
 NGC-gated step, via `load_key()` / `configure_ngc_cli()`. The key is
-REQUIRED: `capture_key()` never returns without one. This module is a
-self-contained sibling of laptop/ (doc 00 §3.1) and of steps/ (doc 00 §9.3)
--- it does not import from either, and adds no step1-7 business logic.
+REQUIRED: `capture_key()` never returns without one. This module is
+self-contained (doc 00 §3.1) and a sibling of steps/ (doc 00 §9.3) -- it
+does not import from steps/, and adds no step1-7 business logic.
 
 Storage contract (doc 00 §10.1):
     Canonical secret file: `<install_dir>/secrets/ngc.env`, owned by the

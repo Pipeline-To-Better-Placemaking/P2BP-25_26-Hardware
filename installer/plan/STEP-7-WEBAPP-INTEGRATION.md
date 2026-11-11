@@ -472,8 +472,8 @@ read them from `installer.conf` so a deployment can retarget without a rebuild.
 > `record_cameras_mp4.sh` are not bundled into the binary, and nothing on the
 > workstation renders them. The web app renders its own visualizations from the
 > uploaded `tracks.jsonl` / `tracks.csv`, which keeps a matplotlib dependency
-> out of the release build. Both scripts remain in `laptop/scripts/` as
-> developer tools.
+> out of the release build. Both scripts were removed with the `laptop/`
+> harness ([`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness)).
 
 ### E.2 Dedupe and upload state
 
@@ -920,9 +920,11 @@ Repo files referenced:
   the precedent for flagging credential provisioning.
 - [`DELETION-REVIEW.md`](DELETION-REVIEW.md) — §3.2 lists the five behaviors
   this document must capture before the source files are removed.
-- [`laptop/scripts/60_record_tracking.sh`](../../laptop/scripts/60_record_tracking.sh)
+- [`installer/mv3dt_installer/assets/scripts/60_record_tracking.sh`](../mv3dt_installer/assets/scripts/60_record_tracking.sh)
   — the sole script-based artifact producer in
-  [§E.1](#e1-what-gets-uploaded); bundled into the installer binary and driven
+  [§E.1](#e1-what-gets-uploaded), ported from the removed
+  [`laptop/scripts/60_record_tracking.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/60_record_tracking.sh);
+  bundled into the installer binary and driven
   by the generated `record-<slug>` exe
   ([`STEP-5` §1.2](STEP-5-PER-PROJECT-EXES.md#12-outputs-what-step-5-writes)),
   writing into `<install_dir>/tracking_exports/`.

@@ -1153,7 +1153,7 @@ class Step1Prerequisites:
                 message=(
                     f"unsupported platform: Ubuntu {os_version or '?'} / {arch or '?'} "
                     "(Step 1 requires Ubuntu 24.04 / x86_64; see "
-                    "laptop/docs/DEEPSTREAM-SETUP.md sections 2-3)"
+                    "installer/plan/DEEPSTREAM-SETUP.md sections 2-3)"
                 ),
             )
         if not _gpu_present(ctx):

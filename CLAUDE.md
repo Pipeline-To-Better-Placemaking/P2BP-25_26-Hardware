@@ -6,18 +6,12 @@ Guidance for Claude Code when working in this repository.
 
 P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 3D tracking system (MV3DT). It is now a **single subsystem**: the DeepStream
-9.1 workstation.
-
-1. **`installer/`** — the `mv3dt-installer` binary, the operator path. All
-   seven steps are implemented and released; the specs live in
-   `installer/plan/`. Steps 1–5 cover install and per-project pipelines;
-   `STEP-6` adds systemd supervision + MQTT remote control; `STEP-7` adds the
-   HTTP web-app data plane. Start at
-   [`installer/README.md`](installer/README.md).
-2. **DeepStream 9.1 harness** (`laptop/`) — the developer-only scripted
-   workflow the binary supersedes. See
-   [`laptop/README.md`](laptop/README.md) and
-   [`laptop/docs/SCRIPTED-WORKFLOW.md`](laptop/docs/SCRIPTED-WORKFLOW.md).
+9.1 workstation, installed and run entirely by **`installer/`** — the
+`mv3dt-installer` binary, the operator path. All seven steps are implemented
+and released; the specs live in `installer/plan/`. Steps 1–5 cover install
+and per-project pipelines; `STEP-6` adds systemd supervision + MQTT remote
+control; `STEP-7` adds the HTTP web-app data plane. Start at
+[`installer/README.md`](installer/README.md).
 
 > **Shipped is not validated.** What has actually run on the workstation —
 > and what has not, such as a completed calibration — is the dated table in
@@ -33,6 +27,12 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 > before deleting or resurrecting anything** — it records what went, why, and
 > where each pattern landed. The originals remain in this repository's git
 > history, before their deletion commit.
+
+> **The `laptop/` developer harness has been removed too** (numbered
+> scripts, `laptop/config/`, `laptop/mosquitto/`, its docs). The binary
+> superseded it; every piece still needed lives under `installer/` now. See
+> [`DELETION-REVIEW.md` §9](installer/plan/DELETION-REVIEW.md#9-removal-of-the-laptop-harness)
+> for where each piece went; the originals are in git history at `57adf5d`.
 
 ## Working in this repo
 
@@ -50,37 +50,26 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
   verifies the checksum, and runs it. **Nothing clones this repo onto a
   workstation** — don't write a doc, script, or step that assumes a checkout
   is present at run time.
-- `laptop/scripts/` is the **developer harness**: numbered (`00_` … `99_`),
-  run in order from a clone, each idempotent. It is how this repo is exercised
-  by hand, not how an operator installs anything. See the script table in
-  [`laptop/docs/SCRIPTED-WORKFLOW.md`](laptop/docs/SCRIPTED-WORKFLOW.md).
-- **Exactly two `laptop/scripts/` entries are bundled into the binary:**
-  `10_setup_mosquitto.sh` (owned by `STEP-1` §3.2) and `60_record_tracking.sh`
-  (producer of the `tracks.jsonl` / `tracks.csv` / `summary.json` artifacts
-  `STEP-7` §E.1 uploads). Their **authoritative copies live under
-  `installer/mv3dt_installer/assets/scripts/`** (landed by U12,
-  `feat/installer-bundled-scripts`); the `laptop/` originals stay
-  developer-only and are not kept in sync automatically. Everything else is
-  either superseded by a step or dropped from the binary —
-  `70_plot_floorplan.py` (matplotlib bloat; the web app visualizes),
-  `record_cameras_mp4.sh`, `view_cameras.sh`, and `20_verify_cameras.sh` as an
-  operator-run script (its `ffprobe`-over-RTSP check moves into `cameras.py`
-  as an RTSP probe). `40_export_watcher.sh` is superseded operationally by the
-  STEP-4 auto-ingest. All dropped scripts stay in git as developer tools;
-  the full table is
+- **The binary bundles the whole `installer/mv3dt_installer/assets/` tree**,
+  shell helpers included. Exactly two former harness scripts were ported into
+  it: `10_setup_mosquitto.sh` (owned by `STEP-1` §3.2) and
+  `60_record_tracking.sh` (producer of the `tracks.jsonl` / `tracks.csv` /
+  `summary.json` artifacts `STEP-7` §E.1 uploads). They now exist only under
+  `assets/scripts/`, alongside a purpose-written `lib/common.sh`. Every other
+  former `laptop/scripts/` entry was ported into a step or dropped; the
+  per-script table is
   [`DELETION-REVIEW.md` §8](installer/plan/DELETION-REVIEW.md#8-script-disposition-under-the-binary-distribution).
 - PeopleNet is the only detector wired into the DeepStream pipeline; `yolo11n`
   is reserved for future work — don't add YOLO wiring without being asked.
-- [`laptop/config/cameras.yml`](laptop/config/cameras.yml) is the camera
-  inventory **and** the record of the fleet's hardware facts (MACs, native
-  3072x1728 sensor resolution, the configured 1920x1080 main stream,
-  vendor/firmware, required manual pre-flight). Its header is load-bearing
-  documentation, not commentary. Note its caveat: the pinned `169.254.*`
-  link-local IPs are volatile. The binary bundles a tracked copy at
-  `installer/mv3dt_installer/assets/cameras/cameras.yml`; keep the header of
-  both copies in sync by hand.
-- `laptop/config/` is explicitly allowlisted in `.gitignore`; `laptop.env`
-  (operator secrets) is not committed — only `laptop.env.example` is.
+- [`installer/mv3dt_installer/assets/cameras/cameras.yml`](installer/mv3dt_installer/assets/cameras/cameras.yml)
+  is the authoritative camera inventory seed **and** the record of the
+  fleet's hardware facts (MACs, native 3072x1728 sensor resolution, the
+  configured 1920x1080 main stream, vendor/firmware, required manual
+  pre-flight). Its header is load-bearing documentation, not commentary: the
+  installer copies it into every generated `<install_dir>/cameras.yml`. Note
+  its caveat: the pinned `169.254.*` link-local IPs are volatile.
+- Operator secrets are never committed: the installer writes them under
+  `<install_dir>/secrets/`, which `installer/.gitignore` excludes.
 - Line endings are enforced LF via `.gitattributes`; images/weights/binaries
   are marked binary there — don't hand-edit or re-encode those.
 - Whenever creating a git commit in this repo — a plain commit, a
@@ -100,7 +89,7 @@ P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 Whenever creating or substantially editing a Markdown doc in this repo, use
 the `markdown-docs` skill to match the house style established by
 [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md)
-and [`laptop/docs/SCRIPTED-WORKFLOW.md`](laptop/docs/SCRIPTED-WORKFLOW.md).
+and the other `installer/plan/` specs.
 
 ## Reference docs
 
@@ -110,10 +99,6 @@ and [`laptop/docs/SCRIPTED-WORKFLOW.md`](laptop/docs/SCRIPTED-WORKFLOW.md).
 - [`installer/plan/STEP-1…STEP-7`](installer/plan/) — per-step specs; STEP-6
   is the MQTT control plane, STEP-7 the HTTP data plane.
 - [`installer/plan/DELETION-REVIEW.md`](installer/plan/DELETION-REVIEW.md) —
-  what was removed from this fork and why.
-- [`laptop/docs/SCRIPTED-WORKFLOW.md`](laptop/docs/SCRIPTED-WORKFLOW.md) —
-  developer harness guide + script run order + flow diagram.
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](laptop/docs/DEEPSTREAM-SETUP.md) — DS 9.1
-  package/OS setup and AMC workflow; source of truth for version pins.
-- [`laptop/docs/SCRIPTS-AND-CONFIG-REFERENCE.md`](laptop/docs/SCRIPTS-AND-CONFIG-REFERENCE.md)
-  — per-script/config field reference.
+  what was removed from this fork and why, including the `laptop/` harness.
+- [`installer/plan/DEEPSTREAM-SETUP.md`](installer/plan/DEEPSTREAM-SETUP.md) —
+  DS 9.1 package/OS setup and AMC workflow; source of truth for version pins.

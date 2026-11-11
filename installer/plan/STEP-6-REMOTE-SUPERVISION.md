@@ -87,7 +87,7 @@ Scope, from the product owner (LOCKED):
   (Step 5 §3.3), refactored here into a systemctl controller ([§A.2](#a2-step-5-handoff--the-pipeline-slug-exe-becomes-a-systemctl-controller)).
 - The Mosquitto broker installed by
   [`STEP-1` §3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker) from the bundled
-  [`mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf), TCP
+  [`mv3dt.conf`](../mv3dt_installer/assets/mosquitto/mv3dt.conf), TCP
   `1883` + WebSocket `9001`.
 
 ### 1.2 Outputs (what Step 6 writes)
@@ -188,7 +188,7 @@ Notes:
 - **`ExecStart` = ported `50_start_pipeline.sh`.** The service does not run
   the bash script directly; it invokes the Step 5 `pipeline` subcommand in a
   new `--service-exec` mode that runs the same steps
-  [`50_start_pipeline.sh`](../../laptop/scripts/50_start_pipeline.sh) does —
+  [`50_start_pipeline.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/50_start_pipeline.sh) does —
   `ensure_mosquitto()` (lines 112–132), `. /etc/profile.d/deepstream.sh`
   (lines 201–210), then `exec deepstream-app -c <rendered_config>` (lines
   374–401) — but **non-interactively**: no ping-sweep gating, no
@@ -196,7 +196,7 @@ Notes:
   logging to journald instead. `deepstream-app -c <config>` is the DS 9.1
   entry point (see [References](#9-references)).
 - **No `ExecStop`; teardown is ported `99_stop_all.sh`.** SIGTERM → wait →
-  SIGKILL ([`99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh) lines
+  SIGKILL ([`99_stop_all.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/99_stop_all.sh) lines
   62–78); systemd's `KillSignal=SIGTERM` + `TimeoutStopSec=10` gives the same
   graceful-then-forced behavior to the one pipeline instance, and never
   touches the shared broker (`mosquitto.service`). An earlier draft set
@@ -584,7 +584,6 @@ the cloud endpoint as human-provided:
 bridge, because the repo already standardizes on a local broker for MV3DT
 telemetry. The **cloud broker endpoint + credentials are human-provided
 config**, never hardcoded: they live in
-[`laptop/config/laptop.env`](../../laptop/config/laptop.env.example) /
 `<install_dir>/installer.conf` as `MV3DT_CLOUD_BROKER_HOST`,
 `MV3DT_CLOUD_BROKER_PORT`, `MV3DT_CLOUD_BROKER_USER`,
 `MV3DT_CLOUD_BROKER_PASS` (secret → `agent.env`, `chmod 600`, §D). If they are
@@ -803,12 +802,12 @@ projects added/removed via Step 5 are reflected without restarting the agent.
 
 ## D. Security (remote control MUST be authenticated)
 
-The committed [`mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf) uses
+The committed [`mv3dt.conf`](../mv3dt_installer/assets/mosquitto/mv3dt.conf) uses
 `allow_anonymous true` on `1883 0.0.0.0` + `9001` — the deliberate
 "simple-testing" posture (its own header says so). For **remote control that
 can start/stop production pipelines, this is insufficient**: anyone reaching
 the broker could command the desktop. Step 6 requires the hardened posture
-from [`DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md) §6
+from [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md) §6
 "Production hardening" (`password_file`, `acl_file`, bound listeners) whenever
 remote mode is enabled.
 
@@ -827,7 +826,7 @@ remote mode is enabled.
 
   The agent authenticates with a dedicated username/password stored in
   `<install_dir>/agent/agent.env` (`chmod 600`, chowned to the invoking user,
-  gitignored like `laptop/config/laptop.env` per framework §10.1).
+  gitignored like the other operator secrets per framework §10.1).
 
 - **ACL restricting the agent to its own subtree.** Extend the minimal ACL
   from DEEPSTREAM-SETUP.md §6 to pin the agent to only `mv3dt/<HOST_ID>/#`:
@@ -883,7 +882,7 @@ Implements the `Step` protocol (framework §12.1).
   [`STEP-1` §3.2](STEP-1-PREREQUISITES.md#32-mosquitto-broker), which owns the
   broker daemon and its `/etc/mosquitto/conf.d/mv3dt.conf` drop-in. The
   remediation is "re-run the installer so Step 1 reinstalls the broker", not
-  "run a laptop setup script by hand" — the operator never invokes a script
+  "run a setup script by hand" — the operator never invokes a script
   directly.
 - Confirm `systemctl` is present and the installer is root (framework §9.1).
 - If remote mode is opted in ([§E.2](#e2-gating-opt-in)) but the cloud broker
@@ -1033,15 +1032,15 @@ the logic Step 6 supervises/ports — **not** DeepStream docs):
 - [`STEP-5-PER-PROJECT-EXES.md`](STEP-5-PER-PROJECT-EXES.md) — the
   `pipeline-<slug>` exe, `pipeline` subcommand, and `registry.json` Step 6
   supervises; §3/§5.4/§9 are the handoff points that must change.
-- [`laptop/scripts/50_start_pipeline.sh`](../../laptop/scripts/50_start_pipeline.sh)
+- [`laptop/scripts/50_start_pipeline.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/50_start_pipeline.sh)
   — start logic ported into the unit `ExecStart` (`--service-exec`).
-- [`laptop/scripts/99_stop_all.sh`](../../laptop/scripts/99_stop_all.sh)
+- [`laptop/scripts/99_stop_all.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/99_stop_all.sh)
   — SIGTERM→SIGKILL teardown mirrored by
   `KillSignal`+`TimeoutStopSec`.
-- [`laptop/mosquitto/mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf) — the
+- [`installer/mv3dt_installer/assets/mosquitto/mv3dt.conf`](../mv3dt_installer/assets/mosquitto/mv3dt.conf) — the
   simple-testing broker posture (`allow_anonymous true`, `1883`+`9001`) the
   agent connects to; hardened for remote mode.
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md)
+- [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md)
   §6 — Mosquitto "Production hardening" (`password_file`, `acl_file`, bound
   listeners) required for remote mode ([§D](#d-security-remote-control-must-be-authenticated)).
 - [`STEP-7-WEBAPP-INTEGRATION.md`](STEP-7-WEBAPP-INTEGRATION.md) — the HTTP

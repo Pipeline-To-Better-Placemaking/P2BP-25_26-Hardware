@@ -3,8 +3,8 @@ display contract for mv3dt-installer (doc 00 §9.1-9.4).
 
 Mirrors the *behavior* of laptop/scripts/lib/common.sh's `require_root` and
 the `$SUDO_USER` handling in `00_bootstrap.sh`, re-expressed for the unified
-installer. This module is a self-contained sibling of laptop/ (doc 00 §3.1)
-and of steps/ (doc 00 §9.3) — it does not import from either.
+installer. This module is self-contained (doc 00 §3.1) and a sibling of
+steps/ (doc 00 §9.3) — it does not import from steps/.
 
 Public API:
     require_root() -- exit (via logs.die) unless running as uid 0.

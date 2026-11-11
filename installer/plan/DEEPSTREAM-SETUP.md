@@ -4,7 +4,7 @@ This document is the **DS 9.1 laptop setup reference** for the scripted
 testing harness. It is a standalone mirror of Notion page
 `337b5d58-7212-81e1-b07a-d510d9605bbb`: §1–4 are manual prerequisites that
 operators complete **outside this repo** before running any script; §5–10
-are the parts that [`laptop/scripts/`](../scripts/) automates.
+are the parts that [`laptop/scripts/`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop/scripts/) automates.
 
 Every external DS 9.1 URL in this doc is drawn from
 [`.cursor/skills/deepstream-9-docs/reference.md`](../../.cursor/skills/deepstream-9-docs/reference.md)
@@ -15,7 +15,7 @@ DS 9.1 documentation before being written.
 This doc and [`my-docs/02-LAPTOP-DEEPSTREAM-SETUP.md`](../../my-docs/02-LAPTOP-DEEPSTREAM-SETUP.md)
 are both DS 9.1 references kept in sync against the
 [DS 9.1 Installation page](https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_Installation.html).
-This doc is scoped to the scripted harness under [`laptop/scripts/`](../scripts/);
+This doc is scoped to the scripted harness under [`laptop/scripts/`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop/scripts/);
 `my-docs/02` is the long-form operator manual. The two share the same driver /
 CUDA / TensorRT / DS 9.1 pins (§4, §5) — if one is edited, re-sync the other.
 
@@ -53,7 +53,7 @@ driver / CUDA / TRT minors):
 The laptop must be booted into Ubuntu 24.04 **before** cloning this repo.
 Sections §1–§3 (hardware, BIOS, dual-boot) are manual. The full NVIDIA driver,
 CUDA, cuDNN, and TensorRT stack in §4 is **automated** by
-[`laptop/scripts/00_bootstrap.sh`](../scripts/00_bootstrap.sh) (Phases 2b–3, 4,
+[`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) (Phases 2b–3, 4,
 8) once you place the required `.deb` files in `LOCAL_DEB_DIR`; see the callout
 in §4 below.
 
@@ -244,17 +244,17 @@ Run `00_bootstrap.sh` **after** you have already installed DS 9.1 from the
 > **Known drift between the current script and this doc.** This doc now
 > targets **DS 9.1** (driver `595.58.03` / CUDA `13.2` / cuDNN `9.20.0.48` /
 > TensorRT `10.16.0.72-1+cuda13.2`, deb/tar from GitHub Releases), but
-> [`laptop/scripts/00_bootstrap.sh`](../scripts/00_bootstrap.sh) and
-> [`laptop/deepstream/*`](../deepstream/) have **not yet been updated** to
+> [`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) and
+> [`laptop/deepstream/*`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop/deepstream/) have **not yet been updated** to
 > match — the script still targets the older DS 9.0 pins and downloads the DS
 > 9.0 `.deb` via the NGC CLI (`ngc registry resource download-version`), and
 > its preflight thresholds predate even that GA release. Running the script
 > as-is will install DS 9.0, not the DS 9.1 this doc now describes. Re-sync
 > `laptop/scripts/00_bootstrap.sh` (and the hardcoded
 > `/opt/nvidia/deepstream/deepstream-9.0` paths in
-> [`laptop/deepstream/deepstream_app_config.txt`](../deepstream/deepstream_app_config.txt)
+> [`laptop/deepstream/deepstream_app_config.txt`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/deepstream/deepstream_app_config.txt)
 > and
-> [`config_tracker_NvMOT.yml`](../deepstream/config_tracker_NvMOT.yml))
+> [`config_tracker_NvMOT.yml`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/deepstream/config_tracker_NvMOT.yml))
 > against the values in §4–§5 before running it end-to-end.
 
 Reference docs (via the skill catalog):
@@ -282,7 +282,7 @@ Per the [skill's quick-reference table](../../.cursor/skills/deepstream-9-docs/r
 | `pyds` (Python bindings) deprecated in favor of `pyservicemaker` | No Python pipeline code. All pipeline assembly is via `deepstream-app` configs. |
 | Graph Composer removed | N/A — we author configs by hand. |
 | TF/UFF/Caffe model formats removed | PeopleNet ETLT still works (TAO-encrypted format is not UFF). |
-| INT8 calibration removed (TAO) | [`config_infer_primary.txt`](../deepstream/config_infer_primary.txt) honours the PeopleNet INT8 cache if present; flip `network-mode=2` (FP16) if you hit issues. |
+| INT8 calibration removed (TAO) | [`config_infer_primary.txt`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/deepstream/config_infer_primary.txt) honours the PeopleNet INT8 cache if present; flip `network-mode=2` (FP16) if you hit issues. |
 | YOLOv3/v4, SSD, FasterRCNN removed | Not used — PeopleNet only. |
 | DLA not supported on Jetson Thor | N/A (this is the laptop harness). |
 | `Gst-nveglglessink` deprecated in favor of `Gst-nv3dsink` | Jetson-only; not applicable to this x86_64 dGPU harness. |
@@ -291,7 +291,7 @@ Per the [skill's quick-reference table](../../.cursor/skills/deepstream-9-docs/r
 
 `00_bootstrap.sh` installs `mosquitto` and `mosquitto-clients`.
 `10_setup_mosquitto.sh` installs
-[`laptop/mosquitto/mv3dt.conf`](../mosquitto/mv3dt.conf) into
+[`laptop/mosquitto/mv3dt.conf`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/mosquitto/mv3dt.conf) into
 `/etc/mosquitto/conf.d/mv3dt.conf` and restarts the service.
 
 ### `mv3dt.conf` (simple-testing posture)
@@ -377,7 +377,7 @@ camera's own web UI. Assign:
 | C8 | 192.168.10.108 | `/stream1` |
 
 All eight rows (including the `position` label and the `enabled` flag) are
-encoded in [`laptop/config/cameras.yml`](../config/cameras.yml). Override
+encoded in [`laptop/config/cameras.yml`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/cameras.yml). Override
 `rtsp_path` per camera for mixed fleets.
 
 ### §7.5  Verification (automated)
@@ -416,12 +416,12 @@ The script:
    the repo working tree). **Known drift:** this still clones the old
    standalone repo rather than a sparse checkout of the `NVIDIA/DeepStream`
    monorepo's `tools/auto-magic-calib` — re-sync before relying on it, per
-   [`installer/plan/STEP-3-AMC-LAUNCHER.md` §4](../../installer/plan/STEP-3-AMC-LAUNCHER.md).
+   [`installer/plan/STEP-3-AMC-LAUNCHER.md` §4](STEP-3-AMC-LAUNCHER.md).
 2. Creates `projects/` and `models/` subdirs and `chown 1000:1000`s them
    (Notion §8.3 — the in-container UID is 1000).
 3. `docker login nvcr.io` using `NGC_API_KEY` if set.
 4. Writes `$HOME/auto-magic-calib/compose/.env` from
-   [`laptop/config/laptop.env`](../config/laptop.env.example) with:
+   [`laptop/config/laptop.env`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/laptop.env.example) with:
    - `HOST_IP`
    - `AUTO_MAGIC_CALIB_MS_PORT=8000`
    - `AUTO_MAGIC_CALIB_UI_PORT=5000`
@@ -469,7 +469,7 @@ Reference:
 3. Renders `laptop/deepstream/deepstream_app_config.rendered.txt` from the
    committed template, substituting `${CAM_USER}` / `${CAM_PASSWORD}` /
    `${LOCATION_ID}` and rewriting each `[sourceN]` `uri=...` with the per-
-   camera URL from [`cameras.yml`](../config/cameras.yml).
+   camera URL from [`cameras.yml`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/cameras.yml).
 
 ## §9  MV3DT directory layout + models  _(PeopleNet: Phase 10 of `00_bootstrap.sh`)_
 
@@ -502,7 +502,7 @@ ngc registry model download-version "$PEOPLENET_NGC_TAG"
 
 into `laptop/deepstream/models/peoplenet/` and writes `labels.txt`
 (`person`, `bag`, `face`). Override the NGC tag via `PEOPLENET_NGC_TAG` in
-[`laptop.env`](../config/laptop.env.example) without editing the script.
+[`laptop.env`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/laptop.env.example) without editing the script.
 
 #### yolo11n — future work, NOT installed
 
@@ -529,7 +529,7 @@ exported, or configured by any script in this plan. See the
 ### NvMultiObjectTracker YAML (reference view)
 
 Full template:
-[`laptop/deepstream/config_tracker_NvMOT.yml`](../deepstream/config_tracker_NvMOT.yml).
+[`laptop/deepstream/config_tracker_NvMOT.yml`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/deepstream/config_tracker_NvMOT.yml).
 Key blocks:
 
 ```yaml
@@ -562,7 +562,7 @@ bash laptop/scripts/50_start_pipeline.sh
 Internally:
 
 1. `sudo systemctl start mosquitto` (idempotent).
-2. Ping-sweep C1..C8 from [`cameras.yml`](../config/cameras.yml).
+2. Ping-sweep C1..C8 from [`cameras.yml`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/cameras.yml).
 3. Source `/etc/profile.d/deepstream.sh`.
 4. `cd laptop/deepstream/ && exec deepstream-app -c deepstream_app_config.rendered.txt`.
 

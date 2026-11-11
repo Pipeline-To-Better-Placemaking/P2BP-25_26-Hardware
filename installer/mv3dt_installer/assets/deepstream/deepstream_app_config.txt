@@ -1,15 +1,15 @@
-# laptop/deepstream/deepstream_app_config.txt
+# installer/mv3dt_installer/assets/deepstream/deepstream_app_config.txt
 #
-# DeepStream 9.0 MV3DT pipeline template for the laptop-side scripted
-# testing harness. Eight RTSP sources (C1..C8; IPs from laptop/config/cameras.yml)
+# DeepStream 9.0 MV3DT pipeline template bundled into mv3dt-installer.
+# Eight RTSP sources (C1..C8; IPs from <install_dir>/cameras.yml)
 # through a single nvstreammux (batch=8) into nvinfer (PeopleNet only) into
 # the NvMultiObjectTracker shared library (NvDCF + ReID + SV3DT + MV3DT),
 # with an MQTT sink publishing SV3DT + fused MV3DT tracks to localhost.
 #
-# 40_export_watcher.sh renders this file in place after AMC produces a
-# calibration export (substituting the camera user and password from
-# secrets/camera.env and the per-camera RTSP URIs from
-# laptop/config/cameras.yml). You can also run
+# Step 4 renders this template to
+# <install_dir>/deepstream/deepstream_app_config.rendered.txt after AMC
+# produces a calibration (substituting the camera user and password and the
+# per-camera RTSP URIs from <install_dir>/cameras.yml). You can also run
 # deepstream-app against the committed copy as a syntax/sanity check with
 # placeholder credentials.
 #

@@ -9,13 +9,13 @@ sibling, non-step tooling reference on DS 9.1's Agentic Skills.
 
 This document specifies the **single self-contained installer binary** that
 unifies the loose numbered scripts under
-[`laptop/scripts/`](../../laptop/scripts/) into one resumable, CD-style
+[`laptop/scripts/`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop/scripts/) into one resumable, CD-style
 installer for a brand-new Ubuntu 24.04 workstation
 (target GPU: NVIDIA RTX PRO 4500 Blackwell) targeting DeepStream 9.1 +
 AutoMagicCalib.
 
 It supersedes and wraps-and-ports the phase logic in
-[`laptop/scripts/00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) and
+[`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) and
 the numbered runtime scripts. The DeepStream/OS reference facts come from the
 DS 9.1 docs (see [References](#references)); all version pins were
 cross-checked directly against NVIDIA's published DS 9.1 Installation page.
@@ -52,7 +52,7 @@ per-camera web-UI configuration, and anything the DS 9.1 docs mark as manual.
   the only "GUI-like" affordance is guided path selection with a default.
   No X/Wayland dependency — it must run from a TTY before the desktop is up.
 - It **supersedes / wraps-and-ports** the logic in
-  [`laptop/scripts/`](../../laptop/scripts/). Bash that still has to run
+  [`laptop/scripts/`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/tree/57adf5d/laptop/scripts/). Bash that still has to run
   verbatim (e.g. NVIDIA `update_rtpmanager.sh` invocation, apt transactions)
   is bundled as data assets and shelled out to; new orchestration lives in
   Python.
@@ -63,8 +63,10 @@ per-camera web-UI configuration, and anything the DS 9.1 docs mark as manual.
 
 ### 3.1 Module layout
 
-All installer code lives under `installer/` (a sibling of `laptop/`, so the
-existing harness is untouched during the port):
+All installer code lives under `installer/`. (It was written as a sibling of
+the former `laptop/` harness so that harness stayed untouched during the
+port; the harness has since been removed —
+[`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness).)
 
 ```
 installer/
@@ -118,7 +120,7 @@ installer/
         │   └── 49-mv3dt-agent.rules.in  # Step 6 scoped systemctl rule
         ├── cameras/
         │   └── cameras.yml         # seed inventory + fleet header (§15)
-        ├── deepstream/             # empty in git; templates added from laptop/deepstream/ at build (§4.1)
+        ├── deepstream/             # tracker/infer/app/msgconv templates (§4.1)
         └── mosquitto/              # mv3dt.conf drop-in
 ```
 
@@ -302,17 +304,13 @@ renders (§3.3). No workflow ever writes a tracked file.
 - `Analysis(['installer/mv3dt_installer/__main__.py'], ...)`.
 - `datas` bundles the runtime assets so they ship inside the binary:
   - `installer/mv3dt_installer/assets/**` → `assets/` (the whole tree, §3.1)
-    — this tree already holds tracked copies of the Mosquitto config
-    (`assets/mosquitto/mv3dt.conf`, identical to
-    [`laptop/mosquitto/mv3dt.conf`](../../laptop/mosquitto/mv3dt.conf)) and
-    the seed camera inventory §15 reads (`assets/cameras/cameras.yml`, a
-    copy of [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml)
-    differing only in its credentials comment). Neither is pulled from
-    `laptop/` at build time, so a change to the `laptop/` original must be
-    copied here by hand.
-  - the DeepStream config templates from
-    [`laptop/deepstream/`](../../laptop/deepstream/) (tracker/infer/app/msgconv),
-    the only data the spec still reads from `laptop/` at build time
+    — the only data source. It holds the Mosquitto config
+    (`assets/mosquitto/mv3dt.conf`), the seed camera inventory §15 reads
+    (`assets/cameras/cameras.yml`), and the DeepStream config templates
+    (`assets/deepstream/`: tracker/infer/app/msgconv). These are the only
+    copies; the former `laptop/` originals they were taken from are in git
+    history at `57adf5d`
+    ([`DELETION-REVIEW` §9](DELETION-REVIEW.md#9-removal-of-the-laptop-harness)).
 - `--onefile` → one executable at `dist/mv3dt-installer`. The build step
   passes `--distpath dist` with no `working-directory` override, so the
   output directory is `dist` at the **repo root**, not under `installer/`.
@@ -455,10 +453,10 @@ nothing re-prompts and the run resumes at the first non-`COMPLETE` step.
 
 - Canonical path: **`/var/lib/mv3dt-installer/state.json`** (root-owned,
   `chmod 0644`; the directory is created `chmod 0755`). This is the direct
-  successor to the existing line-based marker
+  successor to the former line-based marker
   `/var/lib/mv3dt-laptop-bootstrap.state` used by
-  [`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) via
-  [`lib/common.sh`](../../laptop/scripts/lib/common.sh)
+  [`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) via
+  [`lib/common.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/lib/common.sh)
   (`phase_done` / `mark_phase_done`); it upgrades that flat pattern to JSON so
   it can also hold reboot markers, timestamps, and the chosen install path.
 - If `--install-dir` moves the install root, the state file stays at the
@@ -586,7 +584,7 @@ which it uses.
 
 - Colour-aware, level-prefixed lines to **stderr** so stdout stays reserved
   for machine-parsable output — same discipline as
-  [`lib/common.sh`](../../laptop/scripts/lib/common.sh) (`log_info`,
+  [`lib/common.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/lib/common.sh) (`log_info`,
   `log_warn`, `log_error`, `die`). Python equivalents: `log.info/warn/error`
   and `die(msg)` (logs error + non-zero exit).
 - Every emitted line is **also** appended to the transcript (§8.2).
@@ -635,7 +633,7 @@ Helper signatures (`report.py`):
 
 A single reusable helper does equality-pinned verification, porting
 `require_version_eq` from
-[`lib/common.sh`](../../laptop/scripts/lib/common.sh):
+[`lib/common.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/lib/common.sh):
 
 - `verify_pinned(label: str, actual: str, expected: str) -> bool`
   - On match: logs `Version OK: <label> == <actual>` and returns `True`.
@@ -737,7 +735,7 @@ Three consequences, stated so they need not be re-derived:
 
 - The installer must run as **root** (installs packages, writes
   `/etc/profile.d/*`, `/var/lib/*`). `privilege.require_root()` mirrors
-  `require_root` in [`lib/common.sh`](../../laptop/scripts/lib/common.sh):
+  `require_root` in [`lib/common.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/lib/common.sh):
   exit with a clear message if `os.geteuid() != 0`.
 - The operator launches it via `sudo ./mv3dt-installer`. `-E` is **no longer
   required for the opt-in gates** — `--remote-supervision` and
@@ -750,7 +748,7 @@ Three consequences, stated so they need not be re-derived:
 ### 9.2 Resolving the invoking user / home
 
 Ported directly from the `$SUDO_USER` logic in
-[`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) (LOCAL_DEB_DIR
+[`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) (LOCAL_DEB_DIR
 resolution) and the per-user NGC handling:
 
 `privilege.resolve() -> InvokingUser` returns:
@@ -805,7 +803,7 @@ renders a single, unmissable block to stderr + transcript:
 The `REBOOT_REQUIRED` path (§7.1) renders the same frame with the reason
 "a reboot is required before the next step can run" and the same closing
 "run the installer again to continue" line, matching the reboot banners
-already in [`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh)
+already in [`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh)
 (Phases 2 and 3).
 
 ---
@@ -826,8 +824,8 @@ for the acquisition split.
   line: `NGC_API_KEY=<key>`.
 - If `<install_dir>` is inside a git working tree, the secret dir MUST be
   gitignored. Add `installer/**/secrets/` and `secrets/ngc.env` to the
-  relevant `.gitignore` (the existing
-  [`laptop/.gitignore`](../../laptop/.gitignore) already demonstrates the
+  relevant `.gitignore` (the former
+  [`laptop/.gitignore`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/.gitignore) demonstrated the
   pattern by ignoring `config/laptop.env`). The key is **NEVER** committed.
 - The key is **NEVER** written to the transcript log. Any prompt echo is
   suppressed (secret input), and any log line that would contain it prints
@@ -850,7 +848,7 @@ returns without one:
   treat a present key as guaranteed.
 - `configure_ngc_cli()` — for steps that call `ngc`, writes
   `~/.ngc/config` (`chmod 600`) as the invoking user, mirroring Phase 10 of
-  [`00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh).
+  [`00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh).
 
 **The caller is `onboarding.ensure_ngc_key()`** (§3.2, §5.2), which runs on
 every launch and must be silent after the first. Two rules make that true:
@@ -882,7 +880,7 @@ every launch and must be silent after the first. Two rules make that true:
   single source of truth — and mirrored into a small
   `<install_dir>/installer.conf` (KEY=VALUE) for human inspection and for
   bundled bash fragments (`set -a; . installer.conf`), same shape as
-  [`laptop/config/laptop.env`](../../laptop/config/laptop.env.example). It is
+  [`laptop/config/laptop.env`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/config/laptop.env.example). It is
   the file `MV3DT_INSTALLER_CONF` points staged bash at (§4.2).
 - `config.load()` resolves precedence: `--install-dir` > `state.json` >
   `installer.conf` default > `/opt/mv3dt`. Every consumer of a path under the
@@ -1049,7 +1047,7 @@ Each step doc defines its own internals but consumes only the contracts above:
 ## 13. Out of scope / defer to human
 
 - Everything the DS 9.1 Installation page treats as manual and everything in
-  Notion §1–3 / [`DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md)
+  Notion §1–3 / [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md)
   §1–3: hardware selection, BIOS (Secure Boot, virtualization, discrete-GPU
   primary), and the Ubuntu 24.04 dual-boot install itself. The installer
   assumes it is already booted into Ubuntu 24.04.
@@ -1066,7 +1064,7 @@ Each step doc defines its own internals but consumes only the contracts above:
   `USER_ACTION_REQUIRED` by Step 1, performed by the operator.
 - `ufw`, Tailscale/NoMachine, and dashboards — see the "Out of scope" /
   "Future work" sections of
-  [`SCRIPTED-WORKFLOW.md`](../../laptop/docs/SCRIPTED-WORKFLOW.md).
+  [`SCRIPTED-WORKFLOW.md`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/docs/SCRIPTED-WORKFLOW.md).
   (systemd supervision and Mosquitto ACL/password hardening are **no longer**
   out of scope — [`STEP-6`](STEP-6-REMOTE-SUPERVISION.md) owns both.)
 - **The web app itself** — its UI, its API implementation, cloud auth
@@ -1238,7 +1236,7 @@ standalone: discover, probe, bind, write both artifacts, print the table, exit.
 
 **LOCKED — the MAC is the camera's identity.** Every merge, every lookup, and
 every persisted binding keys on the MAC address, never on the IP.
-[`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) says so in its
+[`assets/cameras/cameras.yml`](../mv3dt_installer/assets/cameras/cameras.yml) says so in its
 own header ("MACs are the STABLE identifier"), and everything in this section
 follows from it.
 
@@ -1384,10 +1382,11 @@ activation / OSD pre-flight, all of which
 [`CLAUDE.md`](../../CLAUDE.md) treats as load-bearing documentation rather
 than commentary.
 
-[`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) itself **stays
-exactly where it is**, unmoved and undeleted; a tracked copy at
-`installer/mv3dt_installer/assets/cameras/cameras.yml` is what the binary
-bundles (§4.1), and that copy is used for exactly two
+The seed inventory is
+[`installer/mv3dt_installer/assets/cameras/cameras.yml`](../mv3dt_installer/assets/cameras/cameras.yml),
+the only tracked copy (the former `laptop/config/cameras.yml` it was taken
+from was removed with the harness). The binary bundles it (§4.1), and it is
+used for exactly two
 things: that header block, and its eight pinned IPs as `prime_ips` for the
 §15.2 fallback.
 
@@ -1463,21 +1462,23 @@ Prerequisites): Ubuntu 24.04, GStreamer 1.24.2, NVIDIA driver 595.58.03, CUDA
 
 Repo files referenced:
 
-- [`laptop/scripts/00_bootstrap.sh`](../../laptop/scripts/00_bootstrap.sh) —
-  phased resumable installer this binary ports.
-- [`laptop/scripts/lib/common.sh`](../../laptop/scripts/lib/common.sh) —
+- [`laptop/scripts/00_bootstrap.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/00_bootstrap.sh) —
+  phased resumable installer this binary ports (removed; permalink to
+  `57adf5d`).
+- [`laptop/scripts/lib/common.sh`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/scripts/lib/common.sh) —
   logging, `require_root`/`require_tool`, `require_version_eq`, and the
   `phase_done`/`mark_phase_done` state pattern.
-- [`laptop/docs/DEEPSTREAM-SETUP.md`](../../laptop/docs/DEEPSTREAM-SETUP.md) /
-  [`laptop/docs/SCRIPTED-WORKFLOW.md`](../../laptop/docs/SCRIPTED-WORKFLOW.md)
-  — source workflow the installer unifies.
-- [`laptop/.gitignore`](../../laptop/.gitignore) — precedent for gitignoring
+- [`DEEPSTREAM-SETUP.md`](DEEPSTREAM-SETUP.md) /
+  [`laptop/docs/SCRIPTED-WORKFLOW.md`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/docs/SCRIPTED-WORKFLOW.md)
+  — source workflow the installer unifies (the latter removed with the
+  harness; permalink to `57adf5d`).
+- [`laptop/.gitignore`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Hardware/blob/57adf5d/laptop/.gitignore) — precedent for gitignoring
   local secrets/env (`config/laptop.env`).
 - [`.github/workflows/release.yml`](../../.github/workflows/release.yml) —
   the CI build that produces and publishes the release binary (§4.1); the
   only place the binary is ever built.
-- [`laptop/config/cameras.yml`](../../laptop/config/cameras.yml) — retained
-  fleet inventory: the `d0:3b:f4` OUI, the MAC-as-identity rule, and the
+- [`installer/mv3dt_installer/assets/cameras/cameras.yml`](../mv3dt_installer/assets/cameras/cameras.yml)
+  — seed fleet inventory: the `d0:3b:f4` OUI, the MAC-as-identity rule, and the
   link-local volatility caveat that §15 exists to survive.
 - [`STEP-6-REMOTE-SUPERVISION.md`](STEP-6-REMOTE-SUPERVISION.md) — the opt-in
   control plane (§3.4 gate, §12.4 map).
