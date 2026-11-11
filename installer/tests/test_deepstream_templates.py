@@ -9,7 +9,12 @@ from __future__ import annotations
 import pathlib
 import re
 
-TEMPLATES = pathlib.Path(__file__).resolve().parents[2] / "laptop" / "deepstream"
+TEMPLATES = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "mv3dt_installer"
+    / "assets"
+    / "deepstream"
+)
 TEMPLATE_FILES = sorted(
     [*TEMPLATES.glob("*.txt"), *TEMPLATES.glob("*.yml")], key=lambda p: p.name
 )
@@ -32,6 +37,23 @@ def test_templates_exist():
         "config_infer_primary.txt",
         "msgconv_config.txt",
     } <= names
+
+
+def test_templates_resolve_through_asset_path():
+    """installer.spec ships only the package assets/ tree, so the step 4
+    templates must live there or the binary is built without them."""
+    from mv3dt_installer import shellout
+    from mv3dt_installer.steps import step4_calib_output_wiring as step4
+
+    for name in (
+        step4.APP_CONFIG_TEMPLATE_NAME,
+        step4.TRACKER_YAML_TEMPLATE_NAME,
+        step4.INFER_PRIMARY_TEMPLATE_NAME,
+        step4.MSGCONV_TEMPLATE_NAME,
+    ):
+        path = shellout.asset_path("deepstream", name)
+        assert path.is_file(), path
+        assert path.parent == TEMPLATES
 
 
 def test_no_version_specific_deepstream_paths():

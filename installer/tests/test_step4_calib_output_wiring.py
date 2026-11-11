@@ -33,7 +33,9 @@ from mv3dt_installer.steps import step3_amc_launcher as step3  # noqa: E402
 from mv3dt_installer.steps import step4_calib_output_wiring as step4  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-REAL_TEMPLATES_DIR = REPO_ROOT / "laptop" / "deepstream"
+REAL_TEMPLATES_DIR = (
+    REPO_ROOT / "installer" / "mv3dt_installer" / "assets" / "deepstream"
+)
 FAKE_BODYPOSE = b"bodypose3dnet-onnx"
 
 
