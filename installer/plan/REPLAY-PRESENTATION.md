@@ -129,7 +129,8 @@ persisted between visits.
 | Dot | each person visible at the playhead keeps today's dot and label, including the 1 s linger after their last sample |
 | Tail window | samples with timestamps in `[playhead - tail, playhead]`, plus the interpolated head at the playhead |
 | Breaks | the existing breaks apply inside the window: a gap over 2 s or a step over 1 m starts a new segment |
-| Fade | opacity rises linearly from 0 at the window start to 1 at the head, per segment, in the person's colour |
+| Fade | opacity is a function of time only: 0 at the window start rising linearly to 1 at the head, in the person's colour; a segment that starts later in the window starts partly opaque |
+| Window edge | a line between the last sample before the window and the first inside it is cut at the window start, not dropped |
 | `Full` | today's accumulated rendering, unchanged |
 | Scrubbing | moving the playhead backwards redraws correctly; nothing accumulates outside the tail window |
 
