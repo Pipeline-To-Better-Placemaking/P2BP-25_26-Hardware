@@ -129,8 +129,15 @@ Bundled under `installer/mv3dt_installer/assets/deepstream/exclusion/`:
 ### 4.2 Config format (REQUIRED)
 
 A GLib key file. One group per source index, `[source<N>]`, each with a
-`rects` key: entries `left,top,width,height` separated by `;`. Numbers are
-decimal; width and height must be greater than zero.
+`rects` key: entries `left,top,width,height` separated by `;`.
+
+| Rule | Value |
+|---|---|
+| Numbers | non-negative decimal integers (digits only, no sign, no fraction) |
+| Width, height | greater than zero |
+| Whitespace | allowed around each number and each entry |
+| Empty entries | ignored, so a trailing `;` is valid |
+| Frame bounds | not checked by the filter; Step 4 checks them ([section 7.2](#72-render-required)) |
 
 ```ini
 # Rendered by mv3dt-installer Step 4 from cameras.yml exclude_boxes.
@@ -178,9 +185,10 @@ anchor and the DeepStream version.
 ### 5.1 Procedure (REQUIRED)
 
 1. **Build dependencies**: install `libjson-glib-dev` and
-   `libgstrtspserver-1.0-dev` with apt if missing. The DS 9.1 list in
+   `libgstrtspserver-1.0-dev` with apt if missing. The list in
    [`STEP-1` section 3](STEP-1-PREREQUISITES.md#3-ds-91-41-apt-prerequisite-package-list)
-   has the runtime packages only.
+   already has `gcc`, `make` and several `-dev` packages, but not these two,
+   which only building `deepstream-test5` needs.
 2. **Build tree**: recreate `<install_dir>/build/test5-exclusion/sources/`
    and copy `apps`, `includes` and `libs` from
    `/opt/nvidia/deepstream/deepstream/sources/` into it.
@@ -195,12 +203,24 @@ anchor and the DeepStream version.
 
 ### 5.2 Stamp and update (REQUIRED)
 
-`<install_dir>/bin/mv3dt-test5-app.stamp` holds one line: the sha256 of the
-four bundled files (sorted by name, concatenated), a space, and the
-DeepStream version from `/opt/nvidia/deepstream/deepstream/version`. Step 5
-gains a `pending_update(ctx)` hook that returns
-`"bundled detection filter changed"` when the stamp is missing or differs.
-It never builds; the update run does.
+The **build key** is one line: the sha256 of the four bundled files (sorted
+by name, concatenated), a space, `EXCLUSION_PATCH_VERSION` (an integer
+constant in `step5_per_project_exes.py`, bumped whenever the
+[section 4.4](#44-hook-into-test5-required) hook logic changes), a space, and
+the DeepStream version from `/opt/nvidia/deepstream/deepstream/version`.
+
+| File | Written when | Holds |
+|---|---|---|
+| `<install_dir>/bin/mv3dt-test5-app.stamp` | a build and install succeeded | the build key it was built from |
+| `<install_dir>/bin/mv3dt-test5-app.failed` | a build failed | the build key that failed |
+
+Step 5 gains a `pending_update(ctx)` hook that returns
+`"bundled detection filter changed"` when the stamp differs from the current
+build key, **unless** `mv3dt-test5-app.failed` holds that same key. A failed
+build is therefore attempted once per release and DeepStream version, not on
+every run; `--reset-step step5_per_project_exes` forces a retry. A successful
+build deletes the `.failed` file. The hook never builds; the update run
+does.
 
 ### 5.3 Failure (REQUIRED)
 
@@ -219,7 +239,7 @@ exclusion zones are inactive.
 | Binary | `<install_dir>/bin/mv3dt-test5-app` when it exists and is executable, else `deepstream-test5-app` |
 | Arguments | unchanged |
 | Environment | `MV3DT_EXCLUSION_CONFIG=<install_dir>/deepstream/exclusion.conf` when that file exists |
-| Process name | `pgrep`/`pkill -x` match both `deepstream-test5` (the 15-character truncation) and `mv3dt-test5-app` |
+| Process name | `pgrep`/`pkill -x` match both `deepstream-test` (the 15-character truncation of `deepstream-test5-app`) and `mv3dt-test5-app` (exactly 15 characters) |
 
 The startup log line names the binary used. A restart of
 `mv3dt-pipeline@<slug>` is what applies a new config or a new build.
@@ -252,14 +272,24 @@ Step 4 renders `<install_dir>/deepstream/exclusion.conf` with the managed
 writer, alongside the other DeepStream configs. Enabled cameras are numbered
 in inventory order, the same order as `[source<N>]` in the app config. A
 camera with valid boxes gets a group; a camera with an invalid value gets a
-`warn` and no group. With no boxes anywhere the file holds only its header
-comment.
+`warn` and no group. Invalid means the
+[section 4.2](#42-config-format-required) syntax fails, or an entry does not
+fit inside the 1920x1080 frame (`left + width <= 1920`,
+`top + height <= 1080`). With no boxes anywhere the file holds only its
+header comment.
 
 ### 7.3 Re-render triggers (REQUIRED)
 
-- `_render_targets_exist()` returns false when `exclusion.conf` is missing
-  or differs from a fresh render, so `ingest` re-renders after a
-  `cameras.yml` edit even when the AMC archive is unchanged.
+`exclusion.conf` is **out of date** when it is missing, or when a fresh
+render differs from the file **and** from its pending
+`exclusion.conf.installer-new` (when one exists). Comparing with the pending
+copy stops an operator-edited file from triggering a re-render on every
+check: after one render the new version waits beside it, and the condition
+is false until `cameras.yml` changes again.
+
+- `_render_targets_exist()` returns false when `exclusion.conf` is out of
+  date, so `ingest` re-renders after a `cameras.yml` edit even when the AMC
+  archive is unchanged.
 - Step 4 gains a `pending_update(ctx)` hook returning
   `"exclusion.conf out of date"` under the same condition.
 
@@ -320,7 +350,7 @@ Open decisions:
 | E2 Filter sources | `feat/installer-exclusion-filter` | `assets/deepstream/exclusion/mv3dt_exclusion_rules.{c,h}`, `assets/deepstream/exclusion/mv3dt_exclusion.{c,h}`, `tests/test_exclusion_rules_c.py` | none | 1 |
 | E3 Inventory and render | `feat/installer-exclusion-config` | `mv3dt_installer/cameras.py`, `assets/cameras/cameras.yml`, `steps/step4_calib_output_wiring.py`, `tests/test_cameras.py`, `tests/test_step4_calib_output_wiring.py` | none | 1 |
 | E4 Fusion gate | `feat/installer-fusion-gate-1m` | `assets/deepstream/config_tracker_NvMOT.yml`, `tests/fixtures/live_baseline/config_tracker_NvMOT.yml`, `tests/test_deepstream_templates.py` | none | 1 |
-| E5 Build and launch | `feat/installer-exclusion-build` | `steps/step5_per_project_exes.py`, `tests/test_step5_per_project_exes.py` | E2 | 2 |
+| E5 Build and launch | `feat/installer-exclusion-build` | `steps/step5_per_project_exes.py`, `tests/test_step5_per_project_exes.py` | E2, E3 | 2 |
 
 Package paths are relative to `installer/mv3dt_installer/`; test paths are
 relative to `installer/`.
@@ -329,6 +359,8 @@ Serialization points:
 
 - E5 depends on E2 because it copies and hashes E2's bundled files; its
   tests read the real asset paths.
+- E5 depends on E3 because its inactive-zones warning reads
+  `Camera.exclude_boxes`, which E3 adds.
 - E3 and E5 both use the path `<install_dir>/deepstream/exclusion.conf`
   but touch different files: E3 renders it and E5 only checks it exists.
   Both pin the literal from [section 6](#6-launch-step-5-pipeline) and
