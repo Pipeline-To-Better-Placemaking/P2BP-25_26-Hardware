@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from mv3dt_installer import (
     app,
+    cameras as cameras_mod,
     config as config_mod,
     footage as footage_mod,
     logs,
@@ -1630,6 +1632,7 @@ def test_first_install_writes_and_records_every_rendered_file(tmp_path, template
         deepstream / step4.CAMERA_MODEL_DIR_NAME / "camInfo_00.yml",
         deepstream / step4.MV3DT_DIR_NAME / step4.PUB_SUB_CONFIG_NAME,
         deepstream / step4.MV3DT_DIR_NAME / step4.MQTT_CONFIG_NAME,
+        deepstream / step4.EXCLUSION_CONFIG_NAME,
         systemd.UNIT_DIR / "mv3dt-ingest-site-42.service",
         systemd.UNIT_DIR / "mv3dt-ingest-site-42.timer",
     }
@@ -1736,6 +1739,267 @@ def test_operator_edit_without_new_render_gets_no_pending(tmp_path, templates):
     assert step.run(ctx).status is StepStatus.COMPLETE
     assert tracker.read_text() == edited
     assert not managed_files.pending_path(tracker).exists()
+
+
+# -- detection exclusion zones (DETECTION-EXCLUSION-ZONES section 7) ---------
+
+EXCLUSION_HEADER = (
+    "# Rendered by mv3dt-installer Step 4 from cameras.yml exclude_boxes.\n"
+)
+
+
+def _exclusion_path(ctx):
+    return ctx.install_dir / "deepstream" / step4.EXCLUSION_CONFIG_NAME
+
+
+def _cam(camera_id, exclude_boxes=""):
+    return cameras_mod.Camera(
+        id=camera_id, mac="", ip="192.0.2.1", position="", exclude_boxes=exclude_boxes
+    )
+
+
+def _set_exclude_boxes(ctx, camera_id, value):
+    path = pathlib.Path(ctx.conf[config_mod.CAMERAS_FILE_KEY])
+    inventory = [
+        dataclasses.replace(cam, exclude_boxes=value) if cam.id == camera_id else cam
+        for cam in cameras_mod.parse_inventory(path.read_text(encoding="utf-8"))
+    ]
+    path.write_text(cameras_mod.render_inventory(inventory, header="#"), encoding="utf-8")
+
+
+def test_exclusion_config_without_boxes_is_only_the_header():
+    assert step4.render_exclusion_config([_cam("c1"), _cam("c2")]) == EXCLUSION_HEADER
+    assert step4.render_exclusion_config([]) == EXCLUSION_HEADER
+
+
+def test_exclusion_config_numbers_sources_and_normalizes_numbers():
+    text = step4.render_exclusion_config(
+        [
+            _cam("c1"),
+            _cam("c2", " 530, 175 ,245,225 ; 010,0,100,20 ;"),
+            _cam("c3", "0,0,1920,1080"),
+            _cam("c4", " ; "),
+        ]
+    )
+    assert text == (
+        EXCLUSION_HEADER
+        + "[source1]\nrects=530,175,245,225;10,0,100,20\n"
+        + "[source2]\nrects=0,0,1920,1080\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "530,175,245",
+        "530,175,245,225,1",
+        "530,,245,225",
+        "a,175,245,225",
+        "530 175 245 225",
+        "530,175,0,225",
+        "530,175,245,0",
+        "-1,175,245,225",
+        "+1,175,245,225",
+        "530.0,175,245,225",
+        "530,175,245.5,225",
+        "1e2,175,245,225",
+        "1,2,3,4;530,175,nan,225",
+        "1700,175,221,225",
+        "530,900,245,181",
+        "1921,0,1,1",
+    ],
+)
+def test_invalid_exclude_boxes_get_a_warning_and_no_group(value):
+    warnings = []
+    text = step4.render_exclusion_config(
+        [_cam("c1", "1,2,3,4"), _cam("tv-cam", value)], warn=warnings.append
+    )
+    assert text == EXCLUSION_HEADER + "[source0]\nrects=1,2,3,4\n"
+    assert len(warnings) == 1 and "tv-cam" in warnings[0]
+
+
+def test_run_renders_exclusion_config_in_app_config_source_order(
+    tmp_path, templates, capsys
+):
+    conf = _two_camera_conf(tmp_path)
+    pathlib.Path(conf[config_mod.CAMERAS_FILE_KEY]).write_text(
+        "cameras:\n"
+        "  - id: cam1\n"
+        "    ip: 192.0.2.10\n"
+        "    enabled: true\n"
+        '    exclude_boxes: "not,a,box"\n'
+        "  - id: off\n"
+        "    ip: 192.0.2.12\n"
+        "    enabled: false\n"
+        '    exclude_boxes: "9,9,9,9"\n'
+        "  - id: cam2\n"
+        "    ip: 192.0.2.11\n"
+        "    enabled: true\n"
+        '    exclude_boxes: "530,175,245,225"\n',
+        encoding="utf-8",
+    )
+    ctx = _ctx(
+        tmp_path,
+        templates,
+        runner=Runner(archive=_two_camera_archive()),
+        conf=conf,
+        non_interactive=True,
+    )
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert _exclusion_path(ctx).read_text() == (
+        EXCLUSION_HEADER + "[source1]\nrects=530,175,245,225\n"
+    )
+    app = (ctx.install_dir / "deepstream" / step4.RENDERED_APP_CONFIG_NAME).read_text()
+    assert "192.0.2.11" in step4._source_block(app, 1)
+    err = capsys.readouterr().err
+    assert "cam1" in err and "invalid exclude_boxes" in err
+
+
+def test_ingest_unchanged_archive_renders_edited_exclude_boxes(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    assert _exclusion_path(ctx).read_text() == EXCLUSION_HEADER
+    tracker_before = _tracker_path(ctx).stat().st_mtime_ns
+    _set_exclude_boxes(ctx, "cam1", "530,175,245,225")
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert _exclusion_path(ctx).read_text() == (
+        EXCLUSION_HEADER + "[source0]\nrects=530,175,245,225\n"
+    )
+    assert _tracker_path(ctx).stat().st_mtime_ns == tracker_before
+
+
+def test_ingest_unchanged_archive_renders_missing_exclusion_config(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    _exclusion_path(ctx).unlink()
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert _exclusion_path(ctx).read_text() == EXCLUSION_HEADER
+
+
+def test_pending_update_is_none_when_exclusion_config_is_current(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert step.pending_update(ctx) is None
+
+
+def test_pending_update_reports_edited_exclude_boxes(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    _set_exclude_boxes(ctx, "cam1", "530,175,245,225")
+    assert step.pending_update(ctx) == "exclusion.conf out of date"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert step.pending_update(ctx) is None
+
+
+def test_pending_update_reports_missing_exclusion_config(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    _exclusion_path(ctx).unlink()
+    assert step.pending_update(ctx) == "exclusion.conf out of date"
+
+
+def test_pending_update_is_none_when_inputs_are_incomplete(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    pathlib.Path(ctx.conf[config_mod.CAMERAS_FILE_KEY]).unlink()
+    assert step.pending_update(ctx) is None
+    del ctx.conf[config_mod.CAMERAS_FILE_KEY]
+    assert step.pending_update(ctx) is None
+
+
+def test_pending_update_accepts_kept_operator_edit_with_offered_render(
+    tmp_path, templates
+):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    _exclusion_path(ctx).write_text(EXCLUSION_HEADER + "[source0]\nrects=1,1,1,1\n")
+    _set_exclude_boxes(ctx, "cam1", "530,175,245,225")
+    assert step.pending_update(ctx) == "exclusion.conf out of date"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert "rects=1,1,1,1" in _exclusion_path(ctx).read_text()
+    pending = managed_files.pending_path(_exclusion_path(ctx))
+    assert pending.read_text() == EXCLUSION_HEADER + "[source0]\nrects=530,175,245,225\n"
+    assert step.pending_update(ctx) is None
+    assert step4._render_targets_exist(ctx, step4.default_calibration_dir(ctx, "site-42"))
+
+
+def test_ingest_leaves_kept_operator_edit_alone_once_render_is_offered(
+    tmp_path, templates, capsys
+):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    assert step4.Step4CalibOutputWiring().run(ctx).status is StepStatus.COMPLETE
+    edited = EXCLUSION_HEADER + "[source0]\nrects=1,1,1,1\n"
+    _exclusion_path(ctx).write_text(edited)
+    _set_exclude_boxes(ctx, "cam1", "530,175,245,225")
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    pending = managed_files.pending_path(_exclusion_path(ctx))
+    assert pending.is_file()
+    before = _deepstream_files(ctx)
+    capsys.readouterr()
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert _deepstream_files(ctx) == before
+    assert _exclusion_path(ctx).read_text() == edited
+    assert "nothing to render" in capsys.readouterr().err
+
+
+def test_hand_edit_with_unchanged_inventory_is_not_out_of_date(
+    tmp_path, templates, capsys
+):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    calibration_dir = step4.default_calibration_dir(ctx, "site-42")
+    edited = EXCLUSION_HEADER + "[source0]\nrects=1,1,1,1\n"
+    _exclusion_path(ctx).write_text(edited)
+    assert step.pending_update(ctx) is None
+    assert step4._render_targets_exist(ctx, calibration_dir)
+    before = _deepstream_files(ctx)
+    manifest_before = managed_files.Manifest().path.read_bytes()
+    capsys.readouterr()
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert "nothing to render" in capsys.readouterr().err
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert _deepstream_files(ctx) == before
+    assert managed_files.Manifest().path.read_bytes() == manifest_before
+    assert _exclusion_path(ctx).read_text() == edited
+    assert not managed_files.pending_path(_exclusion_path(ctx)).exists()
+    assert step.pending_update(ctx) is None
+
+
+def test_reverted_inventory_after_kept_edit_settles(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    edited = EXCLUSION_HEADER + "[source0]\nrects=1,1,1,1\n"
+    _exclusion_path(ctx).write_text(edited)
+    _set_exclude_boxes(ctx, "cam1", "530,175,245,225")
+    assert step.pending_update(ctx) == "exclusion.conf out of date"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    pending = managed_files.pending_path(_exclusion_path(ctx))
+    assert pending.is_file()
+    _set_exclude_boxes(ctx, "cam1", "")
+    assert step.pending_update(ctx) is None
+    assert step4._render_targets_exist(ctx, step4.default_calibration_dir(ctx, "site-42"))
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert not pending.exists()
+    assert _exclusion_path(ctx).read_text() == edited
+    assert step.pending_update(ctx) is None
+
+
+def test_missing_exclusion_config_is_out_of_date_even_with_pending_copy(
+    tmp_path, templates
+):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    path = _exclusion_path(ctx)
+    managed_files.pending_path(path).write_text(path.read_text())
+    path.unlink()
+    assert step.pending_update(ctx) == "exclusion.conf out of date"
 
 
 # -- generated per-install files: fusion, dewarpers, viewer, pose model -------

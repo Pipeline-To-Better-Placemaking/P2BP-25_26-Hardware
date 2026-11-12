@@ -79,6 +79,17 @@ TRACKER_YAML_TEMPLATE_NAME = "config_tracker_NvMOT.yml"
 INFER_PRIMARY_TEMPLATE_NAME = "config_infer_primary.txt"
 MSGCONV_TEMPLATE_NAME = "msgconv_config.txt"
 RENDERED_APP_CONFIG_NAME = "deepstream_app_config.rendered.txt"
+# DETECTION-EXCLUSION-ZONES section 7.2: per-source rectangles read by the
+# patched test5 app through MV3DT_EXCLUSION_CONFIG.
+EXCLUSION_CONFIG_NAME = "exclusion.conf"
+EXCLUSION_CONFIG_HEADER = (
+    "# Rendered by mv3dt-installer Step 4 from cameras.yml exclude_boxes.\n"
+)
+EXCLUSION_OUT_OF_DATE = "exclusion.conf out of date"
+# Lens-corrected streammux frame the rectangles are given in.
+EXCLUSION_FRAME_WIDTH = 1920
+EXCLUSION_FRAME_HEIGHT = 1080
+_DECIMAL_INT_RE = re.compile(r"[0-9]+")
 
 # The tracker's ReID model (NVIDIA TAO ReidentificationNet), the option
 # DeepStream 9.1's own sources/tracker_ReID/README recommends. DeepStream 9.1
@@ -885,6 +896,78 @@ def dewarper_distortion(k1: float, k2: float) -> str:
     )
 
 
+def parse_exclude_boxes(value: str) -> Optional[list[str]]:
+    """Normalize one camera's `exclude_boxes` to `left,top,width,height`
+    entries, or None when it is invalid (DETECTION-EXCLUSION-ZONES sections
+    4.2 and 7.2): every number a non-negative decimal integer, width and
+    height above zero, and the box inside the 1920x1080 frame. Whitespace
+    around numbers and entries is allowed and empty entries are ignored."""
+    entries = []
+    for entry in value.split(";"):
+        if not entry.strip():
+            continue
+        parts = [part.strip() for part in entry.split(",")]
+        if len(parts) != 4 or not all(_DECIMAL_INT_RE.fullmatch(p) for p in parts):
+            return None
+        left, top, width, height = (int(part) for part in parts)
+        if width <= 0 or height <= 0:
+            return None
+        if left + width > EXCLUSION_FRAME_WIDTH or top + height > EXCLUSION_FRAME_HEIGHT:
+            return None
+        entries.append(f"{left},{top},{width},{height}")
+    return entries
+
+
+def render_exclusion_config(
+    cameras: list, *, warn: Optional[Callable[[str], None]] = None
+) -> str:
+    """Render `exclusion.conf` from the enabled cameras, numbered exactly as
+    `render_app_config` numbers `[source<N>]`. A camera with an invalid
+    `exclude_boxes` gets no group and, when `warn` is given, one warning."""
+    lines = [EXCLUSION_CONFIG_HEADER.rstrip("\n")]
+    for index, camera in enumerate(cameras):
+        value = camera.exclude_boxes.strip()
+        if not value:
+            continue
+        entries = parse_exclude_boxes(value)
+        if entries is None:
+            if warn is not None:
+                warn(
+                    f"{camera.id}: invalid exclude_boxes {value!r} in cameras.yml "
+                    "(want left,top,width,height whole-pixel entries separated "
+                    "by ';', width and height above 0, inside the 1920x1080 "
+                    "frame); no exclusion zone for this camera"
+                )
+            continue
+        if entries:
+            lines += [f"[source{index}]", "rects=" + ";".join(entries)]
+    return "\n".join(lines) + "\n"
+
+
+def _exclusion_config_current(ctx: "Context") -> bool:
+    """Whether `exclusion.conf` is not out of date (DETECTION-EXCLUSION-ZONES
+    section 7.3): it exists, and a fresh render of cameras.yml equals the
+    file, its pending `.installer-new`, or the digest the managed-files
+    manifest recorded for it. Accepting the pending copy and the recorded
+    digest keeps an operator-edited file from triggering a re-render on
+    every check: `write_managed` leaves no pending copy when the render is
+    what it last wrote."""
+    expected = render_exclusion_config(_load_enabled_cameras(ctx))
+    path = ctx.install_dir / "deepstream" / EXCLUSION_CONFIG_NAME
+    if not path.is_file():
+        return False
+    expected_digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    if managed_files.Manifest().get(path) == expected_digest:
+        return True
+    for candidate in (path, managed_files.pending_path(path)):
+        try:
+            if candidate.read_text(encoding="utf-8") == expected:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def render_dewarper_config(camera: dict) -> str:
     """One nvdewarper config from an AMC rectification camera entry with a
     committed radial model. Raises ValueError for anything else."""
@@ -1197,6 +1280,12 @@ def _render_configs(
         deepstream_dir / RENDERED_APP_CONFIG_NAME,
         app_text,
         label=RENDERED_APP_CONFIG_NAME,
+    )
+    _write_text_report(
+        ctx,
+        deepstream_dir / EXCLUSION_CONFIG_NAME,
+        render_exclusion_config(cameras, warn=ctx.log.warn),
+        label=EXCLUSION_CONFIG_NAME,
     )
     for name in (INFER_PRIMARY_TEMPLATE_NAME, MSGCONV_TEMPLATE_NAME):
         source = ctx.asset_path("deepstream", name)
@@ -1553,7 +1642,10 @@ def _delete_footage_after_ingest(ctx: "Context", inputs: ProjectInputs) -> None:
 
 def _render_targets_exist(ctx: "Context", calibration_dir: pathlib.Path) -> bool:
     """Whether every file a render would write is already present: one
-    camera model per enabled camera plus the DeepStream configs."""
+    camera model per enabled camera plus the DeepStream configs, with
+    `exclusion.conf` also matching cameras.yml (DETECTION-EXCLUSION-ZONES
+    section 7.3), so an edited `exclude_boxes` is rendered even when the
+    AMC archive is unchanged."""
     deepstream_dir = ctx.install_dir / "deepstream"
     sources = sorted((calibration_dir / AMC_CAMERA_MODEL_DIR).glob("camInfo_*.yml"))
     try:
@@ -1576,7 +1668,12 @@ def _render_targets_exist(ctx: "Context", calibration_dir: pathlib.Path) -> bool
         deepstream_dir / MV3DT_DIR_NAME / name
         for name in (PUB_SUB_CONFIG_NAME, MQTT_CONFIG_NAME)
     ]
-    return all(target.is_file() for target in targets)
+    if not all(target.is_file() for target in targets):
+        return False
+    try:
+        return _exclusion_config_current(ctx)
+    except OSError:
+        return False
 
 
 def _wire_download(
@@ -1728,6 +1825,17 @@ class Step4CalibOutputWiring:
         except (AmcApiError, OSError, ValueError) as exc:
             return StepResult(status=StepStatus.FAILED, message=str(exc))
         return result
+
+    def pending_update(self, ctx: "Context") -> Optional[str]:
+        """The dispatch loop's update check for a completed step
+        (DETECTION-EXCLUSION-ZONES section 7.3): read only, never prompts.
+        None whenever the render cannot be computed, such as a missing or
+        unreadable camera inventory."""
+        try:
+            current = _exclusion_config_current(ctx)
+        except (KeyError, OSError, ValueError):
+            return None
+        return None if current else EXCLUSION_OUT_OF_DATE
 
     def verify(self, ctx: "Context") -> StepResult:
         inputs, missing = resolve_project_inputs(ctx)
