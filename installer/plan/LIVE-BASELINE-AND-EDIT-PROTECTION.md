@@ -185,7 +185,7 @@ New `MultiViewAssociator:` section, every key exactly as live:
 | `maxPeerTrackletSize` | `50` |
 | `recentlyActiveAge` | `178` |
 | `minCommonFrames4MatchScore` | `2` |
-| `maxPeerToPredDistance4Fusion` | `2.0` |
+| `maxPeerToPredDistance4Fusion` | `1.0` (was `2.0`; see [`DETECTION-EXCLUSION` section 8](DETECTION-EXCLUSION-ZONES.md#8-tracker-fusion-gate)) |
 | `minPeerVisibility4Fusion` | `0.15` |
 | `minPeerTrackletMatchScore` | `0.35` |
 | `maxTrackletMatchingTimeSearchRange` | `1` |
