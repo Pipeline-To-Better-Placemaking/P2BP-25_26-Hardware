@@ -12,8 +12,11 @@ reconciliation prompts are injected too.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import pathlib
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -25,7 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from mv3dt_installer import app  # noqa: E402
 from mv3dt_installer import prompting  # noqa: E402
 from mv3dt_installer import config as config_mod  # noqa: E402
-from mv3dt_installer import logs, report  # noqa: E402
+from mv3dt_installer import logs, report, shellout  # noqa: E402
 from mv3dt_installer.steps import STEP_REGISTRY, StepStatus  # noqa: E402
 from mv3dt_installer.steps import step3_amc_launcher as step3  # noqa: E402
 from mv3dt_installer.steps import step5_per_project_exes as step5  # noqa: E402
@@ -566,7 +569,7 @@ def test_stop_pipeline_default_only_stops_deepstream(tmp_path):
 
     rc = step5._stop_pipeline(ctx, entry, sleep=_boom)
     assert rc == 0
-    assert runner.called_with_prefix("pkill", "-TERM", "-x", step5.DEEPSTREAM_APP_PROCESS)
+    assert runner.called_with_prefix("pkill", "-TERM", "-x", step5.DEEPSTREAM_PROCESS_PATTERN)
     assert not runner.called_with_prefix("pkill", "-KILL")
     assert not runner.called_with_prefix("systemctl", "stop", "mosquitto")
 
@@ -619,7 +622,7 @@ def test_stop_pipeline_grace_period_lets_process_exit_without_sigkill(tmp_path):
         ctx, entry, sleep=sleeps.append, grace_polls=5, grace_interval_s=1.0
     )
     assert rc == 0
-    assert runner.called_with_prefix("pkill", "-TERM", "-x", step5.DEEPSTREAM_APP_PROCESS)
+    assert runner.called_with_prefix("pkill", "-TERM", "-x", step5.DEEPSTREAM_PROCESS_PATTERN)
     assert not runner.called_with_prefix("pkill", "-KILL")
     # Only one grace-period poll happened before the process was confirmed
     # gone, so only one sleep -- not all 5.
@@ -660,7 +663,7 @@ def test_stop_pipeline_waits_full_grace_period_before_sigkill(tmp_path):
 
     rc = step5._stop_pipeline(ctx, entry, sleep=_fake_sleep, grace_polls=3, grace_interval_s=0.01)
     assert rc == 0
-    assert runner.called_with_prefix("pkill", "-KILL", "-x", step5.DEEPSTREAM_APP_PROCESS)
+    assert runner.called_with_prefix("pkill", "-KILL", "-x", step5.DEEPSTREAM_PROCESS_PATTERN)
 
     sigterm_idx = events.index("sigterm")
     sigkill_idx = events.index("sigkill")
@@ -1249,3 +1252,557 @@ def test_remove_project_artifacts_invokes_the_registered_hook(tmp_path):
         assert calls == [entry.slug]
     finally:
         step5.register_removal_hook(previous)
+
+
+# ---------------------------------------------------------------------------
+# DETECTION-EXCLUSION-ZONES sections 4.4, 5 and 6 -- the filter app
+# ---------------------------------------------------------------------------
+
+_DS_VERSION = "9.1.0"
+
+_TEST5_MAIN = """\
+#include <glib.h>
+#include "deepstream_test5_app.h"
+#include "deepstream_utc.h"
+
+int main (int argc, char *argv[])
+{
+  for (i = 0; i < num_instances; i++) {
+    if (!create_pipeline (appCtx[i], bbox_generated_probe_after_analytics,
+            NULL, perf_cb, overlay_graphics)) {
+      NVGSTDS_ERR_MSG_V ("Failed to create pipeline");
+      return_value = -1;
+      goto done;
+    }
+    /* Override default probe function */
+  }
+done:
+  return return_value;
+}
+"""
+
+_TEST5_MAKEFILE = """\
+APP:= deepstream-test5-app
+SRCS:= deepstream_test5_app_main.c deepstream_utc.c
+SRCS+= $(wildcard /opt/nvidia/deepstream/deepstream/sources/libs/nvds_utils/*.c)
+CFLAGS+= -I/opt/nvidia/deepstream/deepstream/sources/libs/kafka_client
+"""
+
+
+@pytest.fixture(autouse=True)
+def _no_real_deepstream(tmp_path, monkeypatch):
+    """No test reads /opt/nvidia or /usr/local/cuda; tests that need a
+    DeepStream tree build one with `_fake_deepstream`."""
+    monkeypatch.setattr(step5, "DEEPSTREAM_ROOT", tmp_path / "no-deepstream")
+    monkeypatch.setattr(step5, "CUDA_LINK", tmp_path / "no-cuda")
+
+
+def _fake_deepstream(tmp_path, monkeypatch, *, main=_TEST5_MAIN, makefile=_TEST5_MAKEFILE, version=_DS_VERSION):
+    root = tmp_path / "deepstream"
+    app_dir = root / "sources" / "apps" / "sample_apps" / "deepstream-test5"
+    app_dir.mkdir(parents=True)
+    (app_dir / "deepstream_test5_app_main.c").write_text(main)
+    (app_dir / "Makefile").write_text(makefile)
+    (root / "sources" / "includes").mkdir()
+    (root / "sources" / "includes" / "nvdsmeta.h").write_text("/* header */\n")
+    (root / "sources" / "libs" / "nvds_utils").mkdir(parents=True)
+    (root / "sources" / "libs" / "nvds_utils" / "u.c").write_text("/* lib */\n")
+    if version is not None:
+        (root / "version").write_text(f"Version: {version}\nGCID: 1\n")
+    cuda_dir = tmp_path / "cuda-13.2"
+    cuda_dir.mkdir()
+    link = tmp_path / "cuda"
+    link.symlink_to(cuda_dir)
+    monkeypatch.setattr(step5, "DEEPSTREAM_ROOT", root)
+    monkeypatch.setattr(step5, "CUDA_LINK", link)
+    return root
+
+
+class _BuildRunner(ScriptedRunner):
+    """dpkg-query reports the build dependencies installed unless told
+    otherwise, and `make -C <dir>` drops a binary into `<dir>` when it
+    succeeds."""
+
+    def __init__(self, *, make_rc=0, make_stdout="", make_stderr="", installed=True, apt_rc=0):
+        super().__init__()
+        self.make_rc = make_rc
+        self.make_stdout = make_stdout
+        self.make_stderr = make_stderr
+        self.installed = installed
+        self.apt_rc = apt_rc
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append(args)
+        if args[0] == "dpkg-query":
+            out = "install ok installed" if self.installed else ""
+            return subprocess.CompletedProcess(list(args), 0 if self.installed else 1, out, "")
+        if args[0] == "apt-get":
+            return subprocess.CompletedProcess(list(args), self.apt_rc, "", "E: Unable to locate package")
+        if args[0] == "make":
+            if self.make_rc == 0:
+                app_dir = pathlib.Path(args[2])
+                (app_dir / "deepstream-test5-app").write_bytes(b"\x7fELF built")
+            return subprocess.CompletedProcess(list(args), self.make_rc, self.make_stdout, self.make_stderr)
+        return subprocess.CompletedProcess(list(args), 0, "", "")
+
+
+def _expected_key(version=_DS_VERSION):
+    digest = hashlib.sha256()
+    names = sorted(
+        ["mv3dt_exclusion.c", "mv3dt_exclusion.h", "mv3dt_exclusion_rules.c", "mv3dt_exclusion_rules.h"]
+    )
+    for name in names:
+        digest.update(shellout.asset_path("deepstream", "exclusion", name).read_bytes())
+    return f"{digest.hexdigest()} {step5.EXCLUSION_PATCH_VERSION} {version}"
+
+
+def _write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+# -- section 4.4: the hook ---------------------------------------------------
+
+
+def test_patch_test5_main_adds_include_and_attach():
+    patched = step5.patch_test5_main(_TEST5_MAIN, _DS_VERSION)
+    assert '#include "deepstream_test5_app.h"\n#include "mv3dt_exclusion.h"\n' in patched
+    assert (
+        "      goto done;\n"
+        "    }\n"
+        "    mv3dt_exclusion_attach (appCtx[i]->pipeline.common_elements.\n"
+        "        primary_gie_bin.bin);\n"
+        "    /* Override default probe function */\n"
+    ) in patched
+    assert patched.count("mv3dt_exclusion_attach") == 1
+
+
+@pytest.mark.parametrize(
+    "broken, anchor",
+    [
+        (_TEST5_MAIN.replace('#include "deepstream_test5_app.h"\n', ""), "deepstream_test5_app.h"),
+        (
+            _TEST5_MAIN.replace(
+                '#include "deepstream_test5_app.h"\n',
+                '#include "deepstream_test5_app.h"\n#include "deepstream_test5_app.h"\n',
+            ),
+            "deepstream_test5_app.h",
+        ),
+        (_TEST5_MAIN.replace("      goto done;\n", "      exit (1);\n"), "Failed to create pipeline"),
+    ],
+)
+def test_patch_test5_main_missing_or_repeated_anchor_names_anchor_and_version(broken, anchor):
+    with pytest.raises(step5.ExclusionBuildError) as info:
+        step5.patch_test5_main(broken, _DS_VERSION)
+    assert info.value.stage == "patch"
+    assert anchor in info.value.detail
+    assert "DeepStream 9.1.0" in info.value.detail
+
+
+def test_patch_test5_makefile_adds_sources_and_relativizes_libs():
+    patched = step5.patch_test5_makefile(_TEST5_MAKEFILE, _DS_VERSION)
+    assert (
+        "SRCS:= deepstream_test5_app_main.c deepstream_utc.c mv3dt_exclusion.c mv3dt_exclusion_rules.c\n"
+    ) in patched
+    assert "/opt/nvidia" not in patched
+    assert patched.count("../../../libs") == 2
+
+
+@pytest.mark.parametrize(
+    "broken, anchor",
+    [
+        (
+            _TEST5_MAKEFILE.replace("SRCS:= deepstream_test5_app_main.c deepstream_utc.c", "SRCS:= main.c"),
+            "SRCS:=",
+        ),
+        (
+            _TEST5_MAKEFILE.replace("/opt/nvidia/deepstream/deepstream/sources/libs", "/elsewhere"),
+            "/opt/nvidia",
+        ),
+    ],
+)
+def test_patch_test5_makefile_missing_anchor_fails(broken, anchor):
+    with pytest.raises(step5.ExclusionBuildError) as info:
+        step5.patch_test5_makefile(broken, _DS_VERSION)
+    assert anchor in info.value.detail
+    assert "DeepStream 9.1.0" in info.value.detail
+
+
+# -- versions and the build key ----------------------------------------------
+
+
+def test_cuda_version_follows_the_link_chain(tmp_path):
+    target = tmp_path / "cuda-13.2"
+    target.mkdir()
+    alt = tmp_path / "alternatives-cuda"
+    alt.symlink_to(target)
+    link = tmp_path / "cuda"
+    link.symlink_to(alt)
+    assert step5.cuda_version(link) == "13.2"
+
+
+@pytest.mark.parametrize("name", ["cuda", "cuda-13", "cuda-13.2.1", "cuda13.2"])
+def test_cuda_version_rejects_other_names(tmp_path, name):
+    target = tmp_path / name
+    target.mkdir()
+    assert step5.cuda_version(target) is None
+
+
+def test_deepstream_version_reads_the_version_line(tmp_path):
+    (tmp_path / "version").write_text("GCID: 123\nVersion: 9.1.0\n")
+    assert step5.deepstream_version(tmp_path) == "9.1.0"
+
+
+def test_deepstream_version_none_when_missing(tmp_path):
+    assert step5.deepstream_version(tmp_path) is None
+    (tmp_path / "version").write_text("nothing useful\n")
+    assert step5.deepstream_version(tmp_path) is None
+
+
+def test_build_key_hashes_the_sorted_bundled_files(tmp_path):
+    ctx = FakeContext(tmp_path)
+    key = step5.exclusion_build_key(ctx, ds_version=_DS_VERSION)
+    assert key == _expected_key()
+    assert key.split(" ")[1:] == [str(step5.EXCLUSION_PATCH_VERSION), _DS_VERSION]
+    assert step5.exclusion_build_key(ctx, ds_version="9.2.0") != key
+
+
+def test_build_key_changes_with_the_patch_version(tmp_path, monkeypatch):
+    ctx = FakeContext(tmp_path)
+    before = step5.exclusion_build_key(ctx, ds_version=_DS_VERSION)
+    monkeypatch.setattr(step5, "EXCLUSION_PATCH_VERSION", step5.EXCLUSION_PATCH_VERSION + 1)
+    assert step5.exclusion_build_key(ctx, ds_version=_DS_VERSION) != before
+
+
+def test_build_key_none_without_deepstream(tmp_path):
+    assert step5.exclusion_build_key(FakeContext(tmp_path)) is None
+
+
+# -- section 5.2: pending_update ---------------------------------------------
+
+
+def test_pending_update_none_without_deepstream(tmp_path):
+    assert step5.Step5PerProjectExes().pending_update(FakeContext(tmp_path)) is None
+
+
+def test_pending_update_without_a_stamp(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path)
+    assert step5.Step5PerProjectExes().pending_update(ctx) == "bundled detection filter changed"
+    assert ctx.runner_root.calls == []
+
+
+def test_pending_update_none_when_stamp_matches(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path)
+    _write(step5.exclusion_stamp_path(ctx.install_dir), _expected_key() + "\n")
+    assert step5.Step5PerProjectExes().pending_update(ctx) is None
+
+
+def test_pending_update_none_when_this_key_already_failed(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path)
+    _write(step5.exclusion_stamp_path(ctx.install_dir), "old 1 9.0.0\n")
+    _write(step5.exclusion_failed_path(ctx.install_dir), _expected_key() + "\n")
+    assert step5.Step5PerProjectExes().pending_update(ctx) is None
+
+
+def test_pending_update_when_an_older_key_failed(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path)
+    _write(step5.exclusion_stamp_path(ctx.install_dir), "old 1 9.0.0\n")
+    _write(step5.exclusion_failed_path(ctx.install_dir), "older 1 9.0.0\n")
+    assert step5.Step5PerProjectExes().pending_update(ctx) == step5.EXCLUSION_UPDATE_REASON
+
+
+def test_pending_update_works_on_the_status_view(tmp_path, monkeypatch):
+    """`--status` passes a bare namespace: no runner, no log."""
+    _fake_deepstream(tmp_path, monkeypatch)
+    view = SimpleNamespace(install_dir=tmp_path / "mv3dt", conf={}, asset_path=shellout.asset_path, user=None)
+    assert step5.Step5PerProjectExes().pending_update(view) == step5.EXCLUSION_UPDATE_REASON
+
+
+# -- sections 5.1 and 5.3: the build -----------------------------------------
+
+
+def test_build_installs_the_app_and_writes_the_stamp(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    runner = _BuildRunner()
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    stale = ctx.install_dir / "build" / "test5-exclusion" / "stale.o"
+    _write(stale, "old")
+    _write(step5.exclusion_failed_path(ctx.install_dir), "old 1 9.0.0\n")
+
+    step5.ensure_exclusion_app(ctx)
+
+    sources = ctx.install_dir / "build" / "test5-exclusion" / "sources"
+    app_dir = sources / "apps" / "sample_apps" / "deepstream-test5"
+    assert not stale.exists()
+    assert (sources / "includes" / "nvdsmeta.h").is_file()
+    assert (sources / "libs" / "nvds_utils" / "u.c").is_file()
+    for name in step5.EXCLUSION_SOURCE_FILES:
+        bundled = shellout.asset_path("deepstream", "exclusion", name).read_bytes()
+        assert (app_dir / name).read_bytes() == bundled
+    assert '#include "mv3dt_exclusion.h"' in (app_dir / "deepstream_test5_app_main.c").read_text()
+    assert "../../../libs" in (app_dir / "Makefile").read_text()
+
+    make = [c for c in runner.calls if c[0] == "make"]
+    assert make == [("make", "-C", str(app_dir), f"-j{os.cpu_count() or 1}", "CUDA_VER=13.2")]
+    assert not runner.called_with_prefix("apt-get")
+
+    built = step5.exclusion_app_path(ctx.install_dir)
+    assert built.read_bytes() == b"\x7fELF built"
+    assert built.stat().st_mode & 0o777 == 0o755
+    assert step5.exclusion_stamp_path(ctx.install_dir).read_text().strip() == _expected_key()
+    assert not step5.exclusion_failed_path(ctx.install_dir).exists()
+    assert step5.Step5PerProjectExes().pending_update(ctx) is None
+
+
+def test_build_skipped_when_the_stamp_is_current(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    runner = _BuildRunner()
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    _write(step5.exclusion_app_path(ctx.install_dir), "bin")
+    _write(step5.exclusion_stamp_path(ctx.install_dir), _expected_key())
+    step5.ensure_exclusion_app(ctx)
+    assert runner.calls == []
+
+
+def test_build_runs_when_the_stamp_matches_but_the_binary_is_gone(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    runner = _BuildRunner()
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    _write(step5.exclusion_stamp_path(ctx.install_dir), _expected_key())
+    step5.ensure_exclusion_app(ctx)
+    assert runner.called_with_prefix("make")
+    assert step5.exclusion_app_path(ctx.install_dir).is_file()
+
+
+def test_build_installs_missing_dependencies(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    runner = _BuildRunner(installed=False)
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    step5.ensure_exclusion_app(ctx)
+    assert runner.called_with_prefix(
+        "apt-get", "install", "-y", "--no-install-recommends", "libjson-glib-dev", "libgstrtspserver-1.0-dev"
+    )
+    assert step5.exclusion_app_path(ctx.install_dir).is_file()
+
+
+def _previous_install(ctx):
+    _write(step5.exclusion_app_path(ctx.install_dir), "previous")
+    step5.exclusion_app_path(ctx.install_dir).chmod(0o755)
+    _write(step5.exclusion_stamp_path(ctx.install_dir), "old 1 9.0.0\n")
+
+
+def _assert_failed_untouched(ctx, capsys, stage):
+    err = capsys.readouterr().err
+    assert f"build failed at {stage}" in err
+    assert step5.exclusion_app_path(ctx.install_dir).read_text() == "previous"
+    assert step5.exclusion_stamp_path(ctx.install_dir).read_text() == "old 1 9.0.0\n"
+    assert step5.exclusion_failed_path(ctx.install_dir).read_text().strip() == _expected_key()
+    return err
+
+
+def test_compile_failure_warns_and_keeps_the_previous_build(tmp_path, monkeypatch, capsys):
+    _fake_deepstream(tmp_path, monkeypatch)
+    runner = _BuildRunner(
+        make_rc=2,
+        make_stdout="cc -c deepstream_test5_app_main.c\n",
+        make_stderr=(
+            "mv3dt_exclusion.c:12:3: error: unknown type name 'Foo'\n"
+            "make: *** [Makefile:80: mv3dt_exclusion.o] Error 1\n"
+        ),
+    )
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    _previous_install(ctx)
+    step5.ensure_exclusion_app(ctx)
+    err = _assert_failed_untouched(ctx, capsys, "compile")
+    assert "mv3dt_exclusion.c:12:3: error: unknown type name 'Foo'" in err
+    # The failed key stops the update check from retrying on every run.
+    assert step5.Step5PerProjectExes().pending_update(ctx) is None
+
+
+def test_anchor_failure_warns_without_compiling(tmp_path, monkeypatch, capsys):
+    _fake_deepstream(tmp_path, monkeypatch, main=_TEST5_MAIN.replace("goto done;", "goto out;"))
+    runner = _BuildRunner()
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    _previous_install(ctx)
+    step5.ensure_exclusion_app(ctx)
+    err = _assert_failed_untouched(ctx, capsys, "patch")
+    assert "DeepStream 9.1.0" in err
+    assert not runner.called_with_prefix("make")
+
+
+def test_dependency_failure_retries_after_update_then_warns(tmp_path, monkeypatch, capsys):
+    _fake_deepstream(tmp_path, monkeypatch)
+    runner = _BuildRunner(installed=False, apt_rc=100)
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    _previous_install(ctx)
+    step5.ensure_exclusion_app(ctx)
+    _assert_failed_untouched(ctx, capsys, "dependencies")
+    assert runner.called_with_prefix("apt-get", "update")
+    assert sum(1 for c in runner.calls if c[:2] == ("apt-get", "install")) == 2
+    assert not runner.called_with_prefix("make")
+
+
+def test_missing_cuda_link_is_a_compile_failure(tmp_path, monkeypatch, capsys):
+    _fake_deepstream(tmp_path, monkeypatch)
+    monkeypatch.setattr(step5, "CUDA_LINK", tmp_path / "cuda-missing")
+    ctx = FakeContext(tmp_path, runner_root=_BuildRunner())
+    step5.ensure_exclusion_app(ctx)
+    assert "build failed at compile" in capsys.readouterr().err
+    assert not step5.exclusion_app_path(ctx.install_dir).exists()
+
+
+def test_no_deepstream_warns_and_runs_nothing(tmp_path, capsys):
+    ctx = FakeContext(tmp_path)
+    step5.ensure_exclusion_app(ctx)
+    assert "not built" in capsys.readouterr().err
+    assert ctx.runner_root.calls == []
+
+
+def _inventory(tmp_path, *, enabled=True, boxes='"530,175,245,225"'):
+    path = tmp_path / "cameras.yml"
+    path.write_text(
+        "cameras:\n"
+        "  - id: c2\n"
+        "    ip: 169.254.124.198\n"
+        "    rtsp_path: /Streaming/Channels/101\n"
+        f"    enabled: {'true' if enabled else 'false'}\n"
+        + (f"    exclude_boxes: {boxes}\n" if boxes else "")
+    )
+    return {config_mod.CAMERAS_FILE_KEY: str(path)}
+
+
+def test_inactive_zones_warning_when_no_app_exists(tmp_path, capsys):
+    ctx = FakeContext(tmp_path, conf=_inventory(tmp_path))
+    step5.ensure_exclusion_app(ctx)
+    assert "exclusion zones are inactive" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kwargs", [{"enabled": False}, {"boxes": ""}])
+def test_no_inactive_zones_warning_without_enabled_boxes(tmp_path, capsys, kwargs):
+    ctx = FakeContext(tmp_path, conf=_inventory(tmp_path, **kwargs))
+    step5.ensure_exclusion_app(ctx)
+    assert "exclusion zones are inactive" not in capsys.readouterr().err
+
+
+def test_no_inactive_zones_warning_when_an_older_app_exists(tmp_path, capsys):
+    ctx = FakeContext(tmp_path, conf=_inventory(tmp_path))
+    _previous_install(ctx)
+    step5.ensure_exclusion_app(ctx)
+    assert "exclusion zones are inactive" not in capsys.readouterr().err
+
+
+# -- Step 5 run(): where the build happens -----------------------------------
+
+
+def _run_ctx(tmp_path, monkeypatch):
+    conf = {"PROJECT_NAME": "Living Room", "LOCATION_ID": "loc-1"}
+    ctx = FakeContext(tmp_path, conf=conf)
+    _write(ctx.install_dir / "deepstream" / "deepstream_app_config.rendered.txt", "[application]\n")
+    installer_bin = ctx.install_dir / "bin" / "mv3dt-installer"
+    monkeypatch.setattr(step3, "ensure_installer_binary", lambda ctx_: installer_bin)
+    events = []
+    monkeypatch.setattr(step5, "ensure_exclusion_app", lambda ctx_: events.append("build"))
+    monkeypatch.setattr(step5, "_confirm_start_now", lambda ctx_: events.append("prompt") or False)
+    return ctx, events
+
+
+def test_run_builds_the_filter_before_the_start_or_close_question(tmp_path, monkeypatch):
+    ctx, events = _run_ctx(tmp_path, monkeypatch)
+    result = step5.Step5PerProjectExes().run(ctx)
+    assert result.status is StepStatus.COMPLETE
+    assert events == ["build", "prompt"]
+    assert step5.get(ctx.install_dir, "Living Room") is not None
+
+
+def test_update_run_only_builds_the_filter(tmp_path, monkeypatch):
+    ctx, events = _run_ctx(tmp_path, monkeypatch)
+    ctx.update_pending = step5.EXCLUSION_UPDATE_REASON
+    result = step5.Step5PerProjectExes().run(ctx)
+    assert result.status is StepStatus.COMPLETE
+    assert events == ["build"]
+    assert step5.get(ctx.install_dir, "Living Room") is None
+
+
+def test_filter_phase_is_declared():
+    assert step5.Step5PerProjectExes.phases[3] == "detection exclusion filter"
+
+
+# -- section 6: launch -------------------------------------------------------
+
+
+def test_pipeline_app_prefers_the_built_filter_app(tmp_path):
+    ctx = FakeContext(tmp_path)
+    assert step5.pipeline_app(ctx) == "deepstream-test5-app"
+    built = step5.exclusion_app_path(ctx.install_dir)
+    _write(built, "bin")
+    built.chmod(0o644)
+    assert step5.pipeline_app(ctx) == "deepstream-test5-app"
+    built.chmod(0o755)
+    assert step5.pipeline_app(ctx) == str(built)
+
+
+def _launch(tmp_path, monkeypatch, capsys, *, built=False, conf_file=False, service=False):
+    monkeypatch.delenv(step5.EXCLUSION_CONFIG_ENV, raising=False)
+    monkeypatch.delenv(config_mod.GATE_VIEWER_STREAM, raising=False)
+    ctx = FakeContext(tmp_path)
+    entry = _make_entry(ctx.install_dir)
+    if built:
+        _write(step5.exclusion_app_path(ctx.install_dir), "bin")
+        step5.exclusion_app_path(ctx.install_dir).chmod(0o755)
+    if conf_file:
+        _write(ctx.install_dir / "deepstream" / "exclusion.conf", "[source1]\nrects=1,1,2,2\n")
+    monkeypatch.setattr(step5, "ensure_mosquitto", lambda ctx_: None)
+    monkeypatch.setattr(step5, "ping_sweep_cameras", lambda ctx_: None)
+    monkeypatch.setattr(step5, "source_deepstream_env", lambda ctx_: {})
+    monkeypatch.setattr(step5.os, "chdir", lambda path: None)
+    seen = []
+
+    def _execv(binary, argv):
+        seen.append((binary, argv, os.environ.get(step5.EXCLUSION_CONFIG_ENV)))
+
+    start = step5._start_pipeline_service_exec if service else step5._start_pipeline_foreground
+    assert start(ctx, entry, execv=_execv) == 0
+    return ctx, entry, seen[0], capsys.readouterr().err
+
+
+@pytest.mark.parametrize("service", [False, True])
+def test_launch_uses_the_built_app_and_exclusion_config(tmp_path, monkeypatch, capsys, service):
+    ctx, entry, (binary, argv, env), err = _launch(
+        tmp_path, monkeypatch, capsys, built=True, conf_file=True, service=service
+    )
+    built = str(step5.exclusion_app_path(ctx.install_dir))
+    assert binary == built
+    assert argv == [built, "-c", entry.rendered_config]
+    assert env == str(ctx.install_dir / "deepstream" / "exclusion.conf")
+    assert f"Launching: {built} -c" in err
+
+
+@pytest.mark.parametrize("service", [False, True])
+def test_launch_falls_back_to_the_stock_app_without_env(tmp_path, monkeypatch, capsys, service):
+    _, entry, (_binary, argv, env), err = _launch(tmp_path, monkeypatch, capsys, service=service)
+    assert argv == ["deepstream-test5-app", "-c", entry.rendered_config]
+    assert env is None
+    assert "Launching: deepstream-test5-app -c" in err
+
+
+def test_process_pattern_matches_both_apps_exactly():
+    assert len(step5.EXCLUSION_APP_NAME) == 15
+    pattern = step5.DEEPSTREAM_PROCESS_PATTERN
+    assert pattern == "deepstream-test|mv3dt-test5-app"
+    # procps anchors the whole pattern under -x.
+    anchored = re.compile(f"^({pattern})$")
+    assert anchored.match("deepstream-test")
+    assert anchored.match("mv3dt-test5-app")
+    assert not anchored.match("deepstream-tes")
+    assert not anchored.match("mv3dt-test5-ap")
+
+
+def test_pgrep_matches_both_process_names(tmp_path):
+    runner = ScriptedRunner(default_returncode=1)
+    ctx = FakeContext(tmp_path, runner_root=runner)
+    step5._pgrep_deepstream_running(ctx)
+    assert runner.calls == [("pgrep", "-x", "deepstream-test|mv3dt-test5-app")]
