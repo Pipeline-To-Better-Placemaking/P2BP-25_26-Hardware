@@ -16,8 +16,9 @@ from static single-camera hotspots in recorded detections.
 
 `cameras` moves the Replay's camera markers: `{"camInfo_00": {"x": 7.05,
 "y": -0.35}}` places that camera model's marker at the given world metres
-in `/tracking/meta`. It is display only and belongs to no preset; fusion,
-cleaning and exports never read it.
+in `/tracking/meta`. It is display only; fusion, cleaning and exports
+never read it. Unlike every other key, an invalid `cameras` value does not
+invalidate the file: it is ignored as a whole and reported as a warning.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ STRICT: dict = {
     "version": 1,
     "room_margin_m": 0.3,
     "room": None,              # {"x": [a, b], "y": [a, b]}; overrides the calibration bounds when set
+    "cameras": None,           # {model stem: {"x", "y"}}; Replay marker overrides, display only
     "zones": [],
     "vmax_mps": 3.0,           # fastest plausible walk between samples of one track
     "speed_slack_m": 0.3,      # jitter allowance added to every speed check
@@ -145,6 +147,7 @@ class CleaningConfig:
     # Replay marker overrides, (camera model stem, x, y), sorted by name.
     # Display only: nothing in fusion, cleaning or exports reads it.
     cameras: tuple[tuple[str, float, float], ...] = ()
+    camera_warnings: tuple[str, ...] = ()   # an invalid `cameras` value, ignored
     ignored_keys: tuple[str, ...] = ()   # unknown keys found in the file
 
     def stitch_dist(self, gap_s: float) -> float:
@@ -244,7 +247,8 @@ def apply_camera_overrides(cameras: list[dict], config: CleaningConfig) -> tuple
 
     Each camera keeps `name` and `z` and gains `source`: "config" when the
     config places its `x` and `y`, else "calibration". Returns the cameras
-    and a warning for each override that matches no camera model.
+    and the warnings: the config's own `camera_warnings`, then one for
+    each override that matches no camera model.
     """
     overrides = {name: (x, y) for name, x, y in config.cameras}
     out = []
@@ -257,8 +261,9 @@ def apply_camera_overrides(cameras: list[dict], config: CleaningConfig) -> tuple
             cam["source"] = "calibration"
         out.append(cam)
     known = {cam.get("name") for cam in cameras}
-    warnings = [f"camera override {name} matches no camera model; ignored"
-                for name in sorted(overrides) if name not in known]
+    warnings = list(config.camera_warnings) + [
+        f"camera override {name} matches no camera model; ignored"
+        for name in sorted(overrides) if name not in known]
     return out, warnings
 
 
@@ -267,8 +272,8 @@ def parse_config(data) -> CleaningConfig:
 
     Each key takes the file's value when present, else the selected preset's.
     Unknown keys are logged and listed in `ignored_keys`; invalid values
-    raise `CleaningConfigError` naming the key. `cameras` is not part of
-    any preset: it comes from the file or is empty.
+    raise `CleaningConfigError` naming the key, except an invalid
+    `cameras` value, which is dropped and listed in `camera_warnings`.
     """
     if data is None:
         data = {}
@@ -278,13 +283,12 @@ def parse_config(data) -> CleaningConfig:
     if preset not in PRESETS:
         raise CleaningConfigError(f"preset: expected one of {sorted(PRESETS)}, got {preset!r}")
     base = PRESETS[preset]
-    unknown = sorted(set(data) - set(base) - {"preset", "cameras"})
+    unknown = sorted(set(data) - set(base) - {"preset"})
     if unknown:
         log.warning("cleaning config: ignoring unknown key(s) %s", unknown)
     merged = {**base, **{k: v for k, v in data.items() if k in base}}
 
-    out: dict = {"preset": preset, "ignored_keys": tuple(unknown),
-                 "cameras": parse_cameras(data.get("cameras"))}
+    out: dict = {"preset": preset, "ignored_keys": tuple(unknown)}
     for key, value in merged.items():
         if key == "zones":
             if not isinstance(value, list):
@@ -292,6 +296,14 @@ def parse_config(data) -> CleaningConfig:
             out[key] = tuple(parse_zone(z, f"zones[{i}]") for i, z in enumerate(value))
         elif key == "room":
             out[key] = None if value is None else _rect("room", value)
+        elif key == "cameras":
+            # Display only, so a mistake here never costs the cleaning keys.
+            try:
+                out[key] = parse_cameras(value)
+            except CleaningConfigError as exc:
+                log.warning("cleaning config: ignoring the cameras key: %s", exc)
+                out[key] = ()
+                out["camera_warnings"] = (f"ignored invalid cameras value: {exc}",)
         elif key in _BOOLS:
             if not isinstance(value, bool):
                 raise CleaningConfigError(f"{key}: expected true or false, got {value!r}")

@@ -49,7 +49,7 @@ def test_defaults_are_the_strict_prototype_values():
     assert cfg.shared_id_gate_m == 1.5 and cfg.zones == ()
     # The dataclass defaults and the STRICT table agree.
     for key, value in STRICT.items():
-        if key not in ("zones", "room"):
+        if key not in ("zones", "room", "cameras"):
             assert getattr(cfg, key) == value, key
     assert cfg.stitch_dist(0) == 0.8
     assert cfg.stitch_dist(10) == pytest.approx(1.8)
@@ -59,7 +59,7 @@ def test_defaults_are_the_strict_prototype_values():
 def test_relaxed_preset_and_overrides():
     cfg = parse_config({"preset": "relaxed"})
     for key, value in RELAXED.items():
-        if key not in ("zones", "room"):
+        if key not in ("zones", "room", "cameras"):
             assert getattr(cfg, key) == value, key
     assert cfg.vmax_mps == 4.0 and cfg.min_tracklet_s == 0.5 and cfg.min_tracklet_samples == 3
     assert cfg.stitch_gap_s == 30.0 and cfg.min_person_s == 1.0
@@ -97,13 +97,6 @@ def test_unknown_keys_are_ignored_and_reported():
     ({"smooth_window": 4}, "smooth_window"),
     ({"smooth_window": 0}, "smooth_window"),
     ({"version": 2}, "version"),
-    ({"cameras": []}, "cameras"),
-    ({"cameras": {"camInfo_00": [7.05, -0.35]}}, "cameras.camInfo_00"),
-    ({"cameras": {"camInfo_00": {"x": 7.05}}}, "cameras.camInfo_00"),
-    ({"cameras": {"camInfo_00": {"x": 7.05, "y": -0.35, "z": 2.5}}}, "cameras.camInfo_00"),
-    ({"cameras": {"camInfo_00": {"x": "7.05", "y": -0.35}}}, "cameras.camInfo_00.x"),
-    ({"cameras": {"camInfo_00": {"x": 7.05, "y": True}}}, "cameras.camInfo_00.y"),
-    ({"cameras": {"camInfo_00": {"x": 7.05, "y": None}}}, "cameras.camInfo_00.y"),
     ([1, 2], "JSON object"),
 ])
 def test_validation_errors_name_the_key(data, needle):
@@ -155,15 +148,36 @@ def test_cleaning_file_reloads_on_mtime_change_and_keeps_last_valid(tmp_path):
 CAMERAS = {"camInfo_01": {"x": 0.36, "y": -4.21}, "camInfo_00": {"x": 7.05, "y": -0.35}}
 
 
-def test_cameras_key_parses_outside_every_preset():
+def test_cameras_is_a_strict_key_defaulting_to_null():
+    assert STRICT["cameras"] is None and RELAXED["cameras"] is None
     assert parse_config({}).cameras == () and parse_config({"cameras": None}).cameras == ()
-    assert "cameras" not in STRICT and "cameras" not in RELAXED
     for preset in ("strict", "relaxed"):
         cfg = parse_config({"preset": preset, "cameras": CAMERAS})
         assert cfg.cameras == (("camInfo_00", 7.05, -0.35), ("camInfo_01", 0.36, -4.21))
-        assert cfg.ignored_keys == ()
+        assert cfg.ignored_keys == () and cfg.camera_warnings == ()
         assert parse_config({"preset": preset}).cameras == ()
     assert parse_config({"cameras": {"camInfo_00": {"x": 7, "y": 0}}}).cameras == (("camInfo_00", 7.0, 0.0),)
+
+
+@pytest.mark.parametrize("cameras, needle", [
+    ([], "cameras"),
+    ({"camInfo_00": [7.05, -0.35]}, "cameras.camInfo_00"),
+    ({"camInfo_00": {"x": 7.05}}, "cameras.camInfo_00"),
+    ({"camInfo_00": {"x": 7.05, "y": -0.35, "z": 2.5}}, "cameras.camInfo_00"),
+    ({"camInfo_00": {"x": "7.05", "y": -0.35}}, "cameras.camInfo_00.x"),
+    ({"camInfo_00": {"x": 7.05, "y": True}}, "cameras.camInfo_00.y"),
+    ({"camInfo_00": {"x": 7.05, "y": None}}, "cameras.camInfo_00.y"),
+    ({"camInfo_01": {"x": 0.36, "y": -4.21}, "camInfo_00": {"x": 7.05, "y": "a"}}, "cameras.camInfo_00.y"),
+])
+def test_invalid_cameras_value_is_ignored_whole_and_warned(cameras, needle):
+    cfg = parse_config({"preset": "relaxed", "room": {"x": [0.36, 7.05], "y": [-4.65, -0.35]},
+                        "vmax_mps": 2.5, "cameras": cameras})
+    assert cfg.cameras == ()                                          # no partial overrides
+    assert len(cfg.camera_warnings) == 1 and needle in cfg.camera_warnings[0]
+    assert cfg.camera_warnings[0].startswith("ignored invalid cameras value: ")
+    # Every other key still applies.
+    assert cfg.preset == "relaxed" and cfg.vmax_mps == 2.5
+    assert cfg.room == ((0.36, 7.05), (-4.65, -0.35)) and cfg.ignored_keys == ()
 
 
 def test_apply_camera_overrides_sets_source_and_warns_on_unknown_names():
@@ -178,17 +192,28 @@ def test_apply_camera_overrides_sets_source_and_warns_on_unknown_names():
     assert calib[0]["x"] == 7.46 and "source" not in calib[0]         # input left untouched
     cams, warnings = apply_camera_overrides(calib, parse_config({}))
     assert [c["source"] for c in cams] == ["calibration", "calibration"] and warnings == []
+    cams, warnings = apply_camera_overrides(calib, parse_config({"cameras": {"camInfo_00": 1}}))
+    assert [c["source"] for c in cams] == ["calibration", "calibration"]
+    assert len(warnings) == 1 and warnings[0].startswith("ignored invalid cameras value: ")
 
 
-def test_invalid_cameras_key_keeps_the_last_valid_config(tmp_path):
+def test_cameras_reload_with_the_file(tmp_path):
     path = tmp_path / "cleaning.json"
     cf = CleaningFile(path)
     _write(path, {"cameras": CAMERAS}, 1)
     good = cf.get()
     assert len(good.cameras) == 2 and cf.error is None
-    _write(path, {"cameras": {"camInfo_00": {"x": 7.05, "y": -0.35, "label": "kitchen"}}}, 2)
-    assert cf.get() is good and "cameras.camInfo_00" in cf.error
-    _write(path, {}, 3)
+    # An invalid cameras value is not a file error: the rest is loaded.
+    _write(path, {"vmax_mps": 2.5, "cameras": {"camInfo_00": {"x": 7.05, "y": -0.35, "label": "kitchen"}}}, 2)
+    cfg = cf.get()
+    assert cf.error is None and cfg.vmax_mps == 2.5 and cfg.cameras == ()
+    assert "cameras.camInfo_00" in cfg.camera_warnings[0]
+    # A file invalid for another reason keeps the last valid overrides.
+    _write(path, {"cameras": CAMERAS}, 3)
+    good = cf.get()
+    _write(path, {"cameras": {"camInfo_00": {"x": 1.0, "y": 1.0}}, "vmax_mps": -1}, 4)
+    assert cf.get() is good and "vmax_mps" in cf.error
+    _write(path, {}, 5)
     assert cf.get().cameras == () and cf.error is None
 
 

@@ -268,8 +268,20 @@ def test_meta_camera_overrides_follow_cleaning_json(store, clock, calib_dirs, tm
     body = meta()
     assert body["cameras"] == [{"name": "camInfo_00", "x": 1.0, "y": 2.0, "z": 4.0, "source": "config"}]
     assert body["camera_override_warnings"] == ["camera override camInfo_01 matches no camera model; ignored"]
-    # An invalid entry invalidates the file: the last valid config stays.
+    # An invalid cameras value is ignored as a whole and warned about.
     write_json(cleaning, {"version": 1, "cameras": {"camInfo_00": {"x": "far", "y": 2.0}}})
+    body = meta()
+    assert body["cameras"] == [{"name": "camInfo_00", "x": 2.0, "y": 3.0, "z": 4.0, "source": "calibration"}]
+    assert len(body["camera_override_warnings"]) == 1
+    assert "ignored invalid cameras value" in body["camera_override_warnings"][0]
+    assert "cameras.camInfo_00.x" in body["camera_override_warnings"][0]
+    # A file invalid for another reason serves the last valid config's overrides.
+    write_json(cleaning, {"version": 1, "cameras": {"camInfo_00": {"x": 1.0, "y": 2.0}}})
+    assert meta()["cameras"][0]["source"] == "config"
+    write_json(cleaning, {"version": 1, "vmax_mps": -1, "cameras": {"camInfo_00": {"x": 5.0, "y": 5.0}}})
+    body = meta()
+    assert body["cameras"] == [{"name": "camInfo_00", "x": 1.0, "y": 2.0, "z": 4.0, "source": "config"}]
+    write_json(cleaning, "{not json")
     assert meta()["cameras"][0]["x"] == 1.0
     write_json(cleaning, {"version": 1, "cameras": None})
     body = meta()
@@ -808,6 +820,19 @@ def test_camera_overrides_do_not_change_fused_output(fclient, files):
     with_ = frng(fclient, sid), fclient.get("/tracking/export", params=q, headers=data_headers(sid)).text
     assert with_[0]["summary"]["config_error"] is None and with_[0]["summary"]["config_warnings"] == []
     assert with_ == without
+
+
+def test_invalid_cameras_value_keeps_the_cleaning_keys_on_range(fclient, files):
+    cleaning, _ = files
+    sid = session(fclient)
+    write_json(cleaning, {"version": 1, "room": ROOM, "zones": [TV],
+                          "cameras": {"camInfo_00": {"x": 1.0, "y": 2.0, "z": 3.0}}})
+    s = frng(fclient, sid)["summary"]
+    assert s["config_error"] is None
+    assert s["people"] == 2 and s["dropped"]["zones"] == {"tv": 400}   # zones still apply
+    assert s["room_source"] == "config" and s["room"] == ROOM           # so does room
+    assert len(s["config_warnings"]) == 1
+    assert s["config_warnings"][0].startswith("ignored invalid cameras value: ")
 
 
 OFFSETS = {

@@ -160,7 +160,8 @@ class Cleaning:
         return {
             **room_summary(room, room_source),
             "config_error": self._public(self.config_file.error, self.config_file.path),
-            "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys],
+            "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys]
+                               + list(config.camera_warnings),
             "offsets_extra": {
                 "enabled": config.offsets_apply,
                 "learned": offsets is not None and bool(offsets.get("sensors")),
@@ -376,7 +377,8 @@ def create_app(
         if size is not None and t_gt2px is not None:
             floorplan = {"width": size[0], "height": size[1], "T_gt2px": t_gt2px}
         # Marker overrides come from the same cached, mtime-checked
-        # cleaning.json the fused routes use.
+        # cleaning.json the fused routes use, so an invalid file serves the
+        # last valid config's overrides.
         cameras, warnings = apply_camera_overrides(
             calib.read_cameras(settings.camera_models_dir) or [], cleaning.config_file.get())
         body = {
