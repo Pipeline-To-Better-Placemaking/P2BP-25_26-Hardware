@@ -32,7 +32,13 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__, calib
 from .auth import Claims, ticket_dependency
-from .cleaning import CleaningConfig, CleaningFile, resolve_room_source, room_summary
+from .cleaning import (
+    CleaningConfig,
+    CleaningFile,
+    apply_camera_overrides,
+    resolve_room_source,
+    room_summary,
+)
 from .fuse import FusedSample, Fuser, offsets_summary, summarize
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
 from .offsets import read_offsets
@@ -154,7 +160,8 @@ class Cleaning:
         return {
             **room_summary(room, room_source),
             "config_error": self._public(self.config_file.error, self.config_file.path),
-            "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys],
+            "config_warnings": [f"ignored unknown key {k}" for k in config.ignored_keys]
+                               + list(config.camera_warnings),
             "offsets_extra": {
                 "enabled": config.offsets_apply,
                 "learned": offsets is not None and bool(offsets.get("sensors")),
@@ -369,12 +376,20 @@ def create_app(
         floorplan = None
         if size is not None and t_gt2px is not None:
             floorplan = {"width": size[0], "height": size[1], "T_gt2px": t_gt2px}
-        return {
+        # Marker overrides come from the same cached, mtime-checked
+        # cleaning.json the fused routes use, so an invalid file serves the
+        # last valid config's overrides.
+        cameras, warnings = apply_camera_overrides(
+            calib.read_cameras(settings.camera_models_dir) or [], cleaning.config_file.get())
+        body = {
             "location_id": settings.location_id or None,
             "span": [span[0], span[1]] if span else None,
             "floorplan": floorplan,
-            "cameras": calib.read_cameras(settings.camera_models_dir) or [],
+            "cameras": cameras,
         }
+        if warnings:
+            body["camera_override_warnings"] = warnings
+        return body
 
     @app.get("/tracking/floorplan.png")
     def floorplan(claims: Claims = Depends(ticket)):

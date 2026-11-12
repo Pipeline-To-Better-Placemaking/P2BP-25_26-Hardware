@@ -13,6 +13,12 @@ Zones are areas whose detections are dropped: `{"name", "sensors"?,
 [[x, y], ...]}` in metres. `sensors` limits a zone to some cameras (a TV
 seen as a person by one camera only). `suggest_zones` proposes such zones
 from static single-camera hotspots in recorded detections.
+
+`cameras` moves the Replay's camera markers: `{"camInfo_00": {"x": 7.05,
+"y": -0.35}}` places that camera model's marker at the given world metres
+in `/tracking/meta`. It is display only; fusion, cleaning and exports
+never read it. Unlike every other key, an invalid `cameras` value does not
+invalidate the file: it is ignored as a whole and reported as a warning.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ STRICT: dict = {
     "version": 1,
     "room_margin_m": 0.3,
     "room": None,              # {"x": [a, b], "y": [a, b]}; overrides the calibration bounds when set
+    "cameras": None,           # {model stem: {"x", "y"}}; Replay marker overrides, display only
     "zones": [],
     "vmax_mps": 3.0,           # fastest plausible walk between samples of one track
     "speed_slack_m": 0.3,      # jitter allowance added to every speed check
@@ -137,6 +144,10 @@ class CleaningConfig:
     stitch_exclusive: bool = True
     smooth_window: int = 5
     min_person_s: float = 3.0
+    # Replay marker overrides, (camera model stem, x, y), sorted by name.
+    # Display only: nothing in fusion, cleaning or exports reads it.
+    cameras: tuple[tuple[str, float, float], ...] = ()
+    camera_warnings: tuple[str, ...] = ()   # an invalid `cameras` value, ignored
     ignored_keys: tuple[str, ...] = ()   # unknown keys found in the file
 
     def stitch_dist(self, gap_s: float) -> float:
@@ -213,12 +224,56 @@ def parse_zone(value, key: str = "zone") -> Zone:
     return Zone(name, sensors, tuple(pts))
 
 
+def parse_cameras(value) -> tuple[tuple[str, float, float], ...]:
+    """The `cameras` key: `{model stem: {"x": n, "y": n}}`, or None for no
+    override. Returns `(name, x, y)` tuples sorted by name."""
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise CleaningConfigError(f"cameras: expected an object, got {value!r}")
+    out = []
+    for name, entry in value.items():
+        key = f"cameras.{name}"
+        if not name:
+            raise CleaningConfigError("cameras: expected non-empty camera names")
+        if not isinstance(entry, dict) or set(entry) != {"x", "y"}:
+            raise CleaningConfigError(f"{key}: expected {{\"x\": n, \"y\": n}}, got {entry!r}")
+        out.append((name, _number(f"{key}.x", entry["x"]), _number(f"{key}.y", entry["y"])))
+    return tuple(sorted(out))
+
+
+def apply_camera_overrides(cameras: list[dict], config: CleaningConfig) -> tuple[list[dict], list[str]]:
+    """Calibration camera markers with the config's overrides applied.
+
+    Each camera keeps `name` and `z` and gains `source`: "config" when the
+    config places its `x` and `y`, else "calibration". Returns the cameras
+    and the warnings: the config's own `camera_warnings`, then one for
+    each override that matches no camera model.
+    """
+    overrides = {name: (x, y) for name, x, y in config.cameras}
+    out = []
+    for cam in cameras:
+        cam = dict(cam)
+        if cam.get("name") in overrides:
+            cam["x"], cam["y"] = overrides[cam["name"]]
+            cam["source"] = "config"
+        else:
+            cam["source"] = "calibration"
+        out.append(cam)
+    known = {cam.get("name") for cam in cameras}
+    warnings = list(config.camera_warnings) + [
+        f"camera override {name} matches no camera model; ignored"
+        for name in sorted(overrides) if name not in known]
+    return out, warnings
+
+
 def parse_config(data) -> CleaningConfig:
     """Build a config from parsed cleaning.json content (a dict).
 
     Each key takes the file's value when present, else the selected preset's.
     Unknown keys are logged and listed in `ignored_keys`; invalid values
-    raise `CleaningConfigError` naming the key.
+    raise `CleaningConfigError` naming the key, except an invalid
+    `cameras` value, which is dropped and listed in `camera_warnings`.
     """
     if data is None:
         data = {}
@@ -241,6 +296,14 @@ def parse_config(data) -> CleaningConfig:
             out[key] = tuple(parse_zone(z, f"zones[{i}]") for i, z in enumerate(value))
         elif key == "room":
             out[key] = None if value is None else _rect("room", value)
+        elif key == "cameras":
+            # Display only, so a mistake here never costs the cleaning keys.
+            try:
+                out[key] = parse_cameras(value)
+            except CleaningConfigError as exc:
+                log.warning("cleaning config: ignoring the cameras key: %s", exc)
+                out[key] = ()
+                out["camera_warnings"] = (f"ignored invalid cameras value: {exc}",)
         elif key in _BOOLS:
             if not isinstance(value, bool):
                 raise CleaningConfigError(f"{key}: expected true or false, got {value!r}")
