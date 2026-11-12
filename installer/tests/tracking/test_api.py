@@ -242,7 +242,7 @@ def test_meta_with_calibration(client):
     assert body["span"] == [T0, T0 + 3900]
     assert body["floorplan"] == {"width": 4, "height": 3, "T_gt2px": T_GT2PX}
     # camInfo_01 has an unusable matrix and is skipped.
-    assert body["cameras"] == [{"name": "camInfo_00", "x": 2.0, "y": 3.0, "z": 4.0}]
+    assert body["cameras"] == [{"name": "camInfo_00", "x": 2.0, "y": 3.0, "z": 4.0, "source": "calibration"}]
 
 
 def test_meta_without_calibration_is_nulls(tmp_path, clock):
@@ -252,6 +252,29 @@ def test_meta_without_calibration_is_nulls(tmp_path, clock):
     assert r.json() == {"location_id": "loc-a", "span": None, "floorplan": None, "cameras": []}
     c = make_client(TrackStore(tmp_path / "empty"), clock)
     assert c.get("/tracking/meta", headers=auth()).json()["cameras"] == []
+
+
+def test_meta_camera_overrides_follow_cleaning_json(store, clock, calib_dirs, tmp_path):
+    cleaning = tmp_path / "cleaning.json"
+    c = make_client(store, clock, *calib_dirs, cleaning_file=cleaning)
+    meta = lambda: c.get("/tracking/meta", headers=auth()).json()  # noqa: E731
+    write_json(cleaning, {"version": 1, "cameras": {"camInfo_00": {"x": 7.05, "y": -0.35}}})
+    body = meta()
+    assert body["cameras"] == [{"name": "camInfo_00", "x": 7.05, "y": -0.35, "z": 4.0, "source": "config"}]
+    assert "camera_override_warnings" not in body
+    # Re-read on change: an unknown name is ignored and reported.
+    write_json(cleaning, {"version": 1, "cameras": {"camInfo_00": {"x": 1.0, "y": 2.0},
+                                                    "camInfo_01": {"x": 0.36, "y": -4.21}}})
+    body = meta()
+    assert body["cameras"] == [{"name": "camInfo_00", "x": 1.0, "y": 2.0, "z": 4.0, "source": "config"}]
+    assert body["camera_override_warnings"] == ["camera override camInfo_01 matches no camera model; ignored"]
+    # An invalid entry invalidates the file: the last valid config stays.
+    write_json(cleaning, {"version": 1, "cameras": {"camInfo_00": {"x": "far", "y": 2.0}}})
+    assert meta()["cameras"][0]["x"] == 1.0
+    write_json(cleaning, {"version": 1, "cameras": None})
+    body = meta()
+    assert body["cameras"] == [{"name": "camInfo_00", "x": 2.0, "y": 3.0, "z": 4.0, "source": "calibration"}]
+    assert "camera_override_warnings" not in body
 
 
 def test_meta_with_broken_transforms(client, calib_dirs):
@@ -773,6 +796,18 @@ def test_config_error_and_warnings_are_reported(fclient, files):
     assert body["summary"]["people"] == 2  # the last valid config still applies
     write_json(cleaning, {"version": 1, "room": ROOM})
     assert frng(fclient, sid)["summary"]["config_error"] is None
+
+
+def test_camera_overrides_do_not_change_fused_output(fclient, files):
+    cleaning, _ = files
+    sid = session(fclient, kind="export")
+    q = {"from": T0, "to": FUSED_TO, "mode": "fused"}
+    without = frng(fclient, sid), fclient.get("/tracking/export", params=q, headers=data_headers(sid)).text
+    write_json(cleaning, {"version": 1, "room": ROOM, "cameras": {
+        "camInfo_00": {"x": 3.2, "y": -3.7}, "camera1": {"x": 0.5, "y": -1.0}}})
+    with_ = frng(fclient, sid), fclient.get("/tracking/export", params=q, headers=data_headers(sid)).text
+    assert with_[0]["summary"]["config_error"] is None and with_[0]["summary"]["config_warnings"] == []
+    assert with_ == without
 
 
 OFFSETS = {

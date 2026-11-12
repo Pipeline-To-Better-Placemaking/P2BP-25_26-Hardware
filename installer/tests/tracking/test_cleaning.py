@@ -18,6 +18,7 @@ from mv3dt_tracking.cleaning import (
     CleaningConfig,
     CleaningConfigError,
     CleaningFile,
+    apply_camera_overrides,
     load_config,
     parse_config,
     parse_zone,
@@ -96,6 +97,13 @@ def test_unknown_keys_are_ignored_and_reported():
     ({"smooth_window": 4}, "smooth_window"),
     ({"smooth_window": 0}, "smooth_window"),
     ({"version": 2}, "version"),
+    ({"cameras": []}, "cameras"),
+    ({"cameras": {"camInfo_00": [7.05, -0.35]}}, "cameras.camInfo_00"),
+    ({"cameras": {"camInfo_00": {"x": 7.05}}}, "cameras.camInfo_00"),
+    ({"cameras": {"camInfo_00": {"x": 7.05, "y": -0.35, "z": 2.5}}}, "cameras.camInfo_00"),
+    ({"cameras": {"camInfo_00": {"x": "7.05", "y": -0.35}}}, "cameras.camInfo_00.x"),
+    ({"cameras": {"camInfo_00": {"x": 7.05, "y": True}}}, "cameras.camInfo_00.y"),
+    ({"cameras": {"camInfo_00": {"x": 7.05, "y": None}}}, "cameras.camInfo_00.y"),
     ([1, 2], "JSON object"),
 ])
 def test_validation_errors_name_the_key(data, needle):
@@ -139,6 +147,49 @@ def test_cleaning_file_reloads_on_mtime_change_and_keeps_last_valid(tmp_path):
     assert cf.get().preset == "strict" and cf.error is None
     path.unlink()
     assert cf.get() == CleaningConfig()
+
+
+# -- camera markers ----------------------------------------------------------
+
+
+CAMERAS = {"camInfo_01": {"x": 0.36, "y": -4.21}, "camInfo_00": {"x": 7.05, "y": -0.35}}
+
+
+def test_cameras_key_parses_outside_every_preset():
+    assert parse_config({}).cameras == () and parse_config({"cameras": None}).cameras == ()
+    assert "cameras" not in STRICT and "cameras" not in RELAXED
+    for preset in ("strict", "relaxed"):
+        cfg = parse_config({"preset": preset, "cameras": CAMERAS})
+        assert cfg.cameras == (("camInfo_00", 7.05, -0.35), ("camInfo_01", 0.36, -4.21))
+        assert cfg.ignored_keys == ()
+        assert parse_config({"preset": preset}).cameras == ()
+    assert parse_config({"cameras": {"camInfo_00": {"x": 7, "y": 0}}}).cameras == (("camInfo_00", 7.0, 0.0),)
+
+
+def test_apply_camera_overrides_sets_source_and_warns_on_unknown_names():
+    calib = [{"name": "camInfo_00", "x": 7.46, "y": -0.82, "z": 2.4},
+             {"name": "camInfo_01", "x": 0.79, "y": -4.21, "z": 2.3}]
+    cfg = parse_config({"cameras": {"camInfo_00": {"x": 7.05, "y": -0.35},
+                                    "camInfo_09": {"x": 1.0, "y": 1.0}}})
+    cams, warnings = apply_camera_overrides(calib, cfg)
+    assert cams == [{"name": "camInfo_00", "x": 7.05, "y": -0.35, "z": 2.4, "source": "config"},
+                    {"name": "camInfo_01", "x": 0.79, "y": -4.21, "z": 2.3, "source": "calibration"}]
+    assert warnings == ["camera override camInfo_09 matches no camera model; ignored"]
+    assert calib[0]["x"] == 7.46 and "source" not in calib[0]         # input left untouched
+    cams, warnings = apply_camera_overrides(calib, parse_config({}))
+    assert [c["source"] for c in cams] == ["calibration", "calibration"] and warnings == []
+
+
+def test_invalid_cameras_key_keeps_the_last_valid_config(tmp_path):
+    path = tmp_path / "cleaning.json"
+    cf = CleaningFile(path)
+    _write(path, {"cameras": CAMERAS}, 1)
+    good = cf.get()
+    assert len(good.cameras) == 2 and cf.error is None
+    _write(path, {"cameras": {"camInfo_00": {"x": 7.05, "y": -0.35, "label": "kitchen"}}}, 2)
+    assert cf.get() is good and "cameras.camInfo_00" in cf.error
+    _write(path, {}, 3)
+    assert cf.get().cameras == () and cf.error is None
 
 
 # -- zones -------------------------------------------------------------------

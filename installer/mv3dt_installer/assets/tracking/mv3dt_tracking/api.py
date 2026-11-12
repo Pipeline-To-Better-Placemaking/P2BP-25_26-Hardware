@@ -32,7 +32,13 @@ from starlette.concurrency import run_in_threadpool
 
 from . import __version__, calib
 from .auth import Claims, ticket_dependency
-from .cleaning import CleaningConfig, CleaningFile, resolve_room_source, room_summary
+from .cleaning import (
+    CleaningConfig,
+    CleaningFile,
+    apply_camera_overrides,
+    resolve_room_source,
+    room_summary,
+)
 from .fuse import FusedSample, Fuser, offsets_summary, summarize
 from .lock import Busy, LeaseManager, Locked, NoLease, NotHolder, RateLimited
 from .offsets import read_offsets
@@ -369,12 +375,19 @@ def create_app(
         floorplan = None
         if size is not None and t_gt2px is not None:
             floorplan = {"width": size[0], "height": size[1], "T_gt2px": t_gt2px}
-        return {
+        # Marker overrides come from the same cached, mtime-checked
+        # cleaning.json the fused routes use.
+        cameras, warnings = apply_camera_overrides(
+            calib.read_cameras(settings.camera_models_dir) or [], cleaning.config_file.get())
+        body = {
             "location_id": settings.location_id or None,
             "span": [span[0], span[1]] if span else None,
             "floorplan": floorplan,
-            "cameras": calib.read_cameras(settings.camera_models_dir) or [],
+            "cameras": cameras,
         }
+        if warnings:
+            body["camera_override_warnings"] = warnings
+        return body
 
     @app.get("/tracking/floorplan.png")
     def floorplan(claims: Claims = Depends(ticket)):
