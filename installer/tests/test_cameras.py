@@ -87,6 +87,51 @@ def test_render_then_parse_round_trips():
     assert parsed == original
 
 
+def test_exclude_boxes_round_trips_and_is_written_only_when_set():
+    original = [
+        cameras.Camera(
+            id="c1",
+            mac="d0:3b:f4:01:52:79",
+            ip="169.254.1.2",
+            position="top-left",
+            exclude_boxes="530,175,245,225;0,0,10,10",
+        ),
+        cameras.Camera(id="c2", mac="d0:3b:f4:01:52:91", ip="169.254.1.3", position="x"),
+    ]
+
+    text = cameras.render_inventory(original, header="# a header")
+
+    assert '    exclude_boxes: "530,175,245,225;0,0,10,10"\n' in text
+    assert text.count("exclude_boxes") == 1
+    assert cameras.parse_inventory(text) == original
+
+
+@pytest.mark.parametrize("raw", ['"530,175,245,225"', "'530,175,245,225'", "530,175,245,225"])
+def test_parse_inventory_strips_quotes_from_exclude_boxes(raw):
+    text = (
+        "cameras:\n"
+        "  - id: c2\n"
+        "    ip: 169.254.1.3\n"
+        f"    exclude_boxes: {raw}\n"
+    )
+
+    assert cameras.parse_inventory(text)[0].exclude_boxes == "530,175,245,225"
+
+
+def test_parse_inventory_defaults_exclude_boxes_to_empty():
+    text = "cameras:\n  - id: c1\n    ip: 169.254.1.2\n"
+
+    assert cameras.parse_inventory(text)[0].exclude_boxes == ""
+
+
+def test_seed_inventory_documents_but_does_not_set_exclude_boxes():
+    text = _SEED_PATH.read_text(encoding="utf-8")
+    header = text.split("\ncameras:", 1)[0]
+
+    assert "exclude_boxes" in header
+    assert all(cam.exclude_boxes == "" for cam in cameras.parse_inventory(text))
+
+
 def test_parse_inventory_against_the_real_committed_seed_file():
     text = _SEED_PATH.read_text(encoding="utf-8")
     parsed = cameras.parse_inventory(text)
@@ -560,6 +605,64 @@ def test_merge_refreshes_ip_and_preserves_id_position_enabled():
     assert merged[0].ip == "new-ip"
     assert merged[0].position == "top-left"
     assert merged[0].enabled is False
+
+
+def test_merge_preserves_exclude_boxes_for_found_and_missing_cameras():
+    previous = [
+        cameras.Camera(
+            id="c1",
+            mac="d0:3b:f4:00:00:01",
+            ip="old-ip",
+            position="top-left",
+            exclude_boxes="530,175,245,225",
+        ),
+        cameras.Camera(
+            id="c2",
+            mac="d0:3b:f4:00:00:02",
+            ip="1.2.3.4",
+            position="top-right",
+            exclude_boxes="1,2,3,4",
+        ),
+    ]
+    discovered = [cameras.Camera(id="", mac="d0:3b:f4:00:00:01", ip="new-ip", position="")]
+
+    merged = cameras.merge(previous, discovered)
+
+    assert [cam.exclude_boxes for cam in merged] == ["530,175,245,225", "1,2,3,4"]
+    assert merged[0].ip == "new-ip"
+
+
+def test_refresh_keeps_exclude_boxes_across_a_rescan(tmp_path):
+    install_dir = tmp_path / "install"
+    install_dir.mkdir()
+    (install_dir / "cameras.yml").write_text(
+        cameras.render_inventory(
+            [
+                cameras.Camera(
+                    id="c1",
+                    mac="d0:3b:f4:01:52:79",
+                    ip="old-ip",
+                    position="top-left",
+                    exclude_boxes="530,175,245,225",
+                )
+            ],
+            header="# generated",
+        ),
+        encoding="utf-8",
+    )
+
+    def runner(argv, **kwargs):
+        if argv[0] == "arp-scan":
+            return _cp(argv, 0, stdout=_ARP_SCAN_OUTPUT)
+        if argv[:5] == ["ip", "-4", "-o", "addr", "show"]:
+            return _cp(argv, 0, stdout="inet 169.254.1.5/16")
+        return _cp(argv, 1)
+
+    cameras.refresh(install_dir, interfaces=["eth0"], non_interactive=True, runner=runner)
+
+    text = (install_dir / "cameras.yml").read_text(encoding="utf-8")
+    assert '    exclude_boxes: "530,175,245,225"\n' in text
+    assert cameras.parse_inventory(text)[0].ip == "169.254.1.10"
 
 
 def test_merge_retains_and_flags_a_camera_missing_from_this_scan():

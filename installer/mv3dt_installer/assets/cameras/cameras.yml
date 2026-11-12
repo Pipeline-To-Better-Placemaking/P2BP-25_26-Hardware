@@ -60,6 +60,17 @@
 #        This one matters: the overlay is burned into the encoded stream, so
 #        leaving it on feeds timestamp/name pixels into PeopleNet detection and
 #        into AutoMagicCalib's feature matching.
+#
+# OPTIONAL PER-CAMERA FIELD — exclude_boxes (hand-edited, kept across rescans).
+#   A quoted string of rectangles "left,top,width,height" separated by ";",
+#   in whole pixels of that camera's lens-corrected 1920x1080 frame, each
+#   rectangle inside the frame, e.g.
+#     exclude_boxes: "530,175,245,225"
+#   A detection lying entirely inside one rectangle (a TV, a poster) is
+#   dropped before the tracker; a box that only overlaps it is kept. Step 4
+#   renders it into <install_dir>/deepstream/exclusion.conf; restart
+#   mv3dt-pipeline@<slug> to apply. Spec:
+#   installer/plan/DETECTION-EXCLUSION-ZONES.md.
 
 cameras:
   - id: c1

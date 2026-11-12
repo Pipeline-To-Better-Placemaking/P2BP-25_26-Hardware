@@ -131,6 +131,10 @@ class Camera:
     rtsp_path: str = _DEFAULT_RTSP_PATH
     enabled: bool = True
     stream_ok: Optional[bool] = None
+    # DETECTION-EXCLUSION-ZONES section 7.1: `left,top,width,height`
+    # rectangles separated by `;`, in this camera's lens-corrected frame.
+    # Hand-edited by the operator; Step 4 validates and renders it.
+    exclude_boxes: str = ""
 
 
 @dataclass
@@ -218,6 +222,7 @@ def _camera_from_fields(fields: dict) -> Camera:
         rtsp_path=_strip_quotes(fields.get("rtsp_path", "")) or _DEFAULT_RTSP_PATH,
         enabled=_parse_bool(fields.get("enabled", "true")),
         stream_ok=_parse_bool(stream_ok_raw) if stream_ok_raw is not None else None,
+        exclude_boxes=_strip_quotes(fields.get("exclude_boxes", "")),
     )
 
 
@@ -277,6 +282,8 @@ def render_inventory(cameras: Sequence, *, header: str) -> str:
         lines.append(f"    enabled: {'true' if cam.enabled else 'false'}")
         if cam.stream_ok is not None:
             lines.append(f"    stream_ok: {'true' if cam.stream_ok else 'false'}")
+        if cam.exclude_boxes:
+            lines.append(f'    exclude_boxes: "{cam.exclude_boxes}"')
     return "\n".join(lines) + "\n"
 
 
@@ -649,7 +656,9 @@ def bind_positions(
 
 
 def merge(previous: Sequence, discovered: Sequence) -> list:
-    """doc 00 §15.4: match on MAC, refresh only the IP. A camera missing
+    """doc 00 §15.4: match on MAC, refresh only the IP. Every other field
+    of a known camera, the operator's `exclude_boxes` included, comes from
+    `previous` (DETECTION-EXCLUSION-ZONES section 7.1). A camera missing
     from `discovered` is retained and flagged (`stream_ok` reset to
     `None`, since it was not probed this scan) rather than deleted -- a
     powered-off camera is not a decommissioned one."""
