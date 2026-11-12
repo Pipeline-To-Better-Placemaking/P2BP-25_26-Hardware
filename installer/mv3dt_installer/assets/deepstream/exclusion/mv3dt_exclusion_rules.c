@@ -4,7 +4,10 @@
  *
  * Config: a GKeyFile with one group per source index, each with a `rects`
  * list of "left,top,width,height" entries in streammux pixels, separated
- * by ';':
+ * by ';'. Numbers are non-negative decimal integers; width and height are
+ * greater than zero; blanks around numbers and entries and empty entries
+ * are allowed. Frame bounds are not checked here.
+ * Example:
  *
  *   [source1]
  *   rects=530,175,245,225
@@ -13,21 +16,26 @@
  * other than source<N> with N below MV3DT_EXCLUSION_MAX_SOURCES are ignored.
  */
 
-#include <math.h>
 #include <string.h>
 
 #include "mv3dt_exclusion_rules.h"
 
-/* Parse one decimal number, surrounding blanks allowed. */
+/* Parse one non-negative decimal integer: digits only, no sign and no
+ * fraction, surrounding blanks allowed (section 4.2). */
 static gboolean
 parse_number (gchar * text, gdouble * out)
 {
   gchar *s = g_strstrip (text);
-  gchar *end = NULL;
-  if (!*s)
+  guint64 n = 0;
+  if (!g_ascii_isdigit (*s))
     return FALSE;
-  *out = g_ascii_strtod (s, &end);
-  return end != s && *end == '\0' && isfinite (*out);
+  for (const gchar * c = s; *c; c++)
+    if (!g_ascii_isdigit (*c))
+      return FALSE;
+  if (!g_ascii_string_to_unsigned (s, 10, 0, G_MAXUINT32, &n, NULL))
+    return FALSE;
+  *out = (gdouble) n;
+  return TRUE;
 }
 
 /* Parse a rects value into out. FALSE on any bad entry; out is then left

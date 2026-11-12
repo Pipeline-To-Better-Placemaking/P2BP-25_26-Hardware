@@ -174,13 +174,13 @@ def test_parses_multiple_rects_and_sources(driver: Path) -> None:
         "[source1]\n"
         "rects=530,175,245,225\n"
         "[source3]\n"
-        "rects= 0,0,10,20 ; 100.5,200,50,60.5 ;\n",
+        "rects=0,0,10,20;100,200,50,60\n",
     )
     assert lines == [
         "total 3",
         "source 1 530 175 775 400",
         "source 3 0 0 10 20",
-        "source 3 100.5 200 150.5 260.5",
+        "source 3 100 200 150 260",
     ]
     assert stderr == ""
 
@@ -197,6 +197,13 @@ def test_parses_multiple_rects_and_sources(driver: Path) -> None:
         "1,2,-3,4",
         "1,2,3,-4",
         "1,2,nan,4",
+        "1,2,1.5,4",
+        "1.0,2,3,4",
+        "-3,2,3,4",
+        "+3,2,3,4",
+        "1e2,2,3,4",
+        "1 0,2,3,4",
+        "0x10,2,3,4",
     ],
 )
 def test_bad_entry_rejects_its_group_only(driver: Path, bad: str) -> None:
@@ -206,6 +213,19 @@ def test_bad_entry_rejects_its_group_only(driver: Path, bad: str) -> None:
     )
     assert lines == ["total 1", "source 2 1 2 4 6"]
     assert "bad rects in [source0]" in stderr
+
+
+def test_whitespace_and_trailing_separator_are_accepted(driver: Path) -> None:
+    lines, stderr = _parse(
+        driver, "[source0]\nrects= 1 , 2 ,\t3, 4 ;  ; 10,20,30,40 ;\n"
+    )
+    assert lines == ["total 2", "source 0 1 2 4 6", "source 0 10 20 40 60"]
+    assert stderr == ""
+
+
+def test_frame_bounds_are_not_checked(driver: Path) -> None:
+    lines, _ = _parse(driver, "[source0]\nrects=1900,1000,500,500\n")
+    assert lines == ["total 1", "source 0 1900 1000 2400 1500"]
 
 
 @pytest.mark.parametrize(
