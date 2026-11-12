@@ -283,7 +283,7 @@ header comment.
 `exclusion.conf` is **out of date** when it is missing, or when a fresh
 render differs from all three of: the file, its pending
 `exclusion.conf.installer-new` (when one exists), and the content the
-manifest records as last offered (its sha256 in
+manifest records as last written by the installer (its sha256 in
 `/var/lib/mv3dt-installer/managed-files.json`). Comparing with the pending
 copy and the manifest stops an operator-edited file from triggering a
 re-render on every check: once the installer has offered a render, either a
