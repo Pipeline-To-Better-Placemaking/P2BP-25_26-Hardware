@@ -158,7 +158,7 @@ to paste.
 | Owner | the invoking user, mode `644` |
 | Seeded | once by Step 8; never overwritten ([section 10](#10-step-8-changes)) |
 | Reload | re-read when its mtime changes; no restart |
-| Invalid file | keep the last valid config, or strict defaults when none loaded yet; log the error and surface it as `summary.config_error` |
+| Invalid file | keep the last valid config, or strict defaults when none loaded yet; log the error and surface it as `summary.config_error`. Exception: an invalid `cameras` value is ignored on its own and never invalidates the file ([`REPLAY-PRESENTATION` section 4.1](REPLAY-PRESENTATION.md#41-key-required)) |
 | Missing file | strict defaults |
 
 Resolution order for every key: the value present in the file, else the

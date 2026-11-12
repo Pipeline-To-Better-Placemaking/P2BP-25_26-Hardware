@@ -194,9 +194,10 @@ Open decisions:
 ## 8. Verification
 
 1. **Hardware**: tests for the `cameras` key (valid override, unknown name
-   warning, invalid values making the file invalid, no effect on fusion)
-   and for the `/tracking/meta` fields of
-   [section 4.2](#42-trackingmeta-required).
+   warning, an invalid `cameras` value ignored as a whole while every other
+   key still applies and the warning appears in `camera_override_warnings`
+   and `summary.config_warnings`, no effect on fusion) and for the
+   `/tracking/meta` fields of [section 4.2](#42-trackingmeta-required).
 2. **Web**: the client has no test runner, so verification is
    `npm run build` (type check and bundle), `npm run lint`, a throwaway
    script exercising the pure tail-window and heatmap functions against the
@@ -212,7 +213,7 @@ Open decisions:
 
 | Unit | Branch | Files touched | Depends on | Wave |
 |---|---|---|---|---|
-| P1 Spec | `feat/installer-replay-presentation-spec` | `installer/plan/REPLAY-PRESENTATION.md`, `installer/plan/TRACKING-FUSION-AND-CLEANING.md` (section 4.2 row, section 12 contract), `installer/plan/STEP-8-TRACKING-HISTORY.md` (section 8 meta row) | none | 1 |
+| P1 Spec | `feat/installer-replay-presentation-spec` | `installer/plan/REPLAY-PRESENTATION.md`, `installer/plan/TRACKING-FUSION-AND-CLEANING.md` (section 4.1 invalid-file row, section 4.2 row, section 12 contract), `installer/plan/STEP-8-TRACKING-HISTORY.md` (section 8 meta row) | none | 1 |
 | P2 Camera marker override | `feat/installer-camera-markers` | `assets/tracking/mv3dt_tracking/cleaning.py`, `assets/tracking/mv3dt_tracking/api.py`, `tests/tracking/test_cleaning.py`, `tests/tracking/test_api.py` | none | 1 |
 | P3 Comet trails (web) | `feat/replay-comet-trails` | `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/TrackingReplayPanel.tsx` | none | 1 |
 | P4 Dwell heatmap (web) | `feat/replay-heatmap` | `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/TrackingReplayPanel.tsx`, a new `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/replayHeatmap.ts` | P3 | 2 |
