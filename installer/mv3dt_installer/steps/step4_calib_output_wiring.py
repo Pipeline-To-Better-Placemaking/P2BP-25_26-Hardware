@@ -946,13 +946,19 @@ def render_exclusion_config(
 
 def _exclusion_config_current(ctx: "Context") -> bool:
     """Whether `exclusion.conf` is not out of date (DETECTION-EXCLUSION-ZONES
-    section 7.3): it exists, and a fresh render of cameras.yml equals it or
-    its pending `.installer-new`. Accepting the pending copy keeps an
-    operator-edited file from triggering a re-render on every check."""
+    section 7.3): it exists, and a fresh render of cameras.yml equals the
+    file, its pending `.installer-new`, or the digest the managed-files
+    manifest recorded for it. Accepting the pending copy and the recorded
+    digest keeps an operator-edited file from triggering a re-render on
+    every check: `write_managed` leaves no pending copy when the render is
+    what it last wrote."""
     expected = render_exclusion_config(_load_enabled_cameras(ctx))
     path = ctx.install_dir / "deepstream" / EXCLUSION_CONFIG_NAME
     if not path.is_file():
         return False
+    expected_digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    if managed_files.Manifest().get(path) == expected_digest:
+        return True
     for candidate in (path, managed_files.pending_path(path)):
         try:
             if candidate.read_text(encoding="utf-8") == expected:
