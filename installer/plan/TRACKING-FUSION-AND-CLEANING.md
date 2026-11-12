@@ -109,6 +109,11 @@ no DeepStream changes.** The pipeline, tracker config, message converter and
 recorder stay exactly as Step 8 and the live baseline leave them. Fusion is a
 pure function of recorded rows plus two workstation files.
 
+> **Amended 2026-11-12:** the "no DeepStream changes" clause is lifted for
+> the detection exclusion filter and the fusion gate in
+> [`DETECTION-EXCLUSION` section 3.5](DETECTION-EXCLUSION-ZONES.md#35-amendment-to-tracking-fusion-section-31-resolved).
+> Everything else in this section stands.
+
 **LOCKED: no 2D-box position bypass.** Floor positions remain DeepStream's
 `footLocation3D` (or its `bbox3d` fallback,
 [`STEP-8` section 5](STEP-8-TRACKING-HISTORY.md#5-decoding-nvframe)). The
