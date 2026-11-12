@@ -415,7 +415,7 @@ ticket ([section 3.2](#32-tickets-required)).
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /health` | none | liveness, `200` when up |
-| `GET /tracking/meta` | ticket | location, recorded data span, floor-plan size, the world-to-pixel `T_gt2px` from `transforms.yml`, camera positions from the camera models |
+| `GET /tracking/meta` | ticket | location, recorded data span, floor-plan size, the world-to-pixel `T_gt2px` from `transforms.yml`, camera positions from the camera models or the `cleaning.json` `cameras` override ([`REPLAY-PRESENTATION` section 4.2](REPLAY-PRESENTATION.md#42-trackingmeta-required)) |
 | `GET /tracking/floorplan.png` | ticket | AMC `map.png` |
 | `POST /tracking/session` | ticket | acquire the lease ([section 9](#9-data-access-lock-required)) |
 | `POST /tracking/session/{id}/heartbeat` | ticket | keep the lease alive |
