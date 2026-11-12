@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -84,6 +85,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from mv3dt_installer import app as app_mod
 from mv3dt_installer import cameras as cameras_mod
 from mv3dt_installer import config as config_mod
+from mv3dt_installer import progress_exec
 from mv3dt_installer import prompting
 from mv3dt_installer import shellout
 from mv3dt_installer import systemd as systemd_mod
@@ -602,6 +604,42 @@ DEEPSTREAM_APP = "deepstream-test5-app"
 #: match that truncated name.
 DEEPSTREAM_APP_PROCESS = DEEPSTREAM_APP[:15]
 
+#: DETECTION-EXCLUSION-ZONES section 6: the patched test5 app Step 5 builds
+#: (section 5 of that doc). Its name is exactly 15 characters, so it is also
+#: its process name.
+EXCLUSION_APP_NAME = "mv3dt-test5-app"
+
+#: The `pgrep -x`/`pkill -x` pattern matching either app. procps anchors the
+#: whole extended regex under `-x`, so this matches only those two names.
+DEEPSTREAM_PROCESS_PATTERN = f"{DEEPSTREAM_APP_PROCESS}|{EXCLUSION_APP_NAME}"
+
+#: DETECTION-EXCLUSION-ZONES sections 6 and 7.2: the config Step 4 renders
+#: and the variable the filter reads it from.
+EXCLUSION_CONFIG_NAME = "exclusion.conf"
+EXCLUSION_CONFIG_ENV = "MV3DT_EXCLUSION_CONFIG"
+
+
+def exclusion_app_path(install_dir: Any) -> pathlib.Path:
+    return pathlib.Path(install_dir) / "bin" / EXCLUSION_APP_NAME
+
+
+def pipeline_app(ctx: "Context") -> str:
+    """DETECTION-EXCLUSION-ZONES section 6: the built filter app when it
+    exists and is executable, else the stock `deepstream-test5-app`."""
+    built = exclusion_app_path(ctx.install_dir)
+    if built.is_file() and os.access(built, os.X_OK):
+        return str(built)
+    return DEEPSTREAM_APP
+
+
+def exclusion_env(ctx: "Context") -> dict[str, str]:
+    """The variable pointing the filter at `exclusion.conf`, set only when
+    the file exists."""
+    path = pathlib.Path(ctx.install_dir) / "deepstream" / EXCLUSION_CONFIG_NAME
+    if path.is_file():
+        return {EXCLUSION_CONFIG_ENV: str(path)}
+    return {}
+
 
 def source_deepstream_env(ctx: "Context") -> dict[str, str]:
     """Best-effort `. /etc/profile.d/deepstream.sh; env` diff, returned as
@@ -845,20 +883,41 @@ def _start_pipeline_foreground(
         config_path = preview_path
 
     ctx.log.info(render_validation_banner(entry))
-    ctx.log.info(f"Launching: {DEEPSTREAM_APP} -c {config_path.name} (cwd: {config_path.parent})")
+    app = pipeline_app(ctx)
+    ctx.log.info(f"Launching: {app} -c {config_path.name} (cwd: {config_path.parent})")
 
-    argv = [DEEPSTREAM_APP, "-c", str(config_path)]
+    argv = [app, "-c", str(config_path)]
+    return _exec_pipeline_app(ctx, argv, config_path, env_overlay, dry_run=dry_run, execv=execv)
+
+
+def _exec_pipeline_app(
+    ctx: "Context",
+    argv: list,
+    config_path: pathlib.Path,
+    env_overlay: dict[str, str],
+    *,
+    dry_run: bool,
+    execv: Callable[[str, list], None],
+) -> int:
+    """The shared tail of both launch paths: chdir to the config, export
+    the exclusion variable (DETECTION-EXCLUSION-ZONES section 6), and exec."""
+    extra_env = exclusion_env(ctx)
+    if extra_env:
+        ctx.log.info(f"{EXCLUSION_CONFIG_ENV}={extra_env[EXCLUSION_CONFIG_ENV]}")
     if dry_run:
         ctx.log.info(f"[dry-run] cd {config_path.parent} && {' '.join(argv)}")
         return 0
 
     os.chdir(config_path.parent)
+    # `execv` keeps this process's environment, so the variable has to be
+    # in `os.environ` itself to reach the app.
+    os.environ.update(extra_env)
     child_env = {**os.environ, **env_overlay}
     binary = shutil.which(argv[0], path=child_env.get("PATH")) or argv[0]
     try:
         execv(binary, argv)
     except OSError as exc:
-        ctx.log.error(f"failed to exec {DEEPSTREAM_APP}: {exc}")
+        ctx.log.error(f"failed to exec {argv[0]}: {exc}")
         return 1
     return 0  # pragma: no cover -- execv never returns on success
 
@@ -896,23 +955,13 @@ def _start_pipeline_service_exec(
     ensure_mosquitto(ctx)
     env_overlay = source_deepstream_env(ctx)
 
-    argv = [DEEPSTREAM_APP, "-c", str(config_path)]
+    app = pipeline_app(ctx)
+    argv = [app, "-c", str(config_path)]
     if _viewer_stream_on(ctx):
         # Tiled view labels for the VLC viewer stream Step 4 renders.
         argv.insert(1, "-t")
-    if dry_run:
-        ctx.log.info(f"[dry-run] cd {config_path.parent} && {' '.join(argv)}")
-        return 0
-
-    os.chdir(config_path.parent)
-    child_env = {**os.environ, **env_overlay}
-    binary = shutil.which(argv[0], path=child_env.get("PATH")) or argv[0]
-    try:
-        execv(binary, argv)
-    except OSError as exc:
-        ctx.log.error(f"failed to exec {DEEPSTREAM_APP}: {exc}")
-        return 1
-    return 0  # pragma: no cover -- execv never returns on success
+    ctx.log.info(f"Launching: {app} -c {config_path.name} (cwd: {config_path.parent})")
+    return _exec_pipeline_app(ctx, argv, config_path, env_overlay, dry_run=dry_run, execv=execv)
 
 
 def _start_pipeline_supervised(
@@ -944,7 +993,9 @@ _STOP_GRACE_INTERVAL_S = 1.0
 
 
 def _pgrep_deepstream_running(ctx: "Context") -> bool:
-    result = ctx.run_root("pgrep", "-x", DEEPSTREAM_APP_PROCESS, check=False, capture_output=True, text=True)
+    result = ctx.run_root(
+        "pgrep", "-x", DEEPSTREAM_PROCESS_PATTERN, check=False, capture_output=True, text=True
+    )
     return result.returncode == 0
 
 
@@ -991,8 +1042,10 @@ def _stop_pipeline(
             ctx.log.info(f"Stopping {unit} (systemctl stop)")
             ctx.run_root("systemctl", "stop", unit, check=False, capture_output=True, text=True)
         elif _pgrep_deepstream_running(ctx):
-            ctx.log.info(f"Stopping {DEEPSTREAM_APP} (SIGTERM)")
-            ctx.run_root("pkill", "-TERM", "-x", DEEPSTREAM_APP_PROCESS, check=False, capture_output=True, text=True)
+            ctx.log.info("Stopping the DeepStream app (SIGTERM)")
+            ctx.run_root(
+                "pkill", "-TERM", "-x", DEEPSTREAM_PROCESS_PATTERN, check=False, capture_output=True, text=True
+            )
 
             still_running = True
             for _ in range(grace_polls):
@@ -1002,12 +1055,12 @@ def _stop_pipeline(
                 sleep(grace_interval_s)
 
             if still_running:
-                ctx.log.warn(f"{DEEPSTREAM_APP} still running after SIGTERM; sending SIGKILL")
+                ctx.log.warn("the DeepStream app is still running after SIGTERM; sending SIGKILL")
                 ctx.run_root(
-                    "pkill", "-KILL", "-x", DEEPSTREAM_APP_PROCESS, check=False, capture_output=True, text=True
+                    "pkill", "-KILL", "-x", DEEPSTREAM_PROCESS_PATTERN, check=False, capture_output=True, text=True
                 )
         else:
-            ctx.log.info(f"{DEEPSTREAM_APP} not running.")
+            ctx.log.info("the DeepStream app is not running.")
 
     if stop_amc:
         step3_mod.teardown_amc(ctx)
@@ -1492,6 +1545,373 @@ def handle_projects_subcommand(argv: list, ctx: "Context") -> int:
 
 
 # ---------------------------------------------------------------------------
+# DETECTION-EXCLUSION-ZONES sections 4.4 and 5 -- build the filter app
+# ---------------------------------------------------------------------------
+
+#: Bump whenever the section 4.4 hook logic below changes, so every
+#: workstation rebuilds (part of the build key, section 5.2).
+EXCLUSION_PATCH_VERSION = 1
+
+EXCLUSION_UPDATE_REASON = "bundled detection filter changed"
+EXCLUSION_ASSET_PARTS = ("deepstream", "exclusion")
+EXCLUSION_SOURCE_FILES = tuple(
+    sorted(
+        (
+            "mv3dt_exclusion.c",
+            "mv3dt_exclusion.h",
+            "mv3dt_exclusion_rules.c",
+            "mv3dt_exclusion_rules.h",
+        )
+    )
+)
+#: Section 5.1: only building deepstream-test5 needs these two.
+EXCLUSION_BUILD_DEPS = ("libjson-glib-dev", "libgstrtspserver-1.0-dev")
+
+DEEPSTREAM_ROOT = pathlib.Path("/opt/nvidia/deepstream/deepstream")
+CUDA_LINK = pathlib.Path("/usr/local/cuda")
+_DEEPSTREAM_SOURCE_DIRS = ("apps", "includes", "libs")
+_EXCLUSION_BUILD_DIR = pathlib.Path("build") / "test5-exclusion"
+_TEST5_APP_DIR = pathlib.Path("apps") / "sample_apps" / "deepstream-test5"
+_TEST5_MAIN = "deepstream_test5_app_main.c"
+_TEST5_BINARY = "deepstream-test5-app"
+_CUDA_DIR_RE = re.compile(r"^cuda-(\d+\.\d+)$")
+
+# Section 4.4 anchors, DeepStream 9.1 text.
+_INCLUDE_ANCHOR = '#include "deepstream_test5_app.h"'
+_INCLUDE_ADDED = '#include "mv3dt_exclusion.h"'
+_ATTACH_ANCHOR = (
+    '      NVGSTDS_ERR_MSG_V ("Failed to create pipeline");\n'
+    "      return_value = -1;\n"
+    "      goto done;\n"
+    "    }\n"
+)
+_ATTACH_ADDED = (
+    "    mv3dt_exclusion_attach (appCtx[i]->pipeline.common_elements.\n"
+    "        primary_gie_bin.bin);\n"
+)
+_SRCS_ANCHOR = "SRCS:= deepstream_test5_app_main.c deepstream_utc.c"
+_SRCS_ADDED = " mv3dt_exclusion.c mv3dt_exclusion_rules.c"
+_LIBS_ANCHOR = "/opt/nvidia/deepstream/deepstream/sources/libs"
+_LIBS_RELATIVE = "../../../libs"
+
+
+class ExclusionBuildError(Exception):
+    """One failed build stage (section 5.3): `stage` names it, `detail`
+    is the line an operator needs."""
+
+    def __init__(self, stage: str, detail: str):
+        super().__init__(f"{stage}: {detail}")
+        self.stage = stage
+        self.detail = detail
+
+
+def deepstream_version(root: Optional[pathlib.Path] = None) -> Optional[str]:
+    """The value of the `Version:` line in DeepStream's `version` file, or
+    None when DeepStream is not installed or the line is absent."""
+    path = (root or DEEPSTREAM_ROOT) / "version"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip().lower() == "version" and value.strip():
+            return value.strip()
+    return None
+
+
+def cuda_version(link: Optional[pathlib.Path] = None) -> Optional[str]:
+    """`X.Y` from the resolved `/usr/local/cuda` target named `cuda-X.Y`."""
+    resolved = pathlib.Path(os.path.realpath(link or CUDA_LINK))
+    match = _CUDA_DIR_RE.match(resolved.name)
+    return match.group(1) if match else None
+
+
+def _exclusion_asset_dir(ctx: Any) -> pathlib.Path:
+    resolve = getattr(ctx, "asset_path", None) or shellout.asset_path
+    return resolve(*EXCLUSION_ASSET_PARTS)
+
+
+def exclusion_build_key(ctx: Any, *, ds_version: Optional[str] = None) -> Optional[str]:
+    """Section 5.2: sha256 of the four bundled files (sorted by name,
+    concatenated), the patch version and the DeepStream version, one line.
+    None when DeepStream's version cannot be read. Raises OSError when a
+    bundled file is unreadable."""
+    version = ds_version if ds_version is not None else deepstream_version()
+    if not version:
+        return None
+    digest = hashlib.sha256()
+    asset_dir = _exclusion_asset_dir(ctx)
+    for name in EXCLUSION_SOURCE_FILES:
+        digest.update((asset_dir / name).read_bytes())
+    return f"{digest.hexdigest()} {EXCLUSION_PATCH_VERSION} {version}"
+
+
+def exclusion_stamp_path(install_dir: Any) -> pathlib.Path:
+    return exclusion_app_path(install_dir).with_name(f"{EXCLUSION_APP_NAME}.stamp")
+
+
+def exclusion_failed_path(install_dir: Any) -> pathlib.Path:
+    return exclusion_app_path(install_dir).with_name(f"{EXCLUSION_APP_NAME}.failed")
+
+
+def _read_key(path: pathlib.Path) -> Optional[str]:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _write_key(path: pathlib.Path, key: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.tmp")
+    staged.write_text(key + "\n", encoding="utf-8")
+    os.replace(staged, path)
+
+
+def exclusion_update_reason(ctx: Any) -> Optional[str]:
+    """Section 5.2's read-only check: the reason when the stamp differs from
+    the current build key, unless `.failed` holds that same key. None when
+    DeepStream is not installed or the key cannot be computed."""
+    try:
+        key = exclusion_build_key(ctx)
+    except OSError:
+        return None
+    if key is None:
+        return None
+    if _read_key(exclusion_stamp_path(ctx.install_dir)) == key:
+        return None
+    if _read_key(exclusion_failed_path(ctx.install_dir)) == key:
+        return None
+    return EXCLUSION_UPDATE_REASON
+
+
+def _require_once(count: int, anchor: str, *, where: str, ds_version: str) -> None:
+    if count != 1:
+        first = anchor.strip().splitlines()[0]
+        raise ExclusionBuildError(
+            "patch",
+            f"anchor {first!r} found {count} times in {where} (expected once); "
+            f"the DeepStream {ds_version} sources do not match the hook",
+        )
+
+
+def _replace_line_once(text: str, anchor: str, new_line: str, *, where: str, ds_version: str) -> str:
+    lines = text.splitlines(keepends=True)
+    hits = [i for i, line in enumerate(lines) if line.rstrip() == anchor]
+    _require_once(len(hits), anchor, where=where, ds_version=ds_version)
+    index = hits[0]
+    ending = lines[index][len(lines[index].rstrip("\r\n")):] or "\n"
+    lines[index] = new_line + ending
+    return "".join(lines)
+
+
+def patch_test5_main(text: str, ds_version: str) -> str:
+    """Section 4.4 items 1 and 2."""
+    text = _replace_line_once(
+        text,
+        _INCLUDE_ANCHOR,
+        f"{_INCLUDE_ANCHOR}\n{_INCLUDE_ADDED}",
+        where=_TEST5_MAIN,
+        ds_version=ds_version,
+    )
+    _require_once(text.count(_ATTACH_ANCHOR), _ATTACH_ANCHOR, where=_TEST5_MAIN, ds_version=ds_version)
+    return text.replace(_ATTACH_ANCHOR, _ATTACH_ANCHOR + _ATTACH_ADDED)
+
+
+def patch_test5_makefile(text: str, ds_version: str) -> str:
+    """Section 4.4 items 3 and 4. The shared-source path is replaced
+    everywhere it appears and must appear at least once."""
+    text = _replace_line_once(
+        text, _SRCS_ANCHOR, _SRCS_ANCHOR + _SRCS_ADDED, where="Makefile", ds_version=ds_version
+    )
+    if _LIBS_ANCHOR not in text:
+        _require_once(0, _LIBS_ANCHOR, where="Makefile", ds_version=ds_version)
+    return text.replace(_LIBS_ANCHOR, _LIBS_RELATIVE)
+
+
+def _last_error_line(result: subprocess.CompletedProcess) -> str:
+    text = "\n".join(part for part in (result.stdout, result.stderr) if part)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for needle in ("error:", "error"):
+        for line in reversed(lines):
+            if needle in line.lower():
+                return line
+    return lines[-1] if lines else f"exit {result.returncode}"
+
+
+def _package_installed(ctx: "Context", package: str) -> bool:
+    result = ctx.run_root(
+        "dpkg-query", "-W", "-f=${Status}", package, check=False, capture_output=True, text=True
+    )
+    return result.returncode == 0 and "install ok installed" in (result.stdout or "")
+
+
+def _ensure_build_deps(ctx: "Context") -> None:
+    """Section 5.1 item 1. A failed install is retried once after
+    `apt-get update`, for a workstation whose package lists are stale."""
+    missing = [pkg for pkg in EXCLUSION_BUILD_DEPS if not _package_installed(ctx, pkg)]
+    if not missing:
+        return
+    ctx.progress.task("installing the filter build dependencies")
+    install = ("install", "-y", "--no-install-recommends", *missing)
+    result = progress_exec.apt(ctx, *install, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        progress_exec.apt(ctx, "update", check=False, capture_output=True, text=True)
+        result = progress_exec.apt(ctx, *install, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ExclusionBuildError(
+            "dependencies",
+            f"apt-get install {' '.join(missing)} failed: {_last_error_line(result)}",
+        )
+
+
+def _prepare_build_tree(ctx: "Context", ds_version: str) -> pathlib.Path:
+    """Section 5.1 items 2 and 3: a fresh copy of the SDK sources with the
+    bundled files added and the hook applied. Returns the app directory."""
+    sources = DEEPSTREAM_ROOT / "sources"
+    build_sources = pathlib.Path(ctx.install_dir) / _EXCLUSION_BUILD_DIR / "sources"
+    try:
+        if build_sources.parent.exists():
+            shutil.rmtree(build_sources.parent)
+        build_sources.mkdir(parents=True)
+        for name in _DEEPSTREAM_SOURCE_DIRS:
+            shutil.copytree(sources / name, build_sources / name, symlinks=True)
+    except OSError as exc:
+        raise ExclusionBuildError("build tree", f"copying {sources}: {exc}") from exc
+
+    app_dir = build_sources / _TEST5_APP_DIR
+    try:
+        asset_dir = _exclusion_asset_dir(ctx)
+        for name in EXCLUSION_SOURCE_FILES:
+            shutil.copyfile(asset_dir / name, app_dir / name)
+        main_path = app_dir / _TEST5_MAIN
+        makefile = app_dir / "Makefile"
+        main_text = patch_test5_main(main_path.read_text(encoding="utf-8"), ds_version)
+        make_text = patch_test5_makefile(makefile.read_text(encoding="utf-8"), ds_version)
+        main_path.write_text(main_text, encoding="utf-8")
+        makefile.write_text(make_text, encoding="utf-8")
+    except OSError as exc:
+        raise ExclusionBuildError("patch", str(exc)) from exc
+    return app_dir
+
+
+def _compile_test5(ctx: "Context", app_dir: pathlib.Path) -> pathlib.Path:
+    """Section 5.1 item 4."""
+    cuda = cuda_version()
+    if cuda is None:
+        raise ExclusionBuildError("compile", f"{CUDA_LINK} does not resolve to a cuda-X.Y directory")
+    jobs = os.cpu_count() or 1
+    result = ctx.run_root(
+        "make", "-C", str(app_dir), f"-j{jobs}", f"CUDA_VER={cuda}",
+        check=False, capture_output=True, text=True,
+    )
+    binary = app_dir / _TEST5_BINARY
+    if result.returncode != 0 or not binary.is_file():
+        raise ExclusionBuildError("compile", _last_error_line(result))
+    return binary
+
+
+def _install_exclusion_app(ctx: "Context", binary: pathlib.Path) -> pathlib.Path:
+    """Section 5.1 item 5: mode 0755, owner root, swapped in by rename so a
+    running pipeline keeps its old inode."""
+    dest = exclusion_app_path(ctx.install_dir)
+    staged = dest.with_name(f".{EXCLUSION_APP_NAME}.new")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(binary, staged)
+        os.chmod(staged, 0o755)
+        try:
+            os.chown(staged, 0, 0)
+        except OSError:
+            pass  # best-effort, e.g. under a non-root test process
+        os.replace(staged, dest)
+    except OSError as exc:
+        raise ExclusionBuildError("install", f"{dest}: {exc}") from exc
+    return dest
+
+
+def build_exclusion_app(ctx: "Context", key: str, ds_version: str) -> bool:
+    """DETECTION-EXCLUSION-ZONES section 5.1, with section 5.3's failure
+    rule: any failure is a warning, the previous binary and stamp are left
+    as they were, and `.failed` records the key. Returns whether a new
+    binary was installed."""
+    try:
+        _ensure_build_deps(ctx)
+        ctx.progress.task("copying and patching the deepstream-test5 sources")
+        app_dir = _prepare_build_tree(ctx, ds_version)
+        ctx.progress.task("compiling the detection exclusion filter")
+        binary = _compile_test5(ctx, app_dir)
+        dest = _install_exclusion_app(ctx, binary)
+    except ExclusionBuildError as exc:
+        try:
+            _write_key(exclusion_failed_path(ctx.install_dir), key)
+        except OSError:
+            pass
+        ctx.log.warn(
+            f"detection exclusion filter build failed at {exc.stage}: {exc.detail}. "
+            f"The pipeline keeps using {pipeline_app(ctx)}. Retry with "
+            "--reset-step step5_per_project_exes."
+        )
+        return False
+
+    try:
+        _write_key(exclusion_stamp_path(ctx.install_dir), key)
+        exclusion_failed_path(ctx.install_dir).unlink(missing_ok=True)
+    except OSError as exc:
+        # The binary is installed and runs; a missing stamp only means the
+        # next update check asks for one more build.
+        ctx.log.warn(
+            f"built {dest}, but could not record its build stamp ({exc}); "
+            "the next installer run may rebuild it"
+        )
+    ctx.report_installed(EXCLUSION_APP_NAME, f"DeepStream {ds_version}")
+    ctx.log.info(f"Built {dest}. Restart the pipeline (mv3dt-pipeline@<slug>) to use it.")
+    return True
+
+
+def _exclusion_zones_configured(ctx: "Context") -> bool:
+    """Whether any enabled camera in the inventory has `exclude_boxes`."""
+    cameras_file = ctx.conf.get(config_mod.CAMERAS_FILE_KEY)
+    if not cameras_file:
+        return False
+    try:
+        text = pathlib.Path(cameras_file).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(cam.enabled and cam.exclude_boxes.strip() for cam in cameras_mod.parse_inventory(text))
+
+
+def ensure_exclusion_app(ctx: "Context") -> None:
+    """Step 5's filter phase: build when the installed binary is missing
+    or its stamp is not the current key, then warn when configured zones
+    have no binary to run them. Never fails the step (section 5.3)."""
+    built = exclusion_app_path(ctx.install_dir)
+    ds_version = deepstream_version()
+    if ds_version is None:
+        ctx.log.warn(
+            f"detection exclusion filter not built: no DeepStream version in "
+            f"{DEEPSTREAM_ROOT / 'version'}"
+        )
+    else:
+        try:
+            key = exclusion_build_key(ctx, ds_version=ds_version)
+        except OSError as exc:
+            ctx.log.warn(f"detection exclusion filter not built: bundled sources unreadable ({exc})")
+        else:
+            if built.is_file() and _read_key(exclusion_stamp_path(ctx.install_dir)) == key:
+                ctx.report_already_installed(EXCLUSION_APP_NAME, f"DeepStream {ds_version}")
+            else:
+                build_exclusion_app(ctx, key, ds_version)
+
+    if not built.is_file() and _exclusion_zones_configured(ctx):
+        ctx.log.warn(
+            "cameras.yml sets exclude_boxes, but the exclusion zones are inactive: "
+            f"{built} does not exist, so the pipeline runs the stock {DEEPSTREAM_APP}."
+        )
+
+
+# ---------------------------------------------------------------------------
 # section 2 -- the start-or-close prompt
 # ---------------------------------------------------------------------------
 
@@ -1537,6 +1957,7 @@ class Step5PerProjectExes:
         "project resolution",
         "pipeline and record wrappers",
         "project registry",
+        "detection exclusion filter",
     )
     order = 5
 
@@ -1587,6 +2008,16 @@ class Step5PerProjectExes:
     # -- run (section 7.2) ---------------------------------------------------
 
     def run(self, ctx: "Context") -> StepResult:
+        if getattr(ctx, "update_pending", None):
+            # The only update this step reports is the filter build
+            # (`pending_update`). The wrappers and registry are unchanged, so
+            # an update run rebuilds the filter alone: no registry bump and
+            # no start-or-close question in the middle of an upgrade.
+            ctx.progress.phase(4)
+            ctx.progress.task("building the detection exclusion filter")
+            ensure_exclusion_app(ctx)
+            return StepResult(status=StepStatus.COMPLETE)
+
         ctx.progress.phase(1)
         ctx.progress.task("resolving project and location")
         project_name = ctx.conf.get(CONF_PROJECT_NAME_KEY, "")
@@ -1637,6 +2068,10 @@ class Step5PerProjectExes:
         else:
             ctx.report_already_installed(record_label, f"{entry.calib_runs}")
 
+        ctx.progress.phase(4)
+        ctx.progress.task("building the detection exclusion filter")
+        ensure_exclusion_app(ctx)
+
         ctx.log.info(
             f"Installation complete for project: {project_name}\n"
             f"A pipeline executable was created: {pipeline_path}\n\n"
@@ -1653,6 +2088,13 @@ class Step5PerProjectExes:
                 return StepResult(status=StepStatus.FAILED, message=f"failed to exec {pipeline_path}: {exc}")
 
         return StepResult(status=StepStatus.COMPLETE)
+
+    # -- update check (DETECTION-EXCLUSION-ZONES section 5.2) ----------------
+
+    def pending_update(self, ctx: "Context") -> Optional[str]:
+        """The dispatch loop's update check for a completed step: read
+        only, never prompts, never builds."""
+        return exclusion_update_reason(ctx)
 
     # -- verify (section 7.3) -------------------------------------------------
 
