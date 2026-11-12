@@ -4,15 +4,16 @@ Status: cross-repo design spec, **specified, not implemented**. It extends
 the `cleaning.json` contract in
 [`TRACKING-FUSION` section 4](TRACKING-FUSION-AND-CLEANING.md#4-cleaning-configuration),
 the `/tracking/meta` response of
-[`STEP-8`](STEP-8-TRACKING-HISTORY.md), and the web Replay contract in
+[`STEP-8` section 8](STEP-8-TRACKING-HISTORY.md#8-http-api), and the web Replay contract in
 [`TRACKING-FUSION` section 12](TRACKING-FUSION-AND-CLEANING.md#12-web-replay-changes).
-Those contracts are **not** restated here; only the changes are. The web
+Those contracts are **not** restated here; this doc's spec unit amends the
+rows of each that it changes. The web
 units are owned by the web app repository (`P2BP-25_26-Web`) and are stated
 here as the contract both sides build to.
 
 The Floor Plan Replay draws two things badly. The camera markers sit where
 the calibration's projection matrices place the cameras, which for the AMC
-run 2 calibration is about 0.6 m from where the cameras are mounted: one
+run 2 calibration is 0.4 to 0.6 m from where the cameras are mounted: one
 marker lands outside the room. And every person's trail accumulates from
 the start of the window to the playhead, so a five-minute replay ends as a
 **scribble of lines** that hides where anyone is now.
@@ -44,10 +45,10 @@ live, floor-plan scale 99.98 px/m.
 
 | Fact | Value | Source |
 |---|---|---|
-| `camInfo_00` marker (cam-4484, kitchen side) | about (7.46, -0.82) m, outside the right wall | camera centre from `camInfo_00.yml` |
+| `camInfo_00` marker (cam-4484, inventory label `kitchen-side`) | about (7.46, -0.82) m, outside the right wall, 0.62 m from the corner | camera centre from `camInfo_00.yml` |
 | `camInfo_00` mounted | top-right corner, (7.05, -0.35) m | operator |
-| `camInfo_01` marker (cam-4487, back wall) | about (0.79, -4.21) m | camera centre from `camInfo_01.yml` |
-| `camInfo_01` mounted | (0.36, -4.21) m, on the left wall | operator |
+| `camInfo_01` marker (cam-4487, inventory label `back-wall`) | about (0.79, -4.21) m, 0.43 m inside the left wall | camera centre from `camInfo_01.yml` |
+| `camInfo_01` mounted | (0.36, -4.21) m, on the left wall of the floor plan | operator |
 | Room walls (`cleaning.json` `room`) | x 0.36 to 7.05, y -4.65 to -0.35 | `cleaning.json` |
 | Five-minute fused replay, one person walking | one continuous path covering most of the room | Replay screenshot |
 | Recorded positions inside a drawn object, same window | 48 of 3012, at most 24 cm deep | tracking database |
@@ -65,7 +66,9 @@ the person.
 **LOCKED: the override lives in `cleaning.json`.** It is already the
 per-site file the tracking service re-reads without a restart, and its
 `room` key already overrides a calibration-derived value. The override is
-**display only**: fusion, cleaning and exports never read it.
+**display only**: fusion, cleaning and exports never read it, and a mistake
+in it never changes how data is cleaned
+([section 4.1](#41-key-required)).
 
 ### 3.2 Comet trail by default (RESOLVED)
 
@@ -98,9 +101,9 @@ the trails use, so the heatmap and the trails always agree.
 |---|---|
 | Key | `cameras`, an object; absent or `null` means no override |
 | Entry name | a camera model stem as `/tracking/meta` reports it, for example `camInfo_00` |
-| Entry value | an object with numeric `x` and `y` in world metres; other fields are an error |
-| Invalid value | the whole file is invalid and follows [`TRACKING-FUSION` section 4.1](TRACKING-FUSION-AND-CLEANING.md#41-file-and-reload-required) |
-| Preset | not part of any preset; strict and relaxed both default to no override |
+| Entry value | an object with numeric `x` and `y` in world metres (booleans and `null` are not numeric); any other field is an error |
+| Invalid value | **REQUIRED exception to [`TRACKING-FUSION` section 4.1](TRACKING-FUSION-AND-CLEANING.md#41-file-and-reload-required):** an invalid `cameras` value does not make the file invalid. The whole `cameras` value is ignored (no overrides), every other key still applies, and the problem is listed in `camera_override_warnings` and in `summary.config_warnings` |
+| Preset | a strict-preset key with default `null`, like `room`; the relaxed preset inherits it |
 | Reload | as the rest of the file: re-read when its mtime changes |
 
 ### 4.2 `/tracking/meta` (REQUIRED)
@@ -108,9 +111,15 @@ the trails use, so the heatmap and the trails always agree.
 Each entry of `cameras` keeps its `name`, `x`, `y` and `z`, and gains
 `source`: `"config"` when `cleaning.json` overrides its `x` and `y`, else
 `"calibration"`. `z` always comes from the calibration. An override whose
-name matches no camera model is ignored and listed in the response as
+name matches no camera model is ignored. Every ignored override, and an
+invalid `cameras` value, is listed in the response as
 `camera_override_warnings`, a list of strings; the key is omitted when the
-list is empty.
+list is empty. Meta reads the same cached `cleaning.json` as `range`. While
+the file as a whole is invalid, meta serves the overrides of the last valid
+config, as `range` does for every other key.
+
+The web Replay does not display `source` or `camera_override_warnings`;
+they are for the API and for checking the workstation by hand.
 
 ---
 
@@ -126,12 +135,13 @@ persisted between visits.
 
 | Item | Rule |
 |---|---|
-| Dot | each person visible at the playhead keeps today's dot and label, including the 1 s linger after their last sample |
+| Dot | a person's dot and label are drawn while the playhead is inside one of their trail segments, or within 1 s after a segment's last sample; during a gap longer than that no dot is drawn. This applies to every tail setting, `Full` included |
 | Tail window | samples with timestamps in `[playhead - tail, playhead]`, plus the interpolated head at the playhead |
 | Breaks | the existing breaks apply inside the window: a gap over 2 s or a step over 1 m starts a new segment |
-| Fade | opacity is a function of time only: 0 at the window start rising linearly to 1 at the head, in the person's colour; a segment that starts later in the window starts partly opaque |
+| Fade | opacity is a function of time only: 0 at the window start rising linearly to 1 at the head, in the person's colour; a segment that starts later in the window starts partly opaque, and a segment that ends before the head ends below full opacity |
+| Head | the line from the last sample to the interpolated head is drawn at the head's opacity, 1 |
 | Window edge | a line between the last sample before the window and the first inside it is cut at the window start, not dropped |
-| `Full` | today's accumulated rendering, unchanged |
+| `Full` | today's accumulated rendering, unchanged, including its 0.7 opacity |
 | Scrubbing | moving the playhead backwards redraws correctly; nothing accumulates outside the tail window |
 
 ---
@@ -149,8 +159,11 @@ people legend stays as the summary of the window.
 | Item | Rule |
 |---|---|
 | Input | every person in the loaded `range` response, Fused or Raw as selected |
-| Grid | square cells of 0.25 m in world coordinates, covering the floor plan |
-| Weight | for consecutive samples of one person within one trail segment ([section 5.2](#52-rendering-required) breaks), add the time between them, capped at 2 s, to the cell of the earlier sample |
+| Grid | square cells of 0.25 m in world coordinates, aligned to the world origin: cell `(floor(x / 0.25), floor(y / 0.25))` |
+| Extent | the world rectangle covered by the floor-plan image: its four pixel corners mapped through the inverse of `T_gt2px` |
+| Weight | for consecutive samples of one person within one trail segment ([section 5.2](#52-rendering-required) breaks), add the time between them to the cell of the earlier sample; the breaks already bound it at 2 s |
+| Outside | a sample outside the extent adds nothing |
+| No floor plan | when `/tracking/meta` has no `floorplan`, the Heatmap option is disabled with the note `Heatmap needs a floor plan` |
 | Unit | person-seconds per cell |
 | Raw mode | each camera's track counts separately; the legend says so |
 
@@ -184,10 +197,11 @@ Open decisions:
    warning, invalid values making the file invalid, no effect on fusion)
    and for the `/tracking/meta` fields of
    [section 4.2](#42-trackingmeta-required).
-2. **Web**: `npm run build` (type check and bundle) and `npm run lint`
-   pass; the trail windowing and heatmap accumulation are pure functions
-   with unit-level checks where the client has a harness, else reviewed by
-   hand against the tables above.
+2. **Web**: the client has no test runner, so verification is
+   `npm run build` (type check and bundle), `npm run lint`, a throwaway
+   script exercising the pure tail-window and heatmap functions against the
+   tables above (run by the implementer and again by the reviewer, never
+   committed), and a check by hand in the deployed Replay.
 3. **Workstation, after release**: `cleaning.json` gains the two
    [section 4.1](#41-key-required) entries, and the Replay shows both
    markers on the walls at the mounted positions.
@@ -198,9 +212,9 @@ Open decisions:
 
 | Unit | Branch | Files touched | Depends on | Wave |
 |---|---|---|---|---|
-| P1 Spec | `feat/installer-replay-presentation-spec` | `installer/plan/REPLAY-PRESENTATION.md` | none | 1 |
+| P1 Spec | `feat/installer-replay-presentation-spec` | `installer/plan/REPLAY-PRESENTATION.md`, `installer/plan/TRACKING-FUSION-AND-CLEANING.md` (section 4.2 row, section 12 contract), `installer/plan/STEP-8-TRACKING-HISTORY.md` (section 8 meta row) | none | 1 |
 | P2 Camera marker override | `feat/installer-camera-markers` | `assets/tracking/mv3dt_tracking/cleaning.py`, `assets/tracking/mv3dt_tracking/api.py`, `tests/tracking/test_cleaning.py`, `tests/tracking/test_api.py` | none | 1 |
-| P3 Comet trails (web) | `feat/replay-comet-trails` | `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/TrackingReplayPanel.tsx`, `BetterPlacemaking.CLIENT.REACT/src/lib/trackingTypes.ts` | none | 1 |
+| P3 Comet trails (web) | `feat/replay-comet-trails` | `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/TrackingReplayPanel.tsx` | none | 1 |
 | P4 Dwell heatmap (web) | `feat/replay-heatmap` | `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/TrackingReplayPanel.tsx`, a new `BetterPlacemaking.CLIENT.REACT/src/pages/projects/scanner/replayHeatmap.ts` | P3 | 2 |
 
 P1 and P2 are in this repository, with package paths relative to
@@ -211,9 +225,8 @@ Serialization points:
 
 - P3 and P4 both edit `TrackingReplayPanel.tsx`, so P4 is in wave 2 and
   builds on P3's branch: the heatmap view switches off the controls P3 adds.
-- P3 adds the optional `source` and `camera_override_warnings` fields to
-  `trackingTypes.ts` so the web side accepts P2's response; P2 and P3 are
-  otherwise independent and can merge in either order.
+- P2 and P3 are independent: the web client already ignores unknown
+  `/tracking/meta` fields, so they can merge in either order.
 - Recommended order: Hardware P1, P2, then a release; web P3, P4, then the
   Vercel deploy.
 

@@ -176,6 +176,7 @@ operator has not pinned. An unknown key is ignored, logged, and listed in
 | `room_margin_m` | `0.3` | m | 1 | margin around the room rectangle |
 | `room` | `null` | m | 1 | `{"x": [min, max], "y": [min, max]}`; when set, overrides the calibration bounds (room bounds below) |
 | `zones` | `[]` | | 1 | ignore zones ([section 4.4](#44-zone-entries)) |
+| `cameras` | `null` | m | display | Replay camera marker positions; never read by fusion ([`REPLAY-PRESENTATION` section 4](REPLAY-PRESENTATION.md#4-cleaningjson-camera-markers)) |
 | `vmax_mps` | `3.0` | m/s | 2, 7 | max speed between kept samples |
 | `speed_slack_m` | `0.3` | m | 2, 7 | distance allowed on top of `vmax_mps * dt` |
 | `min_dt_s` | `0.04` | s | 2 | floor on `dt` in the stage 2 gate |
@@ -622,6 +623,9 @@ contract the API serves. Files: `TrackingReplayPanel.tsx`,
 - People numbered `1..N` by first appearance, with per-person duration and
   camera share.
 - Trails break on a gap over 2 s or a step over 1 m.
+- Trails draw as a moving dot with a fading tail, default 5 s, and a
+  heatmap view summarizes dwell time
+  ([`REPLAY-PRESENTATION` sections 5 and 6](REPLAY-PRESENTATION.md#5-comet-trails-web)).
 - A small cleaning note: points dropped, offset applied yes/no, and
   "offset correction not needed" when `offsets.needed` is false.
 - Export Fused or Raw.
