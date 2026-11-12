@@ -1855,11 +1855,16 @@ def build_exclusion_app(ctx: "Context", key: str, ds_version: str) -> bool:
         )
         return False
 
-    _write_key(exclusion_stamp_path(ctx.install_dir), key)
     try:
-        exclusion_failed_path(ctx.install_dir).unlink()
-    except FileNotFoundError:
-        pass
+        _write_key(exclusion_stamp_path(ctx.install_dir), key)
+        exclusion_failed_path(ctx.install_dir).unlink(missing_ok=True)
+    except OSError as exc:
+        # The binary is installed and runs; a missing stamp only means the
+        # next update check asks for one more build.
+        ctx.log.warn(
+            f"built {dest}, but could not record its build stamp ({exc}); "
+            "the next installer run may rebuild it"
+        )
     ctx.report_installed(EXCLUSION_APP_NAME, f"DeepStream {ds_version}")
     ctx.log.info(f"Built {dest}. Restart the pipeline (mv3dt-pipeline@<slug>) to use it.")
     return True

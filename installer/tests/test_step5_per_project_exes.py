@@ -1646,6 +1646,46 @@ def test_dependency_failure_retries_after_update_then_warns(tmp_path, monkeypatc
     assert not runner.called_with_prefix("make")
 
 
+def test_stamp_write_failure_after_install_is_a_warning(tmp_path, monkeypatch, capsys):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path, runner_root=_BuildRunner())
+
+    def _fail(path, key):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(step5, "_write_key", _fail)
+    assert step5.build_exclusion_app(ctx, _expected_key(), _DS_VERSION) is True
+    assert "could not record its build stamp" in capsys.readouterr().err
+    assert step5.exclusion_app_path(ctx.install_dir).is_file()
+
+
+def test_failed_file_removal_error_is_a_warning(tmp_path, monkeypatch, capsys):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path, runner_root=_BuildRunner())
+    failed = step5.exclusion_failed_path(ctx.install_dir)
+    _write(failed, "old 1 9.0.0\n")
+    real_unlink = pathlib.Path.unlink
+
+    def _unlink(self, *args, **kwargs):
+        if self == failed:
+            raise PermissionError("denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", _unlink)
+    assert step5.build_exclusion_app(ctx, _expected_key(), _DS_VERSION) is True
+    assert "could not record its build stamp" in capsys.readouterr().err
+    assert step5.exclusion_stamp_path(ctx.install_dir).read_text().strip() == _expected_key()
+
+
+def test_run_stays_complete_when_the_stamp_cannot_be_written(tmp_path, monkeypatch):
+    _fake_deepstream(tmp_path, monkeypatch)
+    ctx = FakeContext(tmp_path, runner_root=_BuildRunner())
+    ctx.update_pending = step5.EXCLUSION_UPDATE_REASON
+    monkeypatch.setattr(step5, "_write_key", lambda path, key: (_ for _ in ()).throw(OSError("full")))
+    result = step5.Step5PerProjectExes().run(ctx)
+    assert result.status is StepStatus.COMPLETE
+
+
 def test_missing_cuda_link_is_a_compile_failure(tmp_path, monkeypatch, capsys):
     _fake_deepstream(tmp_path, monkeypatch)
     monkeypatch.setattr(step5, "CUDA_LINK", tmp_path / "cuda-missing")
