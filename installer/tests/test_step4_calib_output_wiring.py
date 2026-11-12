@@ -1946,6 +1946,50 @@ def test_ingest_leaves_kept_operator_edit_alone_once_render_is_offered(
     assert "nothing to render" in capsys.readouterr().err
 
 
+def test_hand_edit_with_unchanged_inventory_is_not_out_of_date(
+    tmp_path, templates, capsys
+):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    calibration_dir = step4.default_calibration_dir(ctx, "site-42")
+    edited = EXCLUSION_HEADER + "[source0]\nrects=1,1,1,1\n"
+    _exclusion_path(ctx).write_text(edited)
+    assert step.pending_update(ctx) is None
+    assert step4._render_targets_exist(ctx, calibration_dir)
+    before = _deepstream_files(ctx)
+    manifest_before = managed_files.Manifest().path.read_bytes()
+    capsys.readouterr()
+    assert step4.handle_ingest_subcommand(["--project", "site-42"], ctx) == 0
+    assert "nothing to render" in capsys.readouterr().err
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert _deepstream_files(ctx) == before
+    assert managed_files.Manifest().path.read_bytes() == manifest_before
+    assert _exclusion_path(ctx).read_text() == edited
+    assert not managed_files.pending_path(_exclusion_path(ctx)).exists()
+    assert step.pending_update(ctx) is None
+
+
+def test_reverted_inventory_after_kept_edit_settles(tmp_path, templates):
+    ctx = _ctx(tmp_path, templates, non_interactive=True)
+    step = step4.Step4CalibOutputWiring()
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    edited = EXCLUSION_HEADER + "[source0]\nrects=1,1,1,1\n"
+    _exclusion_path(ctx).write_text(edited)
+    _set_exclude_boxes(ctx, "cam1", "530,175,245,225")
+    assert step.pending_update(ctx) == "exclusion.conf out of date"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    pending = managed_files.pending_path(_exclusion_path(ctx))
+    assert pending.is_file()
+    _set_exclude_boxes(ctx, "cam1", "")
+    assert step.pending_update(ctx) is None
+    assert step4._render_targets_exist(ctx, step4.default_calibration_dir(ctx, "site-42"))
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert not pending.exists()
+    assert _exclusion_path(ctx).read_text() == edited
+    assert step.pending_update(ctx) is None
+
+
 def test_missing_exclusion_config_is_out_of_date_even_with_pending_copy(
     tmp_path, templates
 ):
