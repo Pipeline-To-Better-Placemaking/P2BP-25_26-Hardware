@@ -281,11 +281,15 @@ header comment.
 ### 7.3 Re-render triggers (REQUIRED)
 
 `exclusion.conf` is **out of date** when it is missing, or when a fresh
-render differs from the file **and** from its pending
-`exclusion.conf.installer-new` (when one exists). Comparing with the pending
-copy stops an operator-edited file from triggering a re-render on every
-check: after one render the new version waits beside it, and the condition
-is false until `cameras.yml` changes again.
+render differs from all three of: the file, its pending
+`exclusion.conf.installer-new` (when one exists), and the content the
+manifest records as last offered (its sha256 in
+`/var/lib/mv3dt-installer/managed-files.json`). Comparing with the pending
+copy and the manifest stops an operator-edited file from triggering a
+re-render on every check: once the installer has offered a render, either a
+copy waits beside the file or, when the render equals what the manifest
+already records, `write_managed` writes nothing new. The condition is false
+until `cameras.yml` changes again.
 
 - `_render_targets_exist()` returns false when `exclusion.conf` is out of
   date, so `ingest` re-renders after a `cameras.yml` edit even when the AMC
