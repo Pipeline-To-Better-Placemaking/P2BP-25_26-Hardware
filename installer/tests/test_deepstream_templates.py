@@ -136,6 +136,8 @@ def test_tracker_baseline_matches_the_live_tuned_workstation():
         "enableIDCorrection: 1",
         "enableMsgSync: 0",
         "communicatorInitSleepTime: 0",
+        # 2.0 m fused a seated person with someone walking past 1.5 m away.
+        "maxPeerToPredDistance4Fusion: 1.0",
     ):
         assert setting in associator, setting
     communicator = sections["Communicator"]

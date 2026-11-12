@@ -137,7 +137,7 @@ MultiViewAssociator:
   maxPeerTrackletSize: 50
   recentlyActiveAge: 178
   minCommonFrames4MatchScore: 2
-  maxPeerToPredDistance4Fusion: 2.0
+  maxPeerToPredDistance4Fusion: 1.0
   minPeerVisibility4Fusion: 0.15
   minPeerTrackletMatchScore: 0.35
   maxTrackletMatchingTimeSearchRange: 1
