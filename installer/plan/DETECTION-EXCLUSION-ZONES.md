@@ -162,9 +162,10 @@ Group names other than `source<N>` with `N` below 64 are ignored and logged.
 
 ### 4.4 Hook into test5 (REQUIRED)
 
-Applied to the copy in the build tree, never to `/opt/nvidia`. Each anchor
-must occur exactly once; otherwise the build stops with a message naming the
-anchor and the DeepStream version.
+Applied to the copy in the build tree, never to `/opt/nvidia`. Anchors 1
+to 3 must each occur exactly once; anchor 4 must occur at least once and
+every occurrence is replaced. Otherwise the build stops with a message naming
+the anchor and the DeepStream version.
 
 1. **Include**: after the line `#include "deepstream_test5_app.h"`, add
    `#include "mv3dt_exclusion.h"`.
@@ -174,7 +175,7 @@ anchor and the DeepStream version.
    `mv3dt_exclusion_attach (appCtx[i]->pipeline.common_elements.primary_gie_bin.bin);`.
 3. **Makefile sources**: `SRCS:= deepstream_test5_app_main.c deepstream_utc.c`
    gains `mv3dt_exclusion.c mv3dt_exclusion_rules.c`.
-4. **Makefile shared source**: the absolute path
+4. **Makefile shared source**: every occurrence of the absolute path
    `/opt/nvidia/deepstream/deepstream/sources/libs` becomes `../../../libs`,
    so objects are written inside the build tree.
 
