@@ -80,6 +80,7 @@ STEP_IDS: tuple[str, ...] = (
     "step6_remote_supervision",
     "step7_webapp_integration",
     "step8_tracking_history",
+    "step9_amc_control",
 )
 
 

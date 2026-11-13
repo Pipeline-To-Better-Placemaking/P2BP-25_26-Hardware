@@ -21,9 +21,10 @@ interactive (`non_interactive=False`), `load()` prompts once with that
 default prefilled (doc 00 §11.1's "TUI prompts ... with /opt/mv3dt
 prefilled"); `--non-interactive` uses the default silently.
 
-`installer.conf` also carries the three §3.4 opt-in step-gate keys
+`installer.conf` also carries the four §3.4 opt-in step-gate keys
 (`MV3DT_REMOTE_SUPERVISION`, `MV3DT_WEBAPP_INTEGRATION`,
-`MV3DT_TRACKING_HISTORY`) and two feature gates that skip no step:
+`MV3DT_TRACKING_HISTORY`, `MV3DT_AMC_CONTROL`) and two feature gates that
+skip no step:
 `MV3DT_VIEWER_STREAM` (Step 4 renders the tiled view, on-screen display and
 RTSP viewer sink, and `pipeline --service-exec` passes `-t`, only when it is
 `on`) and `MV3DT_AUTO_INGEST` (Step 4 enables the ingest timer only when it
@@ -33,7 +34,8 @@ present in the file), each gate is seeded through four tiers, in order:
 
     1. `gate_overrides[key]`  -- the matching CLI flag doc 00 §3.4's own
        table promises for every gate (`--remote-supervision`,
-       `--webapp-integration`, `--tracking-history`, `--viewer-stream`,
+       `--webapp-integration`, `--tracking-history`, `--amc-control`,
+       `--viewer-stream`,
        `--auto-ingest`, parsed by
        `app.build_parser()` with
        `default=None` so "not passed" stays distinguishable from an
@@ -60,7 +62,7 @@ except by hand-editing `installer.conf`, which is exactly the "the
 operator types a thing" failure mode the design rules out.
 
 `load()` parses every gate into the returned `Config` so a later module
-(`app.py`) can gate Steps 6/7/8 without re-implementing KEY=VALUE parsing.
+(`app.py`) can gate Steps 6/7/8/9 without re-implementing KEY=VALUE parsing.
 
 Only `install_dir` itself is created by this module. The subdirectories
 under it (`secrets/`, `bin/`, `deepstream/`, `projects/`, `agent/`,
@@ -70,6 +72,7 @@ under it (`secrets/`, `bin/`, `deepstream/`, `projects/`, `agent/`,
 Public API:
     CONF_FILENAME       -- "installer.conf".
     GATE_REMOTE_SUPERVISION / GATE_WEBAPP_INTEGRATION / GATE_TRACKING_HISTORY
+    / GATE_AMC_CONTROL
         -- the §3.4 key names. GATE_VIEWER_STREAM / GATE_AUTO_INGEST -- the
         viewer and auto-ingest feature gates.
     GATE_KEYS            -- every key name, in table order.
@@ -105,6 +108,7 @@ __all__ = [
     "GATE_REMOTE_SUPERVISION",
     "GATE_WEBAPP_INTEGRATION",
     "GATE_TRACKING_HISTORY",
+    "GATE_AMC_CONTROL",
     "GATE_VIEWER_STREAM",
     "GATE_AUTO_INGEST",
     "GATE_KEYS",
@@ -136,6 +140,9 @@ CAMERA_SCAN_IFACE_KEY = "CAMERA_SCAN_IFACE"
 GATE_REMOTE_SUPERVISION = "MV3DT_REMOTE_SUPERVISION"
 GATE_WEBAPP_INTEGRATION = "MV3DT_WEBAPP_INTEGRATION"
 GATE_TRACKING_HISTORY = "MV3DT_TRACKING_HISTORY"
+# Step 9: the AMC control service (STEP-9-AMC-CONTROL.md). It reuses Step 8's
+# secrets/tracking.env, so it needs MV3DT_TRACKING_HISTORY on as well.
+GATE_AMC_CONTROL = "MV3DT_AMC_CONTROL"
 # Not a step gate: Step 4 reads it to add the VLC viewer stream (tiled view,
 # OSD, RTSP sink on 8554) to the rendered DeepStream config. Seeded and
 # overridden exactly like the step gates.
@@ -148,6 +155,7 @@ GATE_KEYS: tuple[str, ...] = (
     GATE_REMOTE_SUPERVISION,
     GATE_WEBAPP_INTEGRATION,
     GATE_TRACKING_HISTORY,
+    GATE_AMC_CONTROL,
     GATE_VIEWER_STREAM,
     GATE_AUTO_INGEST,
 )
@@ -155,6 +163,7 @@ GATE_DEFAULTS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "off",
     GATE_WEBAPP_INTEGRATION: "off",
     GATE_TRACKING_HISTORY: "off",
+    GATE_AMC_CONTROL: "off",
     GATE_VIEWER_STREAM: "off",
     GATE_AUTO_INGEST: "off",
 }
@@ -170,6 +179,7 @@ GATE_CHOICES: dict[str, tuple[str, ...]] = {
     GATE_REMOTE_SUPERVISION: ("off", "local", "remote"),
     GATE_WEBAPP_INTEGRATION: ("off", "on"),
     GATE_TRACKING_HISTORY: ("off", "on"),
+    GATE_AMC_CONTROL: ("off", "on"),
     GATE_VIEWER_STREAM: ("off", "on"),
     GATE_AUTO_INGEST: ("off", "on"),
 }
@@ -181,6 +191,7 @@ GATE_FLAGS: dict[str, str] = {
     GATE_REMOTE_SUPERVISION: "--remote-supervision",
     GATE_WEBAPP_INTEGRATION: "--webapp-integration",
     GATE_TRACKING_HISTORY: "--tracking-history",
+    GATE_AMC_CONTROL: "--amc-control",
     GATE_VIEWER_STREAM: "--viewer-stream",
     GATE_AUTO_INGEST: "--auto-ingest",
 }
@@ -201,6 +212,7 @@ class Config:
     remote_supervision: str = GATE_DEFAULTS[GATE_REMOTE_SUPERVISION]
     webapp_integration: str = GATE_DEFAULTS[GATE_WEBAPP_INTEGRATION]
     tracking_history: str = GATE_DEFAULTS[GATE_TRACKING_HISTORY]
+    amc_control: str = GATE_DEFAULTS[GATE_AMC_CONTROL]
     viewer_stream: str = GATE_DEFAULTS[GATE_VIEWER_STREAM]
     auto_ingest: str = GATE_DEFAULTS[GATE_AUTO_INGEST]
     # Full parsed installer.conf KEY=VALUE map, including the two gate keys
@@ -510,6 +522,7 @@ def load(
         remote_supervision=values[GATE_REMOTE_SUPERVISION],
         webapp_integration=values[GATE_WEBAPP_INTEGRATION],
         tracking_history=values[GATE_TRACKING_HISTORY],
+        amc_control=values[GATE_AMC_CONTROL],
         viewer_stream=values[GATE_VIEWER_STREAM],
         auto_ingest=values[GATE_AUTO_INGEST],
         values=values,

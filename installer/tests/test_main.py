@@ -23,8 +23,8 @@ from mv3dt_installer import app  # noqa: E402
 
 
 def test_importing_main_populates_step_registry():
-    """Importing `__main__` registers all eight steps (doc 00 §12.1)."""
-    assert len(app.STEP_REGISTRY) == 8
+    """Importing `__main__` registers all nine steps (doc 00 §12.1)."""
+    assert len(app.STEP_REGISTRY) == 9
     assert [step.order for step in app.STEP_REGISTRY] == sorted(
         step.order for step in app.STEP_REGISTRY
     )
