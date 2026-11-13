@@ -12,10 +12,12 @@ The rest of the fusion contract is **not** restated here.
 A seated person whose tracker ID churns shows up in the fused output as two
 people. Their tracklets alternate at the same spot, and the second chain of
 fragments is never stitched to the first, because the `stitch_exclusive`
-rule refuses any join between two people who overlap in time by more than
-one bucket. **One 0.2 s overlap blocks the whole join.** This doc lets a
-stitch through a short overlap when the two people are at the same place
-for all of it.
+rule compares the two people's **time spans**, and a span includes the
+short gaps inside each tracklet. Two people who actually have a position
+at the same moment for only 0.2 s can still have spans that overlap by
+more than one bucket, and **that blocks the whole join.** This doc lets a
+stitch through when the two people barely co-exist and are at the same
+place whenever they do.
 
 ---
 
@@ -36,12 +38,16 @@ with `smooth_window` 15, replayed through the installed fusion code.
 |---|---|
 | Seated person, 17:40 to 18:10 | fused into person 1 (1602 s) and person 2 (216 s) |
 | Person 2's pieces | 16 pieces of 0.2 to 15.8 s, each in a gap of person 1, 0.02 to 0.34 m from person 1 |
-| Time persons 1 and 2 exist together | one 0.2 s bucket, 0.18 m apart |
-| Why stage 5b does not join them | the overlap is under `dup_min_overlap_s` (1.0 s) |
-| Why stage 5c does not join them | `stitch_exclusive` refuses any overlap longer than one bucket |
+| Buckets where persons 1 and 2 both have a position | one 0.2 s bucket, 0.18 m apart |
+| Why stage 5b does not join them | that overlap is under `dup_min_overlap_s` (1.0 s) |
+| Why stage 5c does not join them | their time spans, which include gaps inside tracklets, overlap by more than one bucket, so `_overlaps` refuses |
 | `stitch_exclusive: false` instead | 17:40 to 18:10 collapses to 1 person, merging a second real person |
 
-Prototype of [section 3](#3-the-rule), replayed over three windows:
+Prototype of [section 3](#3-the-rule), replayed over three windows. Stage
+5c is greedy (each tracklet joins its nearest allowed candidate), so
+lifting a refusal can change which candidate wins and which short pieces
+stage 8 later drops; counts are therefore not monotonic in the settings,
+as the 0.3 m column shows.
 
 | Window | Live code | Tolerance 1.0 s, 0.5 m | 1.0 s, 0.3 m | 2.0 s, 0.5 m |
 |---|---|---|---|---|
@@ -53,19 +59,28 @@ Prototype of [section 3](#3-the-rule), replayed over three windows:
 
 ## 3. The rule
 
-**REQUIRED.** In stage 5c, when `stitch_exclusive` is true and the
-candidate's person and the target person overlap in time by more than one
-bucket (today's refusal), the stitch is **still allowed** when both hold:
+**REQUIRED.** In stage 5c, when `stitch_exclusive` is true,
+`stitch_overlap_tol_s` is greater than 0, and today's test refuses the
+stitch (the two people's merged time spans overlap by one bucket or more,
+as `_overlaps` decides), the stitch is **still allowed** when both hold:
 
-1. **Short**: the buckets in which both people have a position add up to at
-   most `stitch_overlap_tol_s`.
-2. **Co-located**: in every one of those buckets, the two people's positions
-   are within `stitch_overlap_dist_m` of each other.
+1. **Short**: the *shared buckets*, the buckets in which both people have a
+   position, add up to at most `stitch_overlap_tol_s`.
+2. **Co-located**: in every shared bucket, the two people's positions are
+   within `stitch_overlap_dist_m` of each other.
 
-A person's position in a bucket, for this test, is the mean of its member
-tracklets' points in that bucket, before camera fusion (stage 6) and
+With no shared bucket at all, both conditions hold: the spans overlap only
+through gaps, the two never have a position at the same moment, and stage
+5c's own distance limit already bounds the join.
+
+A person's position in a bucket, for this test, is the **plain unweighted
+mean** of its member tracklets' points in that bucket (each tracklet's
+bucket point as stored in its `pts`), before camera fusion (stage 6) and
 smoothing (stage 7). Every other stage 5c condition is unchanged: the gap,
 the distance limit and the choice of the nearest candidate.
+
+**REQUIRED: `stitch_overlap_tol_s: 0` disables the exception entirely**, so
+stage 5c behaves exactly as before this doc.
 
 **LOCKED: the tolerance never applies with `stitch_exclusive` false**; that
 setting already allows every overlap.
@@ -74,7 +89,7 @@ setting already allows every overlap.
 
 | Key | Strict default | Unit | Stage | Meaning |
 |---|---|---|---|---|
-| `stitch_overlap_tol_s` | `1.0` | s | 5c | longest overlap a stitch may cross; `0` restores today's rule |
+| `stitch_overlap_tol_s` | `1.0` | s | 5c | most shared-bucket time a stitch may cross; `0` turns the exception off |
 | `stitch_overlap_dist_m` | `0.5` | m | 5c | the two people must stay this close in every overlapping bucket |
 
 Both are numbers of at least 0; any other value makes the file invalid as
@@ -119,7 +134,8 @@ The spec unit applies these to
 [`TRACKING-FUSION-AND-CLEANING.md`](TRACKING-FUSION-AND-CLEANING.md):
 
 - section 4.2: the two [section 3.1](#31-keys) rows after
-  `stitch_exclusive`;
+  `stitch_exclusive`, and that row's meaning reworded to name the
+  exception;
 - section 5, stage 5c (item 3): one sentence stating the exception, linking
   here;
 - section 5.1: the `overlap_stitch_joins` row.

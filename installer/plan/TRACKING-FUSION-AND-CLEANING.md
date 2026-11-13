@@ -194,8 +194,8 @@ operator has not pinned. An unknown key is ignored, logged, and listed in
 | `stitch_d0_m` | `0.8` | m | 5c | stitch distance at zero gap |
 | `stitch_dv_mps` | `0.1` | m/s | 5c | stitch distance growth per second of gap |
 | `stitch_dmax_m` | `3.5` | m | 5c | stitch distance cap |
-| `stitch_exclusive` | `true` | | 5c | never stitch when the candidate's person and the target person overlap in time |
-| `stitch_overlap_tol_s` | `1.0` | s | 5c | longest overlap a stitch may cross when the two people are co-located ([`STITCH-OVERLAP` section 3](STITCH-OVERLAP-TOLERANCE.md#3-the-rule)) |
+| `stitch_exclusive` | `true` | | 5c | never stitch when the candidate's person and the target person overlap in time, except a short co-located overlap ([`STITCH-OVERLAP` section 3](STITCH-OVERLAP-TOLERANCE.md#3-the-rule)) |
+| `stitch_overlap_tol_s` | `1.0` | s | 5c | most shared-bucket time a stitch may cross when the two people are co-located; `0` turns the exception off |
 | `stitch_overlap_dist_m` | `0.5` | m | 5c | how close the two people must stay in every overlapping bucket |
 | `smooth_window` | `5` | buckets | 7 | rolling median window |
 | `min_person_s` | `3.0` | s | 8 | drop shorter people |
