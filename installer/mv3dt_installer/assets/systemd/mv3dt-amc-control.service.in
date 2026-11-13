@@ -1,0 +1,42 @@
+# Template for /etc/systemd/system/mv3dt-amc-control.service
+#
+# Rendered by mv3dt_installer.steps.step9_amc_control via
+# systemd.render_unit(). STEP-9: one process serves the AMC control API on
+# 127.0.0.1:8091 (start, stop and status of AutoMagicCalib, and the automated
+# calibration workflow). The web app's browser reaches it through
+# `tailscale serve` on tailnet HTTPS port 8444.
+#
+# The ticket secret, the web app project id and the allowed origins come from
+# secrets/tracking.env, shared with mv3dt-tracking.service because the web app
+# signs both services' tickets with one secret. installer.conf supplies AMC's
+# ports and project. The environment marker in [Service] expands to one
+# Environment="KEY=value" line per entry of service_environment() in the step
+# module: PYTHONPATH, MV3DT_INSTALL_DIR, AMC_STATE_DIR, AMC_AUTOMATION_CONFIG,
+# AMC_PUBLIC_HOST, BIND and PYTHONUNBUFFERED.
+#
+# Runs as @USER@, who owns the package, its venv, the state directory and
+# amc_automation.yaml. It starts AMC with `sudo -n <install_dir>/bin/amc ...`,
+# allowed by /etc/sudoers.d/mv3dt-amc-control for exactly two command lines,
+# so NoNewPrivileges must stay unset here.
+[Unit]
+Description=mv3dt AMC control API
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@CONTROL_DIR@
+EnvironmentFile=@INSTALL_DIR@/installer.conf
+EnvironmentFile=@INSTALL_DIR@/secrets/tracking.env
+@SERVICE_ENVIRONMENT@
+ExecStart="@VENV_PYTHON@" -m mv3dt_amc_control serve
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+
+[Install]
+WantedBy=multi-user.target

@@ -835,6 +835,7 @@ def test_dispatch_gate_off_skips_without_completing_and_never_runs_lifecycle(
     [
         ("step7_webapp_integration", "Web-app Integration", 7, "webapp_integration"),
         ("step8_tracking_history", "Tracking history", 8, "tracking_history"),
+        ("step9_amc_control", "AMC control", 9, "amc_control"),
     ],
 )
 def test_dispatch_gated_step_runs_once_its_gate_is_turned_on(
@@ -873,6 +874,7 @@ def test_dispatch_all_complete_names_the_gated_off_steps(tmp_path, monkeypatch, 
             _DummyStep("step6_remote_supervision", "Remote Supervision", 6),
             _DummyStep("step7_webapp_integration", "Web-app Integration", 7),
             _DummyStep("step8_tracking_history", "Tracking history", 8),
+            _DummyStep("step9_amc_control", "AMC control", 9),
         ],
     )
 
@@ -881,7 +883,7 @@ def test_dispatch_all_complete_names_the_gated_off_steps(tmp_path, monkeypatch, 
     err = capsys.readouterr().err
     assert (
         "all steps complete (skipped, gate off: step6_remote_supervision, "
-        "step7_webapp_integration, step8_tracking_history)"
+        "step7_webapp_integration, step8_tracking_history, step9_amc_control)"
     ) in err
 
 
@@ -909,14 +911,16 @@ def test_status_notes_a_skipped_step_whose_gate_is_now_on(tmp_path, capsys):
 def test_status_shows_a_gate_off_skip(tmp_path, capsys):
     state_path = tmp_path / "state.json"
     sm = StateMachine(path=state_path)
-    for step_id in STEP_IDS[:-1]:
+    for step_id in STEP_IDS[:-2]:
         sm.mark_complete(step_id)
     sm.mark_skipped_gate_off("step8_tracking_history")
+    sm.mark_skipped_gate_off("step9_amc_control")
 
     assert app.main(["--status"], state_path=state_path) == 0
 
     out = capsys.readouterr().out
     assert "step8_tracking_history: SKIPPED (gate off" in out
+    assert "step9_amc_control: SKIPPED (gate off" in out
     assert "all complete: True" in out
 
 

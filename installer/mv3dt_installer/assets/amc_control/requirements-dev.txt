@@ -1,0 +1,4 @@
+# Test-only additions: the fake AMC in tests/amc_control parses form uploads.
+-r requirements.txt
+python-multipart==0.0.20
+pytest==9.0.2

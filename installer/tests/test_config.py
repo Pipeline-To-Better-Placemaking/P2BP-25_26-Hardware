@@ -42,10 +42,11 @@ def _reset_transcript_state():
 @pytest.fixture(autouse=True)
 def _seed_tracking_gate_off(monkeypatch):
     """Most tests here script the Step 6 and 7 gate prompts only. Seeding
-    the Step 8, viewer and auto-ingest gates through their env vars (tier 2)
-    keeps them out of their prompt sequences; the tracking-, viewer- and
-    auto-ingest-gate tests below remove them again."""
+    the Step 8, Step 9, viewer and auto-ingest gates through their env vars
+    (tier 2) keeps them out of their prompt sequences; the tracking-,
+    AMC-control-, viewer- and auto-ingest-gate tests below remove them again."""
     monkeypatch.setenv(config.GATE_TRACKING_HISTORY, "off")
+    monkeypatch.setenv(config.GATE_AMC_CONTROL, "off")
     monkeypatch.setenv(config.GATE_VIEWER_STREAM, "off")
     monkeypatch.setenv(config.GATE_AUTO_INGEST, "off")
 
@@ -709,7 +710,7 @@ def test_tracking_gate_flag_seeds_and_overrides(tmp_path, monkeypatch):
 def test_tracking_gate_is_prompted_after_the_step_gates(tmp_path, monkeypatch):
     for key in config.GATE_KEYS:
         monkeypatch.delenv(key, raising=False)
-    prompt = _scripted_prompt("", "", "on", "", "")
+    prompt = _scripted_prompt("", "", "on", "", "", "")
 
     cfg = config.load(
         str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
@@ -720,10 +721,42 @@ def test_tracking_gate_is_prompted_after_the_step_gates(tmp_path, monkeypatch):
     assert prompt.asked[2] == "MV3DT_TRACKING_HISTORY (off/on) [off]: "
 
 
+def test_amc_control_gate_is_prompted_after_tracking_history(tmp_path, monkeypatch):
+    for key in config.GATE_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    prompt = _scripted_prompt("", "", "", "on", "", "")
+
+    cfg = config.load(
+        str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
+        prompt=prompt,
+    )
+
+    assert cfg.amc_control == "on"
+    assert cfg.values[config.GATE_AMC_CONTROL] == "on"
+    assert prompt.asked[3] == "MV3DT_AMC_CONTROL (off/on) [off]: "
+
+
+def test_amc_control_flag_overrides_a_persisted_off(tmp_path, monkeypatch):
+    monkeypatch.delenv(config.GATE_AMC_CONTROL, raising=False)
+    sm = _state(tmp_path)
+    install_dir = tmp_path / "install"
+
+    first = config.load(str(install_dir), sm, non_interactive=True)
+    assert first.amc_control == "off"
+
+    second = config.load(
+        str(install_dir), sm, non_interactive=True,
+        gate_overrides={config.GATE_AMC_CONTROL: "on"},
+    )
+    assert second.amc_control == "on"
+    conf_text = (install_dir / config.CONF_FILENAME).read_text(encoding="utf-8")
+    assert "MV3DT_AMC_CONTROL=on" in conf_text
+
+
 def test_viewer_gate_is_prompted_after_the_step_gates(tmp_path, monkeypatch):
     for key in config.GATE_KEYS:
         monkeypatch.delenv(key, raising=False)
-    prompt = _scripted_prompt("", "", "", "on", "")
+    prompt = _scripted_prompt("", "", "", "", "on", "")
 
     cfg = config.load(
         str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
@@ -732,13 +765,13 @@ def test_viewer_gate_is_prompted_after_the_step_gates(tmp_path, monkeypatch):
 
     assert cfg.viewer_stream == "on"
     assert cfg.values[config.GATE_VIEWER_STREAM] == "on"
-    assert prompt.asked[3] == "MV3DT_VIEWER_STREAM (off/on) [off]: "
+    assert prompt.asked[4] == "MV3DT_VIEWER_STREAM (off/on) [off]: "
 
 
 def test_auto_ingest_gate_is_prompted_last_with_off_prefilled(tmp_path, monkeypatch):
     for key in config.GATE_KEYS:
         monkeypatch.delenv(key, raising=False)
-    prompt = _scripted_prompt("", "", "", "", "on")
+    prompt = _scripted_prompt("", "", "", "", "", "on")
 
     cfg = config.load(
         str(tmp_path / "install"), _state(tmp_path), non_interactive=False,
@@ -923,6 +956,15 @@ def test_auto_ingest_flag_maps_to_its_gate():
     args = app.parse_args(["--auto-ingest", "on"])
     assert app._gate_overrides_from_args(args) == {config.GATE_AUTO_INGEST: "on"}
     assert "auto_ingest" not in app._GATE_ORDER_TO_CONF_ATTR.values()
+
+
+def test_amc_control_flag_maps_to_its_gate_key_and_gates_step_9():
+    from mv3dt_installer import app
+
+    assert app.parse_args([]).amc_control is None
+    args = app.parse_args(["--amc-control", "on"])
+    assert app._gate_overrides_from_args(args) == {config.GATE_AMC_CONTROL: "on"}
+    assert app._GATE_ORDER_TO_CONF_ATTR[9] == "amc_control"
 
 
 def _hide_prompts(monkeypatch):
