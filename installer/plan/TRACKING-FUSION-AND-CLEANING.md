@@ -195,6 +195,8 @@ operator has not pinned. An unknown key is ignored, logged, and listed in
 | `stitch_dv_mps` | `0.1` | m/s | 5c | stitch distance growth per second of gap |
 | `stitch_dmax_m` | `3.5` | m | 5c | stitch distance cap |
 | `stitch_exclusive` | `true` | | 5c | never stitch when the candidate's person and the target person overlap in time |
+| `stitch_overlap_tol_s` | `1.0` | s | 5c | longest overlap a stitch may cross when the two people are co-located ([`STITCH-OVERLAP` section 3](STITCH-OVERLAP-TOLERANCE.md#3-the-rule)) |
+| `stitch_overlap_dist_m` | `0.5` | m | 5c | how close the two people must stay in every overlapping bucket |
 | `smooth_window` | `5` | buckets | 7 | rolling median window |
 | `min_person_s` | `3.0` | s | 8 | drop shorter people |
 
@@ -331,7 +333,9 @@ stream a 24 h window without loading it. The stages run in this order
       candidate's person overlaps in time any tracklet of the target
       person. A literal port of the prototype, which checked only the
       candidate tracklet, merged concurrent people already joined through
-      the shared-id pass.
+      the shared-id pass. Exception: a short, co-located overlap does not
+      refuse the stitch
+      ([`STITCH-OVERLAP` section 3](STITCH-OVERLAP-TOLERANCE.md#3-the-rule)).
 6. **Camera fusion**: per person per bucket, combine the sensors' positions
    as an inverse-variance weighted mean, using each sensor's `sigma_m` from
    `offsets.json` when applied, else equal weights. Record which sensors
@@ -361,6 +365,7 @@ Every stage counts what it removed. The counts are returned in every fused
 | `shared_id_joins` | 5a | joins |
 | `duplicate_joins` | 5b | joins |
 | `stitch_joins` | 5c | joins |
+| `overlap_stitch_joins` | 5c | joins that crossed a short co-located overlap; also counted in `stitch_joins` |
 | `post_merge_speed` | 7 | buckets |
 | `short_person` | 8 | people (and their buckets in `short_person_buckets`) |
 
