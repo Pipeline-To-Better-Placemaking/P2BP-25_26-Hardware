@@ -396,3 +396,83 @@ def test_invalid_offsets_are_not_applied_and_never_crash(entry):
     assert res.summary["offsets"]["applied"] is False
     assert res.summary["offsets"]["error"].startswith("sensors.cam1")
     assert all(abs(x - 2.0) < 0.2 for x in res.people[0]["x"])
+
+
+def _split_seated(cam2_dx=0.0, cam2_start=9.8):
+    """A seated person whose id changes at 10 s, where the new id's second
+    camera already sees it from `cam2_start`, so the two people overlap for
+    0.2 s (two shared buckets). `cam2_dx` moves that camera's view of the
+    new id; the ids then keep alternating at the same spot."""
+    rng = random.Random(26)
+    rows = _track(1, "cam1", 0.0, 10.0, _static(4.0, -3.0), rng, noise=0.02)
+    rows += _track(2, "cam2", cam2_start, 20.0, _static(4.0 + cam2_dx, -3.0), rng, noise=0.02)
+    rows += _track(2, "cam1", 10.0, 20.0, _static(4.0, -3.0), rng, noise=0.02)
+    rows += _track(3, "cam1", 20.5, 30.0, _static(4.0, -3.0), rng, noise=0.02)
+    return rows
+
+
+def test_short_co_located_overlap_is_stitched():
+    rows = _split_seated()
+    res = fuse(rows, parse_config({}), room=ROOM)
+    assert res.summary["people"] == 1
+    assert res.people[0]["trackIds"] == [1, 2, 3]
+    d = res.summary["dropped"]
+    assert d["overlap_stitch_joins"] == 1
+    assert d["stitch_joins"] == 2                     # the overlap join counts here too
+    # The exclusive rule alone refuses the same join.
+    today = fuse(rows, parse_config({"stitch_overlap_tol_s": 0}), room=ROOM)
+    assert today.summary["people"] == 2
+    assert today.summary["dropped"]["overlap_stitch_joins"] == 0
+
+
+def test_short_overlap_apart_stays_two_people():
+    res = fuse(_split_seated(cam2_dx=1.0), parse_config({}), room=ROOM)
+    assert res.summary["people"] == 2
+    assert res.summary["dropped"]["overlap_stitch_joins"] == 0
+
+
+def test_overlap_longer_than_the_tolerance_stays_two_people():
+    rows = _split_seated()                            # 2 shared buckets, 0.4 s
+    res = fuse(rows, parse_config({"stitch_overlap_tol_s": 0.2}), room=ROOM)
+    assert res.summary["people"] == 2
+    assert res.summary["dropped"]["overlap_stitch_joins"] == 0
+    ok = fuse(rows, parse_config({"stitch_overlap_tol_s": 0.4}), room=ROOM)
+    assert ok.summary["people"] == 1
+
+
+def test_spans_overlapping_only_through_gaps_are_stitched_unless_tol_is_zero():
+    rng = random.Random(28)
+    spot = _static(4.0, -3.0)
+    # Id 1 has a hole from 8.0 to 9.6 s; id 2's second camera sees the person
+    # only inside that hole, then again from 10.2 s. The spans overlap, but
+    # no bucket holds a position of both people.
+    rows = _track(1, "cam1", 0.0, 8.0, spot, rng, noise=0.02)
+    rows += _track(1, "cam1", 9.6, 10.0, spot, rng, noise=0.02)
+    rows += _track(2, "cam2", 8.2, 9.4, spot, rng, noise=0.02)
+    rows += _track(2, "cam2", 10.2, 20.0, spot, rng, noise=0.02)
+    rows += _track(2, "cam1", 10.2, 20.0, spot, rng, noise=0.02)
+    res = fuse(rows, parse_config({}), room=ROOM)
+    assert res.summary["people"] == 1
+    assert res.summary["dropped"]["overlap_stitch_joins"] == 1
+    off = fuse(rows, parse_config({"stitch_overlap_tol_s": 0}), room=ROOM)
+    assert off.summary["people"] == 2
+    assert off.summary["dropped"]["overlap_stitch_joins"] == 0
+
+
+def test_tolerance_never_applies_without_stitch_exclusive():
+    res = fuse(_split_seated(cam2_dx=1.0), parse_config({"stitch_exclusive": False}), room=ROOM)
+    assert res.summary["people"] == 1
+    assert res.summary["dropped"]["overlap_stitch_joins"] == 0
+
+
+def test_zero_tolerance_ignores_the_distance(living_room):
+    rng = random.Random(27)
+    rows = _churn(10, ["cam1"], 0.0, 40.0, lambda t: (0.5 + 0.15 * t, -1.0 - 0.06 * t), rng, gap=0.0)
+    rows += _churn(200, ["cam1", "cam2"], 0.0, 40.0, lambda t: (6.5 - 0.15 * t, -1.0 - 0.06 * t), rng, gap=0.0)
+    rows += _split_seated()
+    rows.sort(key=lambda r: (r.ts_ms, r.sensor, r.track_id))
+    for data in (living_room, rows):
+        zero = fuse(data, parse_config({"stitch_overlap_tol_s": 0}), room=ROOM)
+        wide = fuse(data, parse_config({"stitch_overlap_tol_s": 0, "stitch_overlap_dist_m": 99}), room=ROOM)
+        assert zero.summary["dropped"]["overlap_stitch_joins"] == 0
+        assert zero.people == wide.people and zero.summary == wide.summary
