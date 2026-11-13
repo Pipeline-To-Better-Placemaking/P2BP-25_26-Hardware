@@ -16,7 +16,9 @@ when someone is briefly lost, and part of every recording is noise
    median distance is within `shared_id_gate_m`, concurrent duplicates that
    stay together, and
    sequential continuation (gap and distance limits) that never joins a
-   person who is being tracked elsewhere at the same time;
+   person who is being tracked elsewhere at the same time, unless the two
+   overlap only briefly (`stitch_overlap_tol_s`) and at the same place
+   (`stitch_overlap_dist_m`);
 6. per person per bucket, cameras fused by an inverse-variance weighted
    mean (each camera's `sigma_m` from the applied offsets, else equal
    weights), with the cameras that contributed kept;
@@ -26,7 +28,9 @@ when someone is briefly lost, and part of every recording is noise
 Counters (`Fuser.dropped`): out_of_bounds, zone (and per zone name in
 `zones`) and speed count raw detections; short_tracklet counts tracklets
 (their detections in short_tracklet_samples); shared_id_joins,
-duplicate_joins and stitch_joins count association joins;
+duplicate_joins and stitch_joins count association joins
+(overlap_stitch_joins the stitches that crossed a short co-located overlap,
+also counted in stitch_joins);
 post_merge_speed counts fused buckets; short_person counts people (their
 buckets in short_person_buckets).
 
@@ -51,7 +55,7 @@ from .store import Detection
 
 DROP_KEYS = (
     "out_of_bounds", "zone", "speed", "short_tracklet", "short_tracklet_samples",
-    "shared_id_joins", "duplicate_joins", "stitch_joins", "post_merge_speed",
+    "shared_id_joins", "duplicate_joins", "stitch_joins", "overlap_stitch_joins", "post_merge_speed",
     "short_person", "short_person_buckets",
 )
 _MIN_SIGMA_M = 0.05
@@ -351,13 +355,51 @@ class Fuser:
         for i, t in enumerate(tracklets):
             spans[find(i)].append((t.pts[0][0], t.end))
         spans = {r: _merge_spans(v) for r, v in spans.items()}
+        # Per person (union-find root) and bucket, the sum and count of its
+        # tracklets' points, for the overlap tolerance. Kept up to date on
+        # every stitch by merging the smaller map into the larger.
+        tol_ms = cfg.stitch_overlap_tol_s * 1000
+        use_tol = cfg.stitch_exclusive and tol_ms > 0
+        pmap: dict[int, dict[int, list]] = {}
+        if use_tol:
+            for i, t in enumerate(tracklets):
+                m = pmap.setdefault(find(i), {})
+                for b, x, y, _ in t.pts:
+                    cell = m.get(b)
+                    if cell is None:
+                        m[b] = [x, y, 1]
+                    else:
+                        cell[0] += x
+                        cell[1] += y
+                        cell[2] += 1
+        max_common = int(tol_ms // cfg.bucket_ms) if use_tol else 0
+
+        def co_located(ra: int, rc: int) -> bool:
+            """Whether persons ra and rc both have a position in at most
+            max_common buckets, each pair within stitch_overlap_dist_m."""
+            ma, mc = pmap[ra], pmap[rc]
+            n_common = 0
+            for s0, s1 in _intersect(spans[ra], spans[rc]):
+                for b in range(s0, s1 + 1, cfg.bucket_ms):
+                    pa, pc = ma.get(b), mc.get(b)
+                    if pa is None or pc is None:
+                        continue
+                    n_common += 1
+                    if n_common > max_common:
+                        return False
+                    dx = pa[0] / pa[2] - pc[0] / pc[2]
+                    dy = pa[1] / pa[2] - pc[1] / pc[2]
+                    if math.hypot(dx, dy) > cfg.stitch_overlap_dist_m:
+                        return False
+            return True
+
         ends = sorted((t.end, i) for i, t in enumerate(tracklets))
         end_ts = [e for e, _ in ends]
         gap_ms = cfg.stitch_gap_s * 1000
         for c, tc in enumerate(tracklets):
             t0, x0, y0, _ = tc.pts[0]
             rc = find(c)
-            best, best_d = None, None
+            best, best_d, best_tol = None, None, False
             # Candidates end at most stitch_gap_s before c starts; an end in
             # c's first bucket counts too (an id handoff inside one bucket).
             lo = bisect.bisect_left(end_ts, t0 - gap_ms)
@@ -370,14 +412,33 @@ class Fuser:
                 d = math.hypot(x0 - xa, y0 - ya)
                 if d > cfg.stitch_dist((t0 - te) / 1000.0) or (best_d is not None and d >= best_d):
                     continue
+                tol = False
                 if cfg.stitch_exclusive and _overlaps(spans[ra], spans[rc], cfg.bucket_ms):
-                    continue
-                best, best_d = a, d
+                    if not (use_tol and co_located(ra, rc)):
+                        continue
+                    tol = True
+                best, best_d, best_tol = a, d, tol
             if best is not None:
                 rb = find(best)
                 merged = _merge_spans(spans.pop(rb) + spans.pop(rc))
                 union(rb, rc, "stitch_joins")
-                spans[find(rc)] = merged
+                root = find(rc)
+                spans[root] = merged
+                if best_tol:
+                    self.dropped["overlap_stitch_joins"] += 1
+                if use_tol:
+                    big, small = pmap.pop(rb), pmap.pop(rc)
+                    if len(big) < len(small):
+                        big, small = small, big
+                    for b, (x, y, k) in small.items():
+                        cell = big.get(b)
+                        if cell is None:
+                            big[b] = [x, y, k]
+                        else:
+                            cell[0] += x
+                            cell[1] += y
+                            cell[2] += k
+                    pmap[root] = big
 
         # (6) per person per bucket, fuse cameras: within a camera the
         # tracklets' points weighted by their sample counts, across cameras
@@ -489,6 +550,21 @@ def _overlaps(a: list[tuple[int, int]], b: list[tuple[int, int]], tol: int) -> b
         else:
             j += 1
     return False
+
+
+def _intersect(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The closed intervals two merged lists of bucket spans share."""
+    out = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        lo, hi = max(a[i][0], b[j][0]), min(a[i][1], b[j][1])
+        if lo <= hi:
+            out.append((lo, hi))
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
 
 
 def summarize(samples: list[FusedSample]) -> tuple[list[dict], dict]:

@@ -69,6 +69,17 @@ def test_relaxed_preset_and_overrides():
     assert pinned.stitch_gap_s == 30.0
 
 
+def test_stitch_overlap_keys_defaults_presets_and_overrides():
+    strict = parse_config({})
+    assert (strict.stitch_overlap_tol_s, strict.stitch_overlap_dist_m) == (1.0, 0.5)
+    assert STRICT["stitch_overlap_tol_s"] == 1.0 and STRICT["stitch_overlap_dist_m"] == 0.5
+    relaxed = parse_config({"preset": "relaxed"})
+    assert (relaxed.stitch_overlap_tol_s, relaxed.stitch_overlap_dist_m) == (1.0, 0.5)
+    pinned = parse_config({"preset": "relaxed", "stitch_overlap_tol_s": 0, "stitch_overlap_dist_m": 0.3})
+    assert (pinned.stitch_overlap_tol_s, pinned.stitch_overlap_dist_m) == (0.0, 0.3)
+    assert pinned.ignored_keys == ()
+
+
 def test_unknown_keys_are_ignored_and_reported():
     cfg = parse_config({"version": 1, "vmaxx": 9, "preset": "strict"})
     assert cfg.ignored_keys == ("vmaxx",)
@@ -97,6 +108,13 @@ def test_unknown_keys_are_ignored_and_reported():
     ({"smooth_window": 4}, "smooth_window"),
     ({"smooth_window": 0}, "smooth_window"),
     ({"version": 2}, "version"),
+    ({"stitch_overlap_tol_s": -0.2}, "stitch_overlap_tol_s"),
+    ({"stitch_overlap_tol_s": "1"}, "stitch_overlap_tol_s"),
+    ({"stitch_overlap_tol_s": None}, "stitch_overlap_tol_s"),
+    ({"stitch_overlap_tol_s": True}, "stitch_overlap_tol_s"),
+    ({"stitch_overlap_dist_m": -1}, "stitch_overlap_dist_m"),
+    ({"stitch_overlap_dist_m": "near"}, "stitch_overlap_dist_m"),
+    ({"stitch_overlap_dist_m": float("nan")}, "stitch_overlap_dist_m"),
     ([1, 2], "JSON object"),
 ])
 def test_validation_errors_name_the_key(data, needle):

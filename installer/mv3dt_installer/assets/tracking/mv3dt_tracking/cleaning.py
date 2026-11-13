@@ -61,7 +61,9 @@ STRICT: dict = {
     "stitch_d0_m": 0.8,        # allowed jump at a zero gap ...
     "stitch_dv_mps": 0.1,      # ... growing by this much per second of gap ...
     "stitch_dmax_m": 3.5,      # ... up to this cap
-    "stitch_exclusive": True,  # never stitch onto a person tracked elsewhere at the same time
+    "stitch_exclusive": True,  # never stitch onto a person tracked elsewhere at the same time ...
+    "stitch_overlap_tol_s": 1.0,   # ... unless they overlap this briefly (0: never) ...
+    "stitch_overlap_dist_m": 0.5,  # ... and stay this close throughout
     "smooth_window": 5,        # rolling median, in buckets
     "min_person_s": 3.0,
 }
@@ -92,6 +94,7 @@ _POSITIVE = {
 _NON_NEGATIVE = {
     "room_margin_m", "speed_slack_m", "min_dt_s", "min_tracklet_s", "min_tracklet_samples",
     "stitch_gap_s", "stitch_d0_m", "stitch_dv_mps", "dup_min_overlap_s", "min_person_s",
+    "stitch_overlap_tol_s", "stitch_overlap_dist_m",
 }
 _INTS = {"bucket_ms", "min_tracklet_samples", "smooth_window", "version"}
 _BOOLS = {"offsets_apply", "shared_id_hint", "stitch_exclusive"}
@@ -142,6 +145,8 @@ class CleaningConfig:
     stitch_dv_mps: float = 0.1
     stitch_dmax_m: float = 3.5
     stitch_exclusive: bool = True
+    stitch_overlap_tol_s: float = 1.0
+    stitch_overlap_dist_m: float = 0.5
     smooth_window: int = 5
     min_person_s: float = 3.0
     # Replay marker overrides, (camera model stem, x, y), sorted by name.
