@@ -887,7 +887,7 @@ class Step9AmcControl:
             "  AMC's API description: "
             f"cd {control_dir} && venv/bin/python3 -m {PACKAGE_NAME} openapi"
         )
-        log.info(f"  web app setup: set WORKSTATION_BASE_URL={url}")
+        log.info(f"  web app setup: set WORKSTATION_AMC_URL={url}")
         log.info(
             f"  web app setup: {KEY_SECRET} is the tracking service's value "
             f"(sudo cat {_tracking_env_path(ctx)}); {KEY_PROJECT} and "

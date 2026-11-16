@@ -7,10 +7,13 @@ Guidance for Claude Code when working in this repository.
 P2BP Senior Design (Fall '25 – Spring '26) hardware stack for a multi-camera
 3D tracking system (MV3DT). It is now a **single subsystem**: the DeepStream
 9.1 workstation, installed and run entirely by **`installer/`** — the
-`mv3dt-installer` binary, the operator path. All seven steps are implemented
-and released; the specs live in `installer/plan/`. Steps 1–5 cover install
-and per-project pipelines; `STEP-6` adds systemd supervision + MQTT remote
-control; `STEP-7` adds the HTTP web-app data plane. Start at
+`mv3dt-installer` binary, the operator path. All nine steps are implemented
+(Steps 1–8 released, Step 9 merged but not yet in a release); the specs live
+in `installer/plan/`. Steps 1–5 cover install and per-project pipelines;
+`STEP-6` adds systemd supervision + MQTT remote control; `STEP-7` adds the
+HTTP web-app data plane; `STEP-8` adds the tracking history service;
+`STEP-9` adds the AMC control service. Steps 6–9 are gated off by default.
+Start at
 [`installer/README.md`](installer/README.md).
 
 > **Shipped is not validated.** What has actually run on the workstation —
@@ -96,8 +99,9 @@ and the other `installer/plan/` specs.
 - [`installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`](installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md)
   — shared contracts for the unified installer (state machine, reporting,
   privilege, credentials).
-- [`installer/plan/STEP-1…STEP-7`](installer/plan/) — per-step specs; STEP-6
-  is the MQTT control plane, STEP-7 the HTTP data plane.
+- [`installer/plan/STEP-1…STEP-9`](installer/plan/) — per-step specs; STEP-6
+  is the MQTT control plane, STEP-7 the HTTP data plane, STEP-8 tracking
+  history, STEP-9 AMC control.
 - [`installer/plan/DELETION-REVIEW.md`](installer/plan/DELETION-REVIEW.md) —
   what was removed from this fork and why, including the `laptop/` harness.
 - [`installer/plan/DEEPSTREAM-SETUP.md`](installer/plan/DEEPSTREAM-SETUP.md) —

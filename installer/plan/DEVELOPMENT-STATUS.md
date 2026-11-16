@@ -41,6 +41,8 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | Automatic re-ingest | `mv3dt-ingest-living-room.timer` fires every 60 s, but every `ingest` run stopped at "configuration incomplete: CAM_USER, CAM_PASSWORD": subcommands never loaded `secrets/camera.env` (broken since v0.4.7 moved the credentials there; fixed in v0.4.13). It then failed earlier still, on "Could not resolve a non-root invoking user": the root service had no `SUDO_USER`, so the timer had never ingested anything. v0.4.14 sets `Environment=SUDO_USER=<invoking user>` in the unit | 2026-10-20 | `mv3dt-installer ingest` run by hand |
 | AMC network exposure | UI `5000` and API `8000` listen on all interfaces with no authentication; anyone on the same network can create, run, or delete projects | 2026-10-20 | `ss -tlnp` |
 | Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
+| Step 9 AMC control | Implemented and unit-tested (PR #67; sudo rule fix in PR #69); **never run on the workstation**. `MV3DT_AMC_CONTROL` is `off` there ([`STEP-9`](STEP-9-AMC-CONTROL.md)) | 2026-11-16 | operator check of `installer.conf` |
+| Step 9 prerequisites on the workstation | Installer v0.4.24 (no release yet contains Step 9); `MV3DT_TRACKING_HISTORY=on`; Tailscale IPv4 `100.95.170.92`; tailnet HTTPS `8443` serves tracking and `8444` is free; `/opt/mv3dt/bin/` and `bin/mv3dt-installer` are owned by root, `bin/amc` by `p2bp-admin`, which is why the sudo rule names the binary ([`STEP-9` section 5](STEP-9-AMC-CONTROL.md#5-the-sudo-rule)) | 2026-11-16 | operator check on the workstation |
 
 > **Swapping cameras invalidates the inventory.** Link-local IPs change with
 > the hardware, so after connecting a different camera, refresh with
@@ -140,6 +142,7 @@ the binary and attaches it plus a `.sha256` to the release. The version in
 | Failure context block, refusal evidence | Implemented, **call sites not retrofitted** | `report.py` |
 | Docker pull progress | Not started, open decision | — |
 | Step 8 tracking history (recorder + read-only tailnet API) | Specified, **not implemented, not run on the workstation** | [`STEP-8`](STEP-8-TRACKING-HISTORY.md) |
+| Step 9 AMC control service (start, stop and automate AMC from the web app) | Implemented and unit-tested, **not run on the workstation**; gate `off` there | [`STEP-9`](STEP-9-AMC-CONTROL.md) |
 | Live baseline and edit protection (managed files, tuned templates, fusion/dewarper/viewer render, AMC 3.3.0, watchdog) | Specified, **not implemented, not run on the workstation** | [`LIVE-BASELINE-AND-EDIT-PROTECTION`](LIVE-BASELINE-AND-EDIT-PROTECTION.md) |
 | Tracking fusion and cleaning (fused people, `cleaning.json`, learned offsets, zone suggestions, upgrade fixes) | Specified, **not implemented, not run on the workstation** | [`TRACKING-FUSION-AND-CLEANING`](TRACKING-FUSION-AND-CLEANING.md) |
 

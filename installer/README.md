@@ -18,9 +18,11 @@ for, and where it keeps state and logs. Developers building or testing the
 installer from a clone want [§8](#8-developer-workflow).
 
 > **REQUIRED reading — what ships today.** Every behavior in this guide is
-> in the current release: the framework, all seven steps
-> ([`STEP-1`](plan/STEP-1-PREREQUISITES.md) through
-> [`STEP-7`](plan/STEP-7-WEBAPP-INTEGRATION.md)), and the release job. What
+> in the current release: the framework, steps
+> [`STEP-1`](plan/STEP-1-PREREQUISITES.md) through
+> [`STEP-8`](plan/STEP-8-TRACKING-HISTORY.md), and the release job.
+> [`STEP-9`](plan/STEP-9-AMC-CONTROL.md), the AMC control service, is merged
+> but in no release yet, and has never run on the workstation. What
 > is still open — and what has and has not been proven on real hardware —
 > is tracked in
 > [`DEVELOPMENT-STATUS` §5](plan/DEVELOPMENT-STATUS.md#5-what-remains), not
@@ -140,6 +142,8 @@ Framework-level flags
 | `--version` | — | Print the version and exit; a release binary also prints the tag, commit, and build time CI stamped into it |
 | `--remote-supervision` | `off`, `local`, `remote` | Set the Step 6 gate ([`00` §3.4](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)) without being prompted; overrides an already-persisted value and logs the change |
 | `--webapp-integration` | `off`, `on` | Set the Step 7 gate the same way |
+| `--tracking-history` | `off`, `on` | Set the Step 8 gate (`MV3DT_TRACKING_HISTORY`) the same way ([`STEP-8` section 4.1](plan/STEP-8-TRACKING-HISTORY.md#41-gate)) |
+| `--amc-control` | `off`, `on` | Set the Step 9 gate (`MV3DT_AMC_CONTROL`) the same way; needs the Step 8 gate `on`, whose ticket secret it shares ([`STEP-9` section 3](plan/STEP-9-AMC-CONTROL.md#3-gate-and-prerequisites)) |
 | `--scan-cameras` | — | Refresh the camera fleet after initial automatic Step 4 discovery, probe RTSP, bind new positions, write the inventory, print the table, and exit; needs `sudo` for raw sockets |
 | `--camera-scan-cidr` | `CIDR` | Override the discovery sweep range (default `169.254.0.0/16`); persisted as `CAMERA_SCAN_CIDR` |
 | `--camera-scan-iface` | `IFACE` | Restrict discovery to one interface; persisted as `CAMERA_SCAN_IFACE` |
@@ -162,7 +166,7 @@ systemd units invoke; an operator rarely needs those by hand. Each accepts
 | `reporter` | Web-app status/heartbeat loop (`--once` for a single cycle) | `mv3dt-reporter.service` | [`STEP-7` §D](plan/STEP-7-WEBAPP-INTEGRATION.md#d-registration-and-status) |
 | `uploader` | Web-app artifact upload loop (`--once` for a single pass) | `mv3dt-uploader.service` | [`STEP-7` §E](plan/STEP-7-WEBAPP-INTEGRATION.md#e-artifact-upload-daemon) |
 
-Not passing one of the two gate flags differs from passing `off` explicitly:
+Not passing one of the gate flags differs from passing `off` explicitly:
 an unpassed flag leaves the value to the next tier of precedence —
 environment variable, then an interactive prompt, then `off` — while
 `--webapp-integration off` sets it explicitly. A gate key already recorded
@@ -197,7 +201,10 @@ second launch is a bug, not the design.
    default unless you have been told otherwise.
 3. **Web-app integration gate** (`off`, `on`). Same terms as prompt 2. `off`
    skips Step 7, the HTTP data plane
-   ([`STEP-7`](plan/STEP-7-WEBAPP-INTEGRATION.md)).
+   ([`STEP-7`](plan/STEP-7-WEBAPP-INTEGRATION.md)). The tracking history
+   gate (Step 8, [`STEP-8`](plan/STEP-8-TRACKING-HISTORY.md)) and the AMC
+   control gate (Step 9, [`STEP-9`](plan/STEP-9-AMC-CONTROL.md)) are asked
+   the same way, each `off` by default; Step 9 needs Step 8 `on`.
 4. **NGC API key.** A secret prompt — nothing is echoed as you type, and the
    key is never written to the transcript
    ([`00` §10.1](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#101-storage-contract)).
@@ -224,7 +231,8 @@ second launch is a bug, not the design.
 Under `--non-interactive` nothing is prompted. A gate already recorded in
 `installer.conf` keeps the value it has; a gate key absent from
 `installer.conf` is seeded from the like-named environment variable
-(`MV3DT_REMOTE_SUPERVISION` / `MV3DT_WEBAPP_INTEGRATION`) if one is set in
+(`MV3DT_REMOTE_SUPERVISION`, `MV3DT_WEBAPP_INTEGRATION`,
+`MV3DT_TRACKING_HISTORY`, `MV3DT_AMC_CONTROL`) if one is set in
 the installer's own environment, else `off` — the same precedence
 [§4](#4-command-line-flags) describes
 ([`00` §3.4](plan/00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)). A
@@ -375,7 +383,7 @@ release job for anything an operator will run.
 
 - **What each step installs.** The per-step specs under [`plan/`](plan/) own
   that: [`STEP-1`](plan/STEP-1-PREREQUISITES.md) through
-  [`STEP-7`](plan/STEP-7-WEBAPP-INTEGRATION.md).
+  [`STEP-9`](plan/STEP-9-AMC-CONTROL.md).
 - **The DeepStream 9.1 version pins** and the manual NVIDIA prerequisites —
   [`plan/DEEPSTREAM-SETUP.md`](plan/DEEPSTREAM-SETUP.md) is the source of
   truth.
@@ -405,7 +413,7 @@ Repo files referenced:
   gates, state, logging, privilege, and credentials.
 - [`installer/plan/STEP-1-PREREQUISITES.md`](plan/STEP-1-PREREQUISITES.md)
   through
-  [`installer/plan/STEP-7-WEBAPP-INTEGRATION.md`](plan/STEP-7-WEBAPP-INTEGRATION.md)
+  [`installer/plan/STEP-9-AMC-CONTROL.md`](plan/STEP-9-AMC-CONTROL.md)
   — what the gated and ungated steps actually do.
 - [`installer/installer.spec`](installer.spec) — the PyInstaller recipe used
   by both the release job and the local build in §8.3.
