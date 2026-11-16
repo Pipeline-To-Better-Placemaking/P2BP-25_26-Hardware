@@ -95,6 +95,7 @@ class Context:
         if amc_bin:
             (self.install_dir / "bin").mkdir(exist_ok=True)
             (self.install_dir / "bin" / "amc").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            (self.install_dir / "bin" / "mv3dt-installer").write_text("", encoding="utf-8")
         if tracking_env:
             secrets_dir = self.install_dir / "secrets"
             secrets_dir.mkdir(exist_ok=True)
@@ -128,8 +129,24 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(s8, "_WHICH", lambda name: f"/usr/bin/{name}")  # tailscale_state is Step 8's
     monkeypatch.setattr(s9, "_SLEEP", lambda s: None)
     monkeypatch.setattr(s9, "_HTTP_GET", _healthy)
+    # Every path is root-owned 0755 unless a test says otherwise.
+    monkeypatch.setattr(s9, "_LSTAT", _Owners())
+    monkeypatch.setattr(s9, "_REALPATH", lambda p: p)
     yield
     logs._transcript_path = None
+
+
+class _Owners:
+    """A fake `os.lstat`: root-owned 0755 directories, with overrides."""
+
+    def __init__(self, overrides=None):
+        self.overrides = dict(overrides or {})
+        self.seen = []
+
+    def __call__(self, path):
+        self.seen.append(path)
+        uid, mode = self.overrides.get(path, (0, stat.S_IFDIR | 0o755))
+        return SimpleNamespace(st_uid=uid, st_mode=mode)
 
 
 def _healthy(url):
@@ -191,6 +208,62 @@ def test_preflight_needs_the_amc_launcher(tmp_path):
     result = s9.Step9AmcControl().preflight(Context(tmp_path, amc_bin=False))
     assert result.status is StepStatus.USER_ACTION_REQUIRED
     assert "Step 3" in result.user_actions[0].text
+    assert "mv3dt-installer" in result.message
+
+
+def test_preflight_accepts_a_root_owned_installer_binary(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    binary = str(ctx.install_dir / "bin" / "mv3dt-installer")
+    owners = _Owners({binary: (0, stat.S_IFREG | 0o755)})
+    monkeypatch.setattr(s9, "_LSTAT", owners)
+    assert s9.Step9AmcControl().preflight(ctx).status is StepStatus.COMPLETE
+    # every component from the binary up to / was checked
+    assert binary in owners.seen and "/" in owners.seen
+    assert str(ctx.install_dir) in owners.seen
+
+
+def test_preflight_refuses_a_user_owned_installer_binary(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    binary = str(ctx.install_dir / "bin" / "mv3dt-installer")
+    monkeypatch.setattr(s9, "_LSTAT", _Owners({binary: (1000, stat.S_IFREG | 0o755)}))
+    result = s9.Step9AmcControl().preflight(ctx)
+    assert result.status is StepStatus.FAILED
+    assert binary in result.message and "uid 1000" in result.message
+
+
+def test_preflight_refuses_a_group_writable_parent(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    parent = str(ctx.install_dir)
+    monkeypatch.setattr(s9, "_LSTAT", _Owners({parent: (0, stat.S_IFDIR | 0o775)}))
+    result = s9.Step9AmcControl().preflight(ctx)
+    assert result.status is StepStatus.FAILED
+    assert parent in result.message and "writable by group or others" in result.message
+
+
+def test_a_root_owned_symlink_is_judged_by_its_target(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    link = str(ctx.install_dir)
+    real = "/srv/mv3dt"
+    monkeypatch.setattr(
+        s9, "_REALPATH", lambda p: p.replace(link, real) if p.startswith(link) else p
+    )
+    monkeypatch.setattr(s9, "_LSTAT", _Owners({link: (0, stat.S_IFLNK | 0o777)}))
+    assert s9.insecure_sudo_target(ctx.install_dir / "bin" / "mv3dt-installer") is None
+    monkeypatch.setattr(
+        s9,
+        "_LSTAT",
+        _Owners({link: (0, stat.S_IFLNK | 0o777), real: (1000, stat.S_IFDIR | 0o755)}),
+    )
+    assert real in s9.insecure_sudo_target(ctx.install_dir / "bin" / "mv3dt-installer")
+
+
+def test_run_writes_no_rule_for_an_insecure_binary(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    binary = str(ctx.install_dir / "bin" / "mv3dt-installer")
+    monkeypatch.setattr(s9, "_LSTAT", _Owners({binary: (1000, stat.S_IFREG | 0o755)}))
+    result = s9.Step9AmcControl().run(ctx)
+    assert result.status is StepStatus.FAILED and binary in result.message
+    assert not _sudoers(tmp_path).exists()
 
 
 def test_preflight_needs_step_8s_secret_file(tmp_path):
@@ -222,7 +295,7 @@ def test_preflight_refuses_an_install_dir_sudoers_cannot_express(tmp_path):
     ctx = Context(tmp_path)
     ctx.install_dir = tmp_path / "my install,dir"
     (ctx.install_dir / "bin").mkdir(parents=True)
-    (ctx.install_dir / "bin" / "amc").write_text("", encoding="utf-8")
+    (ctx.install_dir / "bin" / "mv3dt-installer").write_text("", encoding="utf-8")
     (ctx.install_dir / "secrets").mkdir()
     (ctx.install_dir / "secrets" / "tracking.env").write_text(
         f"WORKSTATION_TICKET_SECRET={SECRET}\nTRACKING_PROJECT_ID=p\nALLOWED_ORIGINS=https://a.example\n",
@@ -267,26 +340,25 @@ def test_sudo_rule_allows_exactly_the_two_amc_commands(tmp_path):
 
     path = _sudoers(tmp_path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o440
-    amc = ctx.install_dir / "bin" / "amc"
+    binary = ctx.install_dir / "bin" / "mv3dt-installer"
     rules = [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
     assert rules == [
-        f"operator ALL=(root) NOPASSWD: {amc} --keep-up --no-open --non-interactive "
-        f"--host-ip {TS_IP}, {amc} --down"
+        f"operator ALL=(root) NOPASSWD: {binary} amc --keep-up --no-open --non-interactive "
+        f"--host-ip {TS_IP}, {binary} amc --down"
     ]
     assert "ALL=(ALL)" not in path.read_text() and "NOPASSWD: ALL" not in path.read_text()
+    # never the user-owned wrapper
+    assert "bin/amc" not in path.read_text()
 
 
 def test_sudo_rule_matches_what_the_service_runs(tmp_path):
     """The rule is only useful if it equals the controller's argv."""
-    pytest.importorskip("fastapi")
     sys.path.insert(0, str(shellout.asset_path("amc_control")))
-    import inspect
-
     from mv3dt_amc_control import controller
 
-    source = inspect.getsource(controller.AmcController)
-    assert json.dumps(list(s9.AMC_START_ARGS))[1:-1] in source
-    assert '["--down"]' in source and s9.AMC_STOP_ARGS == ("--down",)
+    assert controller.INSTALLER_BIN_NAME == s9.INSTALLER_BIN_NAME
+    assert (controller.AMC_SUBCOMMAND, *controller.START_ARGS) == s9.AMC_START_ARGS
+    assert (controller.AMC_SUBCOMMAND, *controller.STOP_ARGS) == s9.AMC_STOP_ARGS
 
 
 def test_sudo_rule_is_checked_by_visudo_before_it_is_installed(tmp_path):
@@ -442,6 +514,30 @@ def test_changed_tailscale_address_rewrites_unit_and_rule(tmp_path):
     assert step.pending_update(ctx) is None
 
 
+def test_a_rule_naming_the_old_wrapper_is_an_update(tmp_path):
+    """Releases before the fix named the user-owned `bin/amc` in the rule."""
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    amc = ctx.install_dir / "bin" / "amc"
+    old = (
+        f"operator ALL=(root) NOPASSWD: {amc} --keep-up --no-open --non-interactive "
+        f"--host-ip {TS_IP}, {amc} --down\n"
+    )
+    _sudoers(tmp_path).chmod(0o640)
+    _sudoers(tmp_path).write_text(old)
+    _sudoers(tmp_path).chmod(0o440)
+
+    assert s9.SUDOERS_NAME in step.pending_update(ctx)
+    assert step.verify(ctx).status is StepStatus.USER_ACTION_REQUIRED
+    ctx.update_pending = "rule changed"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    rule = _sudoers(tmp_path).read_text()
+    assert f"{ctx.install_dir}/bin/mv3dt-installer amc --down" in rule
+    assert str(amc) not in rule
+    assert step.pending_update(ctx) is None
+
+
 def test_status_without_a_user_checks_only_the_package(tmp_path):
     ctx = Context(tmp_path)
     s9.Step9AmcControl().run(ctx)
@@ -490,6 +586,16 @@ def test_verify_notices_a_rule_for_an_old_address(tmp_path):
     ctx.runner.tailscale_ip = "100.64.0.99"
     result = step.verify(ctx)
     assert result.status is StepStatus.USER_ACTION_REQUIRED and "100.64.0.99" in result.message
+
+
+def test_verify_fails_when_the_installer_binary_becomes_user_owned(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    binary = str(ctx.install_dir / "bin" / "mv3dt-installer")
+    monkeypatch.setattr(s9, "_LSTAT", _Owners({binary: (1000, stat.S_IFREG | 0o755)}))
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED and binary in result.message
 
 
 def test_verify_fails_when_the_service_does_not_answer(tmp_path, monkeypatch):

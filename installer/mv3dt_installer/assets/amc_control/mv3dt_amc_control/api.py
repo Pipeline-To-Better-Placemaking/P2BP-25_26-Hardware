@@ -4,8 +4,8 @@ Routes (all but /health need a web app ticket with scope "amc"):
 
     GET  /health                  open; for the installer's verify and monitoring
     GET  /amc/status              AMC's state and, when ready, the address to open
-    POST /amc/start               launch AMC (`bin/amc --keep-up ...`)
-    POST /amc/stop                shut AMC down (`bin/amc --down`)
+    POST /amc/start               launch AMC (`mv3dt-installer amc --keep-up ...`)
+    POST /amc/stop                shut AMC down (`mv3dt-installer amc --down`)
     GET  /amc/automation/status   the current or last automated run
     POST /amc/automation/start    start a run from a spec signed by the web app
     POST /amc/automation/continue after the manual steps, or to retry
