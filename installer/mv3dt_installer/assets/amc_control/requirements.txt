@@ -1,0 +1,11 @@
+# Runtime dependencies of the mv3dt-amc-control service venv (STEP-9 section 4).
+# Same FastAPI stack and versions as mv3dt_tracking.
+fastapi==0.135.2
+starlette==1.10.0
+pydantic==2.14.1
+uvicorn==0.30.0
+PyJWT==2.10.1
+PyYAML==6.0.2
+# AMC's REST API client (uploads use multipart) and the floor plan conversion.
+httpx==0.28.1
+Pillow==11.3.0

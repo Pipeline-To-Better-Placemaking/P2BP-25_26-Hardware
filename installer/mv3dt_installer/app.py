@@ -232,6 +232,15 @@ def build_parser() -> argparse.ArgumentParser:
         "Overrides an already-persisted value.",
     )
     parser.add_argument(
+        "--amc-control",
+        choices=config_mod.GATE_CHOICES[config_mod.GATE_AMC_CONTROL],
+        default=None,
+        help="Set the Step 9 AMC-control gate "
+        "(MV3DT_AMC_CONTROL in installer.conf, doc 00 §3.4). Needs the "
+        "Step 8 tracking-history gate on, whose ticket secret it shares. "
+        "Overrides an already-persisted value.",
+    )
+    parser.add_argument(
         "--viewer-stream",
         choices=config_mod.GATE_CHOICES[config_mod.GATE_VIEWER_STREAM],
         default=None,
@@ -918,6 +927,10 @@ def _read_only_subcommand_config(
             config_mod.GATE_TRACKING_HISTORY,
             config_mod.GATE_DEFAULTS[config_mod.GATE_TRACKING_HISTORY],
         ),
+        amc_control=values.get(
+            config_mod.GATE_AMC_CONTROL,
+            config_mod.GATE_DEFAULTS[config_mod.GATE_AMC_CONTROL],
+        ),
         viewer_stream=values.get(
             config_mod.GATE_VIEWER_STREAM,
             config_mod.GATE_DEFAULTS[config_mod.GATE_VIEWER_STREAM],
@@ -1053,6 +1066,7 @@ _GATE_ORDER_TO_CONF_ATTR: dict[int, str] = {
     6: "remote_supervision",
     7: "webapp_integration",
     8: "tracking_history",
+    9: "amc_control",
 }
 
 # The installer.conf gate key behind each gated step, for `--status`.
@@ -1060,6 +1074,7 @@ _STEP_ID_TO_GATE_KEY: dict[str, str] = {
     "step6_remote_supervision": config_mod.GATE_REMOTE_SUPERVISION,
     "step7_webapp_integration": config_mod.GATE_WEBAPP_INTEGRATION,
     "step8_tracking_history": config_mod.GATE_TRACKING_HISTORY,
+    "step9_amc_control": config_mod.GATE_AMC_CONTROL,
 }
 
 # Maps each installer.conf gate key to the argparse destination its
@@ -1070,6 +1085,7 @@ _GATE_KEY_TO_ARG_DEST: dict[str, str] = {
     config_mod.GATE_REMOTE_SUPERVISION: "remote_supervision",
     config_mod.GATE_WEBAPP_INTEGRATION: "webapp_integration",
     config_mod.GATE_TRACKING_HISTORY: "tracking_history",
+    config_mod.GATE_AMC_CONTROL: "amc_control",
     config_mod.GATE_VIEWER_STREAM: "viewer_stream",
     config_mod.GATE_AUTO_INGEST: "auto_ingest",
 }

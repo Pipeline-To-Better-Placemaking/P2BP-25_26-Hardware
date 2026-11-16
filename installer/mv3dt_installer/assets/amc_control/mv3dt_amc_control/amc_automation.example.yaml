@@ -1,0 +1,147 @@
+# Base configuration for automating AutoMagicCalib (AMC) 3.3.0.
+#
+# This file ships inside the mv3dt_amc_control package and is the base every
+# run starts from. Installer Step 9 replaces it on upgrade, so do NOT edit it.
+# To change a setting on a workstation, edit
+#   <install_dir>/amc_control/amc_automation.yaml
+# (created by Step 9, never replaced) and add only the keys you change; they
+# are merged on top of this file. Check the result with
+#   cd <install_dir>/amc_control && venv/bin/python3 -m mv3dt_amc_control check-config
+#
+# Where values come from, in order:
+#   1. The project's database record, sent by the web app as a signed spec
+#      (project title, floor plan image, floor plan scale).
+#   2. This file and the override file.
+#   3. AMC's own defaults.
+#
+# AMC's REST API is documented in NVIDIA's amc-run-video-calibration skill
+# (github.com/NVIDIA/DeepStream, skills/amc-run-video-calibration). Endpoints
+# marked UNVERIFIED below are not in that documentation; check them against the
+# running AMC with:
+#   cd <install_dir>/amc_control && venv/bin/python3 -m mv3dt_amc_control openapi > amc-openapi.yaml
+
+amc:
+  # Start AMC (bin/amc --keep-up) when a run begins and it is not up yet.
+  start_if_down: true
+  # Seconds to wait for AMC to report ready. The first launch downloads
+  # several gigabytes, so this is long on purpose.
+  ready_timeout_seconds: 1800
+  # API base URL. Empty means http://127.0.0.1:<AUTO_MAGIC_CALIB_MS_PORT>/v1
+  # from installer.conf.
+  api_base_url: ""
+  request_timeout_seconds: 60
+  upload_timeout_seconds: 600
+
+# AMC step 1: Project Setup
+project:
+  # reuse_installer_project: recalibrate the AMC project named by AMC_PROJECT_ID
+  #   in installer.conf. The installer's ingest timer then picks up the new
+  #   result automatically, so this is the normal choice.
+  # create_new: create a fresh AMC project for every run. The installer does
+  #   not ingest these on its own; use results.download_dir to collect them.
+  mode: reuse_installer_project
+  # Name used when a project is created. Placeholders: {title} (project title
+  # from the database), {project_id} (web app project id), {date} (YYYYMMDD).
+  name_template: "{title}-{date}"
+
+# AMC step 2: Video Configuration (videos and layout image)
+videos:
+  enabled: true
+  # "installer" reads the footage folder the installer records into:
+  #   <CALIB_FOOTAGE_DIR or ~/Downloads/mv3dt-calibration-footage>/<PROJECT_NAME>/
+  # Anything else is used as a folder path.
+  source: installer
+  pattern: "*.mp4"
+  # AMC numbers cameras by upload order and needs cam_00.mp4, cam_01.mp4, ...
+  # Files are uploaded under those names. Order is alphabetical by file name
+  # unless you list the file names here in the order you want.
+  order: []
+
+layout:
+  enabled: true
+  # database: the floor plan attached to the project in the web app.
+  # file: always use layout.file below.
+  source: database
+  file: ""
+  # Hosts the workstation may download the floor plan from (the Supabase
+  # project host, for example abcdefgh.supabase.co). Downloads from any other
+  # host are refused. Empty refuses all downloads.
+  allowed_hosts: []
+  max_bytes: 26214400
+
+# AMC step 3: Parameters
+parameters:
+  enabled: true
+  # A settings JSON exported with the Download button on AMC's Parameters
+  # step. Posted to /v1/config as-is, which replaces UI step 3. Empty keeps
+  # AMC's defaults. Relative paths are relative to the override file's folder.
+  settings_file: ""
+  # Changes merged into settings_file before it is posted, so you can switch a
+  # setting without editing the exported file. Requires settings_file, because
+  # posting a partial settings file could reset the rest.
+  # Example (key names must match your exported file):
+  #   settings_overrides:
+  #     detector: transformer
+  settings_overrides: {}
+  scale:
+    # database: layout pixels per metre from the floor plan's scale
+    #   calibration (1000 / MmPerPixel).
+    # fixed: use fixed_px_per_m.
+    # none: leave the scale to AMC's UI.
+    source: database
+    fixed_px_per_m: 0
+    # Where the scale goes inside settings_file. AMC's README calls the value
+    # layout_px_per_m; confirm the key in your exported file. Without a
+    # settings_file the value is shown to the user to enter in the UI.
+    settings_key: layout_px_per_m
+  # One focal length per camera, in pixels, or empty to let AMC estimate them.
+  focal_lengths: []
+
+# AMC step 4: Rectification (new in AMC 3.3.0)
+rectification:
+  # ui: pause with the manual step so the user runs it in AMC's UI.
+  # api: run it with the requests below.
+  # skip: the project is already rectified.
+  mode: ui
+  # UNVERIFIED. NVIDIA's README documents rectification only through the UI.
+  # Fill these in from AMC's /openapi.yaml before switching mode to api.
+  # {project_id} is replaced with the AMC project id.
+  api:
+    start:
+      method: POST
+      path: ""
+      json: {}
+    status:
+      method: GET
+      path: ""
+      # Dotted path to the state inside the JSON reply.
+      state_field: ""
+      done_states: [COMPLETED]
+      failed_states: [ERROR, FAILED]
+    poll_seconds: 10
+    timeout_seconds: 1800
+
+# AMC step 5: Manual Alignment (always done by a person the first time)
+alignment:
+  # A saved alignment_data.json to upload instead of redoing the step, for
+  # example after recalibrating the same cameras. "auto" looks for the one AMC
+  # saved for the installer's project under
+  # <AMC_ROOT>/projects/project_<AMC_PROJECT_ID>/manual_adjustment/.
+  # Empty always asks for the manual step.
+  file: auto
+  # Files saved by AMC's alignment tool are in rectified pixels. Use original
+  # only for points picked on the raw, distorted video.
+  coord_space: rectified
+
+# AMC step 6: Execute Calibration
+calibration:
+  detector_type: resnet        # resnet (faster) or transformer (better under occlusion)
+  poll_seconds: 10
+  timeout_seconds: 5400
+
+# AMC step 7: Results
+results:
+  # Folder to save AMC's MV3DT result ZIP in. Empty leaves collection to the
+  # installer's ingest timer (mode reuse_installer_project).
+  download_dir: ""
+  result_type: amc
