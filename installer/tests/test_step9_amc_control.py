@@ -615,5 +615,5 @@ def test_report_tells_the_operator_what_to_set_in_the_web_app(tmp_path, capsys):
     capsys.readouterr()
     step.report(ctx)
     err = capsys.readouterr().err
-    assert "WORKSTATION_BASE_URL=https://ws.tailnet.ts.net:8444" in err
+    assert "WORKSTATION_AMC_URL=https://ws.tailnet.ts.net:8444" in err
     assert "amc_automation.yaml" in err and "journalctl -u mv3dt-amc-control" in err

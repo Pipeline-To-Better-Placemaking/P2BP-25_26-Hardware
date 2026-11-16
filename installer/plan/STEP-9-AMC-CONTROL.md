@@ -1,11 +1,15 @@
-# STEP 9 — AMC control service (start, stop and automate AutoMagicCalib)
+# STEP 9 — AMC control service: start, stop and automate AutoMagicCalib (owner: DevD)
 
 Status: step spec, **implemented and unit-tested, never run on the
-workstation**. It specifies the `step9_amc_control` module and the bundled
+workstation** (dated evidence in
+[`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-10-20)).
+It specifies the `step9_amc_control` module and the bundled
 `mv3dt_amc_control` service package it installs. It builds on the contracts in
 [`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) and follows
 [`STEP-8`](STEP-8-TRACKING-HISTORY.md)'s structure wherever the two overlap;
-those are not restated here.
+it does **not** restate those, it links back to them. The web app's routes
+and environment are owned by the web app repository;
+[section 9](#9-web-app-setup) mirrors them.
 
 The web app's Calibration page lets a permitted user start AutoMagicCalib
 (AMC) on the workstation, see when it is ready, open it in a new browser tab
@@ -26,7 +30,10 @@ template: `assets/systemd/mv3dt-amc-control.service.in`. Tests:
 
 In scope: installing and running the service, its sudo rule, its tailnet
 exposure and its settings file. Out of scope: AMC itself (Step 3), ingesting
-calibration results (Step 4), and the web app's routes and page.
+calibration results (Step 4), and the web app's routes and page, which
+the web app repository owns ([section 9](#9-web-app-setup)).
+
+---
 
 ## 2. What it installs
 
@@ -44,6 +51,8 @@ calibration results (Step 4), and the web app's routes and page.
 Everything under `amc_control/` is owned by the invoking user, who is also
 the service user. Nothing is written to `secrets/`: the service reads Step 8's
 `secrets/tracking.env`.
+
+---
 
 ## 3. Gate and prerequisites
 
@@ -63,6 +72,8 @@ Network exposure follows Step 8's rules: the service binds `127.0.0.1:8091`
 and is published only with `tailscale serve --bg --https=8444`, never Funnel.
 Tracking keeps 8090 and 8443.
 
+---
+
 ## 4. Package, venv and unit
 
 The package and its pinned `requirements.txt` are copied and the venv built
@@ -81,6 +92,8 @@ unset because the service uses `sudo`: it starts and stops AMC with
 
 `serve` refuses to start without the ticket secret, the project id and the
 allowed origins, with a wildcard origin, or on a non-loopback bind.
+
+---
 
 ## 5. The sudo rule
 
@@ -122,6 +135,8 @@ that is already up, so stop it (`bin/amc --down`) and start it from the web
 app, or set `HOST_IP` in `installer.conf` to the Tailscale IPv4 if manual
 launches should be reachable remotely too.
 
+---
+
 ## 6. Automation settings
 
 Every setting, with documentation, is in the packaged
@@ -156,6 +171,8 @@ The automated workflow, against AMC 3.3.0's seven steps:
 Steps 1 to 5 all run first; if any needs the user the run pauses once before
 step 6 with a to-do list and continues on request.
 
+---
+
 ## 7. API and ticket contract
 
 | Route | Purpose |
@@ -165,7 +182,7 @@ step 6 with a to-do list and continues on request.
 | `GET /amc/automation/status`, `POST .../start`, `.../continue`, `.../cancel` | the automated run |
 | `GET /amc/automation/config` | settings in effect |
 
-Tickets are Step 8's ([`STEP-8` section 3.2](STEP-8-TRACKING-HISTORY.md)) with
+Tickets are Step 8's ([`STEP-8` section 3.2](STEP-8-TRACKING-HISTORY.md#32-tickets-required)) with
 `scope: "amc"`: HS256, `aud: "p2bp-workstation"`, `exp`, `sub`, `pid`, and
 `iss` checked when `TICKET_ISSUER` is set. Wrong scope or project is 403, so a
 tracking ticket cannot control AMC. `POST /amc/automation/start` also takes a
@@ -176,6 +193,8 @@ CORS allows only `ALLOWED_ORIGINS`, and Chrome's Private Network Access
 preflight is answered for those origins. `/amc/stop` is refused while a run is
 executing or waiting for the user.
 
+---
+
 ## 8. Run, verify, update
 
 `run` phases: package and venv; settings and state; sudo rule; unit; tailnet
@@ -185,15 +204,66 @@ mode 440 and matching the current Tailscale address, and `GET /health`
 answering with the secret configured. `pending_update()` re-runs a completed
 step when the bundled package, requirements, unit or sudo rule differ.
 
+---
+
 ## 9. Web app setup
 
-`report` prints these. In the web app's environment:
+**LOCKED — the web app repository is the source of truth for route names,
+authentication, environment names and wire shapes.** This section mirrors
+web app PR
+[`P2BP-25_26-Web#34`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Web/pull/34)
+(branch `feat/amc-workstation-control`, head `740c300`, 2026-11-16), the
+Express API under `BetterPlacemaking.SERVER.EXPRESS/src/`. Where the two
+disagree, the web app wins and this section and `step9_amc_control.py` change
+to match, as for Step 7
+([`STEP-7` section G](STEP-7-WEBAPP-INTEGRATION.md#g-route-table-reconciled-against-the-express-backend)).
+
+### 9.1 Environment
+
+`report` prints the URL to set and where the secret comes from. In the web
+app's environment:
 
 | Variable | Value |
 |---|---|
-| `WORKSTATION_TICKET_SECRET` | already set for tracking (the same secret) |
-| `WORKSTATION_BASE_URL` | `https://<tailnet name>:8444` |
-| `WORKSTATION_AMC_TICKET_MINUTES` | optional, default 25 |
+| `WORKSTATION_TICKET_SECRET` | already set for tracking: the same value as `WORKSTATION_TICKET_SECRET` in `<install_dir>/secrets/tracking.env` ([`STEP-8` section 4.3](STEP-8-TRACKING-HISTORY.md#43-trackingenv)) |
+| `WORKSTATION_AMC_URL` | `https://<tailnet name>:8444` |
+| `WORKSTATION_AMC_TICKET_MINUTES` | optional, default `25`; independent of tracking's `WORKSTATION_TICKET_MINUTES` (default `5`) |
+
+**REQUIRED — do not use `WORKSTATION_BASE_URL`.** On the web app that name
+configures its unrelated `RemoteWorkstation` seam. Step 9 as first merged
+(PR #67) printed it in `report`; the AMC control URL is
+`WORKSTATION_AMC_URL`. Both web routes answer `503` until the secret and
+`WORKSTATION_AMC_URL` are both set.
+
+### 9.2 Routes
+
+Both routes require a user session and the `Project.Vision.Read` permission
+on the project, and sign with `WORKSTATION_TICKET_SECRET`, HS256,
+`aud: "p2bp-workstation"` and `iss` set to the web app's `JWT_ISSUER`.
+
+| Route | Signs | Lifetime | Response |
+|---|---|---|---|
+| `POST /api/workstation/project/:projectId/ticket` | ticket, `scope: "amc"` | `WORKSTATION_AMC_TICKET_MINUTES` | `Ticket`, `ExpiresAt`, `WorkstationUrl` |
+| `POST /api/workstation/project/:projectId/calibration-spec` | spec, `scope: "amc-calibration-spec"`, carrying the project title and a floor plan link | 15 min, the floor plan link too | `Spec`, `ExpiresAt`, `Summary` |
+
+The browser sends the ticket as `Authorization: Bearer <ticket>` to the
+workstation routes in [section 7](#7-api-and-ticket-contract), and passes the
+spec as the `Spec` field of `POST /amc/automation/start`. The spec route takes
+an optional `FloorplanId`; without one it uses the project's most recently
+updated floor plan.
+
+### 9.3 Gaps
+
+1. **The web PR is not merged.** Until it is, no deployed web app issues AMC
+   tickets or specs, and nothing in this step can be exercised from the web
+   app. Re-check this section against the merged routes.
+2. **No web UI for automation.** The web client's `amcApi.ts` calls only
+   `/amc/status`, `/amc/start` and `/amc/stop`, and no page uses it yet.
+   Nothing calls `/amc/automation/*` or the calibration-spec route, so the
+   automated workflow in [section 6](#6-automation-settings) is reachable
+   only by calling the service directly.
+
+---
 
 ## 10. Not verified on the workstation
 
@@ -206,3 +276,58 @@ step when the bundled package, requirements, unit or sudo rule differ.
 - AMC's UI and API ports listen on every interface with no login
   ([`LIVE-BASELINE-AND-EDIT-PROTECTION.md`](LIVE-BASELINE-AND-EDIT-PROTECTION.md)),
   so tailnet ACLs decide who can open AMC once it is running.
+
+---
+
+## 11. Decomposition
+
+Step 9 is implemented; these are the units as they shipped.
+
+| Unit | Branch | Files touched | Depends on | Wave |
+|---|---|---|---|---|
+| A1 Step 9 (PR #67) | `amc-auto` | `steps/step9_amc_control.py`, `assets/amc_control/`, `assets/systemd/mv3dt-amc-control.service.in`, `__main__.py`, `app.py`, `config.py`, `state.py`, `installer/plan/00-FRAMEWORK-AND-BOOTSTRAP.md`, this doc, `tests/test_step9_amc_control.py`, `tests/amc_control/`, `tests/test_app.py`, `tests/test_config.py`, `tests/test_main.py` | none | 1 |
+| A2 Sudo rule targets the installer binary (PR #69) | `feat/installer-amc-sudo-root-target` | `steps/step9_amc_control.py`, `assets/amc_control/mv3dt_amc_control/api.py`, `controller.py`, `assets/systemd/mv3dt-amc-control.service.in`, this doc sections 3 to 5, `tests/test_step9_amc_control.py`, `tests/amc_control/test_amc_control_controller.py` | A1 | 2 |
+| A3 CI installs service test requirements (PR #68) | `feat/installer-ci-service-deps` | `.github/workflows/installer-tests.yml`, `tests/amc_control/test_amc_control_api.py` | A1 | 2 |
+| A4 Doc follow-ups | `feat/installer-step9-doc-fixes` | this doc, `DEVELOPMENT-STATUS.md`, `installer/README.md`, `CLAUDE.md`, the `report` line in `steps/step9_amc_control.py` and its test | A2 | 3 |
+
+Package paths are relative to `installer/mv3dt_installer/`; test paths are
+relative to `installer/`. A4 is stacked on A2 because both edit this doc.
+
+---
+
+## References
+
+AMC facts come from NVIDIA's AutoMagicCalib REST API as documented in the
+`skills/amc-run-video-calibration` skill in NVIDIA/DeepStream; the web app
+contract comes from the web app repository.
+
+- [`P2BP-25_26-Web#34`](https://github.com/Pipeline-To-Better-Placemaking/P2BP-25_26-Web/pull/34)
+  — **backs [section 9](#9-web-app-setup)**: routes, environment names,
+  ticket and spec scopes and lifetimes.
+- [Tailscale serve](https://tailscale.com/kb/1312/serve) — tailnet-only
+  HTTPS on `8444` ([section 3](#3-gate-and-prerequisites)).
+- [sudoers(5)](https://www.sudo.ws/docs/man/sudoers.man/) — command-line
+  matching in the rule ([section 5](#5-the-sudo-rule)).
+- [RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519) — JWT claims
+  (`aud`, `exp`, `iss`) used by tickets and specs.
+
+Repo files referenced:
+
+- [`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) — the
+  step contract and the gate mechanism
+  ([`00` section 3.4](00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)).
+- [`STEP-3-AMC-LAUNCHER.md`](STEP-3-AMC-LAUNCHER.md) — the `amc` subcommand
+  and `bin/amc` wrapper the service drives.
+- [`STEP-4-CALIB-OUTPUT-WIRING.md`](STEP-4-CALIB-OUTPUT-WIRING.md) — ingest
+  of the calibration result.
+- [`STEP-7-WEBAPP-INTEGRATION.md`](STEP-7-WEBAPP-INTEGRATION.md) — section G,
+  the pattern section 9 follows.
+- [`STEP-8-TRACKING-HISTORY.md`](STEP-8-TRACKING-HISTORY.md) — the ticket
+  contract, `tracking.env`, and the tailnet exposure rules this step reuses.
+- [`LIVE-BASELINE-AND-EDIT-PROTECTION.md`](LIVE-BASELINE-AND-EDIT-PROTECTION.md)
+  — AMC's unauthenticated ports.
+- [`DEVELOPMENT-STATUS.md`](DEVELOPMENT-STATUS.md) — what has run on the
+  workstation.
+- `installer/mv3dt_installer/steps/step9_amc_control.py`,
+  `installer/mv3dt_installer/assets/amc_control/mv3dt_amc_control/` — the
+  implementation.
