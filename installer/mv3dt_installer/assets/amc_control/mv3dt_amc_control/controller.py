@@ -1,20 +1,29 @@
 """Start / stop / status control of NVIDIA AutoMagicCalib (AMC).
 
-AMC is two Docker containers (UI and REST API) that installer Step 3 wraps in
-`<install_dir>/bin/amc`. This module only runs that wrapper with fixed
-arguments; nothing from an HTTP request reaches a command line. State is not
-kept here: `status()` asks AMC's readiness endpoints each time, so a restart
-of the service loses nothing.
+AMC is two Docker containers (UI and REST API) that installer Step 3 brings
+up and down with `mv3dt-installer amc`. This module only runs that command
+with fixed arguments; nothing from an HTTP request reaches a command line.
+State is not kept here: `status()` asks AMC's readiness endpoints each time,
+so a restart of the service loses nothing.
+
+The command is `sudo -n <install_dir>/bin/mv3dt-installer amc ...`, never the
+`<install_dir>/bin/amc` wrapper: the wrapper is owned by the service user, so
+a sudo rule naming it would let that user rewrite it and run anything as
+root. Step 9's sudoers rule allows exactly the two argument lists in
+`START_ARGS` (plus the host) and `STOP_ARGS`, prefixed by the root-owned
+installer binary and its `amc` subcommand.
 
 Environment (rendered into the unit by installer Step 9):
-  MV3DT_INSTALL_DIR  install root, default /opt/mv3dt (installer.conf, bin/amc)
+  MV3DT_INSTALL_DIR  install root, default /opt/mv3dt (installer.conf,
+                     bin/mv3dt-installer)
   AMC_STATE_DIR      where the launcher log and automation progress are kept,
                      default <install_dir>/amc_control/state (owned by the
                      service user; <install_dir>/run is root's)
-  AMC_BIN            override the wrapper path
-  AMC_USE_SUDO       "0" runs the wrapper without `sudo -n` (tests). `bin/amc`
-                     runs installer subcommands, which require root, so Step 9
-                     writes a sudoers rule for exactly the two commands below.
+  AMC_BIN            tests only: run this program with the `amc` arguments
+                     instead of `<install_dir>/bin/mv3dt-installer amc`
+  AMC_USE_SUDO       "0" runs the command without `sudo -n` (tests). The
+                     `amc` subcommand requires root, so Step 9 writes a
+                     sudoers rule for exactly the two commands below.
   AMC_PUBLIC_HOST    the address the user's browser uses to reach AMC, passed
                      to `amc --host-ip` (documented as an IP). Step 9 sets the
                      workstation's Tailscale IPv4; default `tailscale ip -4`.
@@ -30,6 +39,12 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+INSTALLER_BIN_NAME = "mv3dt-installer"
+AMC_SUBCOMMAND = "amc"
+# Step 9's sudoers rule allows exactly these (the start host is appended).
+START_ARGS = ("--keep-up", "--no-open", "--non-interactive", "--host-ip")
+STOP_ARGS = ("--down",)
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.\-]*[A-Za-z0-9])?$|^[0-9A-Fa-f:]+$")
 
@@ -82,8 +97,12 @@ class AmcController:
         return Path(os.environ.get("MV3DT_INSTALL_DIR", "/opt/mv3dt"))
 
     @property
-    def amc_bin(self) -> str:
-        return os.environ.get("AMC_BIN") or str(self.install_dir / "bin" / "amc")
+    def amc_bin(self) -> list[str]:
+        """The program and subcommand that bring AMC up and down."""
+        override = os.environ.get("AMC_BIN")
+        if override:
+            return [override]
+        return [str(self.install_dir / "bin" / INSTALLER_BIN_NAME), AMC_SUBCOMMAND]
 
     @property
     def state_dir(self) -> Path:
@@ -96,7 +115,7 @@ class AmcController:
     def _prefix(self) -> list[str]:
         # `sudo -n` fails fast instead of hanging on a password prompt.
         use_sudo = os.environ.get("AMC_USE_SUDO", "1") != "0"
-        return (["sudo", "-n"] if use_sudo else []) + [self.amc_bin]
+        return (["sudo", "-n"] if use_sudo else []) + self.amc_bin
 
     def ports(self) -> tuple[int | None, int | None]:
         conf = _read_conf(self.install_dir / "installer.conf")
@@ -176,7 +195,7 @@ class AmcController:
             if not host:
                 self._error = "Tailscale address unavailable (is tailscale up? or set AMC_PUBLIC_HOST)"
                 return
-            self._launch("start", ["--keep-up", "--no-open", "--non-interactive", "--host-ip", host])
+            self._launch("start", [*START_ARGS, host])
 
     def stop(self) -> None:
         with self._lock:
@@ -189,7 +208,7 @@ class AmcController:
                 # code is irrelevant, so move it aside instead of reporting it.
                 self._old.append(self._proc)
                 self._proc = None
-            self._launch("stop", ["--down"])
+            self._launch("stop", list(STOP_ARGS))
 
     def status(self) -> dict:
         with self._lock:

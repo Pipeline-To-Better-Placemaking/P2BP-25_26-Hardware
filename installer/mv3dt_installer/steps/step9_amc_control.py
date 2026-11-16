@@ -13,12 +13,17 @@ Judgment calls:
   tells them apart), so this step creates no secret of its own and needs
   Step 8's file complete. The unit loads it as an `EnvironmentFile`; the
   secret is never read, logged or passed on a command line here.
-- **The service may run exactly two commands as root.** `bin/amc` runs
-  installer subcommands, which require root, while the service runs as the
-  invoking user. `/etc/sudoers.d/mv3dt-amc-control` allows only
-  `bin/amc --keep-up --no-open --non-interactive --host-ip <tailscale IPv4>`
-  and `bin/amc --down`. The file is checked with `visudo -cf` before it is
-  moved into place, so a bad rule can never break sudo.
+- **The service may run exactly two commands as root.** `mv3dt-installer
+  amc` requires root, while the service runs as the invoking user.
+  `/etc/sudoers.d/mv3dt-amc-control` allows only
+  `bin/mv3dt-installer amc --keep-up --no-open --non-interactive --host-ip
+  <tailscale IPv4>` and `bin/mv3dt-installer amc --down`. The rule names the
+  root-owned installer binary, not Step 3's `bin/amc` wrapper: the wrapper
+  belongs to the invoking user, who could rewrite it and so run anything as
+  root. For the same reason the step refuses to write the rule unless the
+  binary and every directory above it are root's and writable by root only.
+  The file is checked with `visudo -cf` before it is moved into place, so a
+  bad rule can never break sudo.
 - **The Tailscale IPv4 is required.** It is the address a remote browser
   uses to reach AMC (`--host-ip` is documented as an IP) and it is part of
   the sudoers rule, so without a logged-in tailscale the step asks for
@@ -50,6 +55,7 @@ from mv3dt_installer import config as config_mod
 from mv3dt_installer import systemd
 from mv3dt_installer.logs import log
 from mv3dt_installer.steps import StepResult, StepStatus, UserAction, register
+from mv3dt_installer.steps.step3_amc_launcher import INSTALLER_BIN_NAME
 
 # Shared with Step 8 so both services install and probe the same way.
 from mv3dt_installer.steps.step8_tracking_history import (
@@ -78,6 +84,7 @@ __all__ = [
     "seed_config_file",
     "tailscale_ipv4",
     "render_sudoers",
+    "insecure_sudo_target",
     "install_sudoers",
     "service_environment",
     "render_amc_control_unit",
@@ -114,9 +121,11 @@ SUDOERS_DIR = pathlib.Path("/etc/sudoers.d")
 # No dot in the name: sudo skips files in sudoers.d whose names contain one.
 SUDOERS_NAME = "mv3dt-amc-control"
 SUDOERS_MODE = 0o440
-# What the service runs (mv3dt_amc_control.controller); the rule must match it.
-AMC_START_ARGS = ("--keep-up", "--no-open", "--non-interactive", "--host-ip")
-AMC_STOP_ARGS = ("--down",)
+# What the service runs after `<install_dir>/bin/mv3dt-installer`
+# (mv3dt_amc_control.controller); the rule must match it exactly.
+AMC_SUBCOMMAND = "amc"
+AMC_START_ARGS = (AMC_SUBCOMMAND, "--keep-up", "--no-open", "--non-interactive", "--host-ip")
+AMC_STOP_ARGS = (AMC_SUBCOMMAND, "--down")
 
 _VERSION_RE = re.compile(r"""^__version__\s*=\s*["']([^"']+)["']""", re.M)
 # sudoers treats , : = \ and whitespace specially in a command; refuse them.
@@ -149,6 +158,8 @@ layout:
 _WHICH: Callable[[str], Optional[str]] = shutil.which
 _SLEEP: Callable[[float], None] = time.sleep
 _HTTP_GET: Callable[[str], tuple] = _http_get
+_LSTAT: Callable[[str], os.stat_result] = os.lstat
+_REALPATH: Callable[[str], str] = os.path.realpath
 _HEALTH_ATTEMPTS = 10
 _HEALTH_INTERVAL_S = 1.0
 
@@ -178,8 +189,9 @@ def _state_dir(ctx: Any) -> pathlib.Path:
     return _control_dir(ctx) / STATE_DIRNAME
 
 
-def _amc_bin(ctx: Any) -> pathlib.Path:
-    return pathlib.Path(ctx.install_dir) / "bin" / "amc"
+def _installer_bin(ctx: Any) -> pathlib.Path:
+    """The root-owned binary the sudo rule names (staged by Step 3)."""
+    return pathlib.Path(ctx.install_dir) / "bin" / INSTALLER_BIN_NAME
 
 
 def _sudoers_path() -> pathlib.Path:
@@ -379,6 +391,48 @@ def _no_tailscale_result() -> StepResult:
 # ---------------------------------------------------------------------------
 
 
+def insecure_sudo_target(target: pathlib.Path) -> Optional[str]:
+    """Why a NOPASSWD rule naming `target` would be a root escalation, or None.
+
+    Every path component from `target` up to `/`, along the path as written
+    and along its resolved path, must be owned by root and, unless it is a
+    symlink (whose own mode means nothing), not writable by group or other.
+    Anyone who can replace any of them can replace what sudo runs as root.
+    """
+    seen = set()
+    for path in (pathlib.Path(os.path.abspath(target)), pathlib.Path(_REALPATH(str(target)))):
+        for component in (path, *path.parents):
+            key = str(component)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                st = _LSTAT(key)
+            except OSError as exc:
+                return f"{key} cannot be checked ({exc.strerror or exc})"
+            if st.st_uid != 0:
+                return f"{key} is owned by uid {st.st_uid}, not root"
+            if not stat_mod.S_ISLNK(st.st_mode) and st.st_mode & (stat_mod.S_IWGRP | stat_mod.S_IWOTH):
+                return (
+                    f"{key} is writable by group or others "
+                    f"(mode {oct(stat_mod.S_IMODE(st.st_mode))})"
+                )
+    return None
+
+
+def _insecure_target_result(ctx: Any) -> Optional[StepResult]:
+    target = _installer_bin(ctx)
+    problem = insecure_sudo_target(target)
+    if problem is None:
+        return None
+    return StepResult(
+        status=StepStatus.FAILED,
+        message=f"{problem}; a passwordless sudo rule for {target} would let "
+        "that owner run anything as root. The installer binary and every "
+        "directory above it must be owned by root and writable by root only",
+    )
+
+
 def render_sudoers(ctx: Any, host_ip: str) -> str:
     """The rule letting the service user start and stop AMC, and nothing else.
 
@@ -386,7 +440,7 @@ def render_sudoers(ctx: Any, host_ip: str) -> str:
     be written into a sudoers command safely.
     """
     user = str(ctx.user.name)
-    amc = str(_amc_bin(ctx))
+    amc = str(_installer_bin(ctx))
     host = str(ipaddress.IPv4Address(host_ip))  # ValueError if not an IPv4
     if not _SUDOERS_USER_RE.match(user):
         raise ValueError(f"user name {user!r} cannot be written into a sudoers rule")
@@ -652,10 +706,10 @@ class Step9AmcControl:
                 ],
             )
 
-        if not _amc_bin(ctx).is_file():
+        if not _installer_bin(ctx).is_file():
             return StepResult(
                 status=StepStatus.USER_ACTION_REQUIRED,
-                message=f"{_amc_bin(ctx)} is missing; there is no AMC to control",
+                message=f"{_installer_bin(ctx)} is missing; there is no AMC to control",
                 user_actions=[UserAction(text="Complete Step 3 (AMC launcher) first")],
             )
 
@@ -679,6 +733,9 @@ class Step9AmcControl:
             render_sudoers(ctx, host_ip)
         except ValueError as exc:
             return StepResult(status=StepStatus.FAILED, message=str(exc))
+        insecure = _insecure_target_result(ctx)
+        if insecure is not None:
+            return insecure
         return StepResult(status=StepStatus.COMPLETE)
 
     def run(self, ctx: Any) -> StepResult:
@@ -720,6 +777,9 @@ class Step9AmcControl:
             rule = render_sudoers(ctx, host_ip)
         except ValueError as exc:
             return StepResult(status=StepStatus.FAILED, message=str(exc))
+        insecure = _insecure_target_result(ctx)
+        if insecure is not None:
+            return insecure
         sudoers_changed, error = install_sudoers(ctx, rule)
         if error:
             return StepResult(status=StepStatus.FAILED, message=error)
@@ -777,10 +837,14 @@ class Step9AmcControl:
         if host_ip is not None and rule != render_sudoers(ctx, host_ip):
             return StepResult(
                 status=StepStatus.USER_ACTION_REQUIRED,
-                message=f"{path} does not match this machine's Tailscale address "
-                f"({host_ip}); the service could not start AMC",
+                message=f"{path} is not the rule this release writes for this "
+                f"machine's Tailscale address ({host_ip}); the service could not "
+                "start AMC",
                 user_actions=[UserAction(text="Re-run the installer to rewrite the rule")],
             )
+        insecure = _insecure_target_result(ctx)
+        if insecure is not None:
+            return insecure
 
         doc = _wait_for_health()
         if doc is None:

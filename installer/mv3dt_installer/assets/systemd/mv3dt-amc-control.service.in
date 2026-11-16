@@ -15,9 +15,12 @@
 # AMC_PUBLIC_HOST, BIND and PYTHONUNBUFFERED.
 #
 # Runs as @USER@, who owns the package, its venv, the state directory and
-# amc_automation.yaml. It starts AMC with `sudo -n <install_dir>/bin/amc ...`,
-# allowed by /etc/sudoers.d/mv3dt-amc-control for exactly two command lines,
-# so NoNewPrivileges must stay unset here.
+# amc_automation.yaml. It starts and stops AMC with
+# `sudo -n <install_dir>/bin/mv3dt-installer amc ...`, allowed by
+# /etc/sudoers.d/mv3dt-amc-control for exactly two command lines, so
+# NoNewPrivileges must stay unset here. The rule names the root-owned
+# installer binary, never the bin/amc wrapper, which @USER@ owns and could
+# rewrite.
 [Unit]
 Description=mv3dt AMC control API
 After=network.target

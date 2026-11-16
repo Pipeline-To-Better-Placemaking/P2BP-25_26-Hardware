@@ -53,7 +53,8 @@ Gated by `MV3DT_AMC_CONTROL` in `installer.conf` with the CLI flag
 | Requirement | Why |
 |---|---|
 | Python 3.10+ with `venv` | the service venv |
-| `<install_dir>/bin/amc` (Step 3) | the launcher the service runs |
+| `<install_dir>/bin/mv3dt-installer` (Step 3) | the service runs its `amc` subcommand; the sudo rule names it |
+| `bin/mv3dt-installer` and every directory above it owned by root, not group- or other-writable | otherwise whoever can replace the binary gets passwordless root through the rule (section 5); preflight and verify fail naming the offending path |
 | `MV3DT_TRACKING_HISTORY=on` and a complete `secrets/tracking.env` (Step 8) | the web app signs AMC and tracking tickets with one `WORKSTATION_TICKET_SECRET`; `TRACKING_PROJECT_ID` and `ALLOWED_ORIGINS` apply to both services |
 | `visudo` | the sudo rule is checked before it is installed |
 | A Tailscale IPv4 (`tailscale ip -4`) | it is the address remote browsers use for AMC and is part of the sudo rule |
@@ -74,27 +75,43 @@ The unit runs `venv/bin/python3 -m mv3dt_amc_control serve` as the invoking
 user, loads `installer.conf` and `secrets/tracking.env` as environment files,
 and sets `MV3DT_INSTALL_DIR`, `AMC_STATE_DIR`, `AMC_AUTOMATION_CONFIG`,
 `AMC_PUBLIC_HOST` (the Tailscale IPv4) and `BIND`. `NoNewPrivileges` must stay
-unset because the service uses `sudo`.
+unset because the service uses `sudo`: it starts and stops AMC with
+`sudo -n <install_dir>/bin/mv3dt-installer amc ...`, never through the
+`bin/amc` wrapper (section 5).
 
 `serve` refuses to start without the ticket secret, the project id and the
 allowed origins, with a wildcard origin, or on a non-loopback bind.
 
 ## 5. The sudo rule
 
-`bin/amc` runs installer subcommands, which require root; the service does
-not run as root. `/etc/sudoers.d/mv3dt-amc-control` (mode 440) allows the
-service user exactly two command lines and nothing else:
+**LOCKED.** `mv3dt-installer amc` requires root; the service does not run as
+root. `/etc/sudoers.d/mv3dt-amc-control` (mode 440) allows the service user
+exactly two command lines and nothing else:
 
 ```
-<user> ALL=(root) NOPASSWD: <install_dir>/bin/amc --keep-up --no-open --non-interactive --host-ip <tailscale IPv4>, <install_dir>/bin/amc --down
+<user> ALL=(root) NOPASSWD: <install_dir>/bin/mv3dt-installer amc --keep-up --no-open --non-interactive --host-ip <tailscale IPv4>, <install_dir>/bin/mv3dt-installer amc --down
 ```
+
+The rule names the root-owned installer binary that Step 3 stages, not
+Step 3's `bin/amc` wrapper. The wrapper is only
+`exec "<install_dir>/bin/mv3dt-installer" amc "$@"`, but Step 3 chowns it to
+the invoking user, who is also the service user, so a rule naming the
+wrapper would let that user rewrite it and run anything as root. Naming the
+binary is safe only while nobody but root can replace it, so preflight,
+`run()` and verify check the binary and every directory from it up to `/`
+(along the path as written and its resolved path): each must be owned by
+root and, unless it is a symlink, not writable by group or other. Any other
+owner or mode fails the step with the offending path in the message, and no
+rule is written.
 
 The service runs these argument lists verbatim and never builds a command
 from request data. The candidate rule is written under a dotted name (which
 sudo ignores), checked with `visudo -cf`, then renamed into place. A user
 name or install path that cannot be expressed safely in sudoers fails
 preflight. When the Tailscale address changes, `pending_update()` re-runs the
-step and rewrites the rule and the unit.
+step and rewrites the rule and the unit. A rule on disk that differs from the
+one this release renders (for example the earlier rule naming `bin/amc`) is
+an update too, and is replaced the same way.
 
 Note: `--host-ip` applies to that launch only; it does not change `HOST_IP`
 in `installer.conf`
