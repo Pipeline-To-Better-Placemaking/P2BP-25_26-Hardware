@@ -34,9 +34,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # The bundled service packages (mv3dt_tracking, mv3dt_amc_control)
+      # have their own pinned venv requirements. Without them,
+      # tests/tracking fails on a missing fastapi and tests/amc_control
+      # skips itself via importorskip. Both pin the same shared stack, so
+      # they install into one environment.
       - name: Install mv3dt-installer + test deps
         working-directory: installer
-        run: python -m pip install -e ".[dev]"
+        run: |
+          python -m pip install -e ".[dev]" \
+            -r mv3dt_installer/assets/tracking/requirements-dev.txt \
+            -r mv3dt_installer/assets/amc_control/requirements-dev.txt
+          python -m pip check
 
       - name: Shell-lint bundled scripts (bash -n)
         run: |
