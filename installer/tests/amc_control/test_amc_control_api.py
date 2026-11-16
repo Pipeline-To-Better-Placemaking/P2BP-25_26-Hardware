@@ -213,7 +213,11 @@ def test_start_then_ready_then_stop(client, amc_env):
 
 def test_start_is_idempotent(client, amc_env):
     for _ in range(3):
-        client.post("/amc/start")
+        assert client.post("/amc/start").json()["State"] == "starting"
+    # The fake wrapper logs its argv as its first command, so once the tracked
+    # launch has exited (AMC never became ready, so the state falls back to
+    # "down") every launch the POSTs made has written its line.
+    wait_state(client, "down")
     assert len(amc_env[0].read_text().splitlines()) == 1
 
 
