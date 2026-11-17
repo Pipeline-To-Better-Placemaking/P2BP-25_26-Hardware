@@ -11,6 +11,7 @@ an injected function.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import stat
 import sys
@@ -132,6 +133,9 @@ def _isolate(monkeypatch, tmp_path):
     # Every path is root-owned 0755 unless a test says otherwise.
     monkeypatch.setattr(s9, "_LSTAT", _Owners())
     monkeypatch.setattr(s9, "_REALPATH", lambda p: p)
+    # The test process cannot chown to the fake service user (uid 1000), so
+    # the projects root reports that owner with its real file type.
+    monkeypatch.setattr(s9, "_PROJECTS_LSTAT", _service_owned)
     yield
     logs._transcript_path = None
 
@@ -149,6 +153,11 @@ class _Owners:
         return SimpleNamespace(st_uid=uid, st_mode=mode)
 
 
+def _service_owned(path, uid=1000):
+    st = os.lstat(path)
+    return SimpleNamespace(st_uid=uid, st_mode=st.st_mode)
+
+
 def _healthy(url):
     assert url == s9.HEALTH_URL
     return 200, json.dumps({"status": "ok", "version": "0.1.0", "ticket_configured": True}).encode()
@@ -160,6 +169,14 @@ def _sudoers(tmp_path):
 
 def _unit(tmp_path):
     return (tmp_path / "units" / s9.UNIT_NAME).read_text(encoding="utf-8")
+
+
+def _projects(ctx):
+    return ctx.install_dir / "amc_projects"
+
+
+def _link(ctx):
+    return ctx.user.home / "mv3dt-projects"
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +413,7 @@ def test_unit_runs_the_package_with_the_shared_secret_file(tmp_path):
         f'Environment="MV3DT_INSTALL_DIR={ctx.install_dir}"',
         f'Environment="AMC_STATE_DIR={control}/state"',
         f'Environment="AMC_AUTOMATION_CONFIG={control}/amc_automation.yaml"',
+        f'Environment="AMC_PROJECTS_DIR={ctx.install_dir}/amc_projects"',
         f'Environment="AMC_PUBLIC_HOST={TS_IP}"',
         'Environment="BIND=127.0.0.1:8091"',
     ):
@@ -417,15 +435,20 @@ def test_the_secret_never_leaves_its_file(tmp_path, capsys):
     assert all(SECRET not in " ".join(call) for call in ctx.runner.calls)
 
 
-def test_config_is_seeded_once_with_a_safe_project_mode(tmp_path):
+def test_config_is_seeded_once_with_web_project_mode(tmp_path, capsys):
     ctx = Context(tmp_path)
     s9.Step9AmcControl().run(ctx)
     path = ctx.install_dir / "amc_control" / "amc_automation.yaml"
-    assert "mode: create_new" in path.read_text()
+    text = path.read_text()
+    assert "  mode: web_project\n" in text and "create_new" not in text
+    assert f"{_projects(ctx)}/" in text  # the comment names the folders
+    assert "allowed_hosts: []" in text
+    assert "project.mode: web_project" in capsys.readouterr().err
 
-    path.write_text("project:\n  mode: reuse_installer_project\n")
+    # a workstation seeded by an earlier release keeps its own mode
+    path.write_text("project:\n  mode: create_new\n")
     s9.Step9AmcControl().run(ctx)
-    assert path.read_text() == "project:\n  mode: reuse_installer_project\n"
+    assert path.read_text() == "project:\n  mode: create_new\n"
 
 
 def test_seeded_config_is_valid_for_the_package(tmp_path):
@@ -437,7 +460,90 @@ def test_seeded_config_is_valid_for_the_package(tmp_path):
     ctx = Context(tmp_path)
     s9.Step9AmcControl().run(ctx)
     cfg = load_config(ctx.install_dir / "amc_control" / "amc_automation.yaml")
-    assert cfg.project.mode == "create_new" and cfg.layout.allowed_hosts == []
+    assert cfg.project.mode == "web_project" and cfg.layout.allowed_hosts == []
+
+
+# ---------------------------------------------------------------------------
+# Projects root and link (AMC-WEB-PROJECTS.md section 10)
+# ---------------------------------------------------------------------------
+
+
+def test_run_creates_the_projects_root_for_the_service_user(tmp_path, monkeypatch):
+    chowned = []
+    monkeypatch.setattr(os, "chown", lambda path, uid, gid: chowned.append((str(path), uid, gid)))
+    ctx = Context(tmp_path)
+    assert s9.Step9AmcControl().run(ctx).status is StepStatus.COMPLETE
+
+    root = _projects(ctx)
+    assert root.is_dir() and not root.is_symlink()
+    assert stat.S_IMODE(root.stat().st_mode) == 0o750
+    assert (str(root), 1000, 1000) in chowned
+
+
+def test_rerun_and_update_keep_the_projects_root_and_its_folders(tmp_path):
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    folder = _projects(ctx) / "kevin-living-room"
+    (folder / "footage").mkdir(parents=True)
+    (folder / "project.json").write_text("{}")
+    _projects(ctx).chmod(0o700)
+
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    ctx.update_pending = "bundled AMC control package changed"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert (folder / "project.json").read_text() == "{}"
+    assert (folder / "footage").is_dir()
+    assert stat.S_IMODE(_projects(ctx).stat().st_mode) == 0o750
+
+
+def test_a_symlinked_projects_root_is_refused_not_replaced(tmp_path):
+    ctx = Context(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _projects(ctx).symlink_to(elsewhere)
+
+    result = s9.Step9AmcControl().run(ctx)
+    assert result.status is StepStatus.FAILED and str(_projects(ctx)) in result.message
+    assert os.readlink(_projects(ctx)) == str(elsewhere)
+
+
+def test_run_links_the_projects_root_into_the_users_home(tmp_path, monkeypatch, capsys):
+    lchowned = []
+    monkeypatch.setattr(os, "lchown", lambda path, uid, gid: lchowned.append((str(path), uid, gid)))
+    ctx = Context(tmp_path)
+    s9.Step9AmcControl().run(ctx)
+
+    link = _link(ctx)
+    assert link.is_symlink() and os.readlink(link) == str(_projects(ctx))
+    assert lchowned == [(str(link), 1000, 1000)]
+
+    capsys.readouterr()
+    s9.Step9AmcControl().run(ctx)  # its own link is not a conflict
+    assert str(link) not in capsys.readouterr().err
+    assert os.readlink(link) == str(_projects(ctx))
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_an_existing_path_at_the_link_is_never_replaced(tmp_path, capsys, kind):
+    ctx = Context(tmp_path)
+    link = _link(ctx)
+    if kind == "file":
+        link.write_text("mine\n")
+    elif kind == "directory":
+        link.mkdir()
+        (link / "keep.txt").write_text("mine\n")
+    else:
+        link.symlink_to(tmp_path / "somewhere-else")
+
+    assert s9.Step9AmcControl().run(ctx).status is StepStatus.COMPLETE
+    assert f"{link} already exists" in capsys.readouterr().err
+    if kind == "file":
+        assert link.read_text() == "mine\n"
+    elif kind == "directory":
+        assert not link.is_symlink() and (link / "keep.txt").read_text() == "mine\n"
+    else:
+        assert os.readlink(link) == str(tmp_path / "somewhere-else")
 
 
 def test_second_run_changes_nothing(tmp_path):
@@ -511,6 +617,22 @@ def test_changed_tailscale_address_rewrites_unit_and_rule(tmp_path):
     assert step.run(ctx).status is StepStatus.COMPLETE
     assert "--host-ip 100.64.0.99" in _sudoers(tmp_path).read_text()
     assert 'AMC_PUBLIC_HOST=100.64.0.99' in _unit(tmp_path)
+    assert step.pending_update(ctx) is None
+
+
+def test_a_unit_without_the_projects_dir_is_an_update(tmp_path):
+    """Units written before the projects root lack AMC_PROJECTS_DIR."""
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    unit_path = tmp_path / "units" / s9.UNIT_NAME
+    line = f'Environment="AMC_PROJECTS_DIR={_projects(ctx)}"\n'
+    unit_path.write_text(_unit(tmp_path).replace(line, ""))
+
+    assert s9.UNIT_NAME in step.pending_update(ctx)
+    ctx.update_pending = "unit changed"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert line in _unit(tmp_path)
     assert step.pending_update(ctx) is None
 
 
@@ -598,6 +720,32 @@ def test_verify_fails_when_the_installer_binary_becomes_user_owned(tmp_path, mon
     assert result.status is StepStatus.FAILED and binary in result.message
 
 
+def test_verify_needs_the_projects_root(tmp_path):
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    _projects(ctx).rmdir()
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert f"{_projects(ctx)} is missing" in result.message
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _projects(ctx).symlink_to(elsewhere)
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED and "not a directory" in result.message
+
+
+def test_verify_needs_the_service_user_to_own_the_projects_root(tmp_path, monkeypatch):
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    monkeypatch.setattr(s9, "_PROJECTS_LSTAT", lambda p: _service_owned(p, uid=0))
+    result = step.verify(ctx)
+    assert result.status is StepStatus.FAILED
+    assert "uid 0" in result.message and "operator" in result.message
+
+
 def test_verify_fails_when_the_service_does_not_answer(tmp_path, monkeypatch):
     ctx = Context(tmp_path)
     step = s9.Step9AmcControl()
@@ -617,3 +765,5 @@ def test_report_tells_the_operator_what_to_set_in_the_web_app(tmp_path, capsys):
     err = capsys.readouterr().err
     assert "WORKSTATION_AMC_URL=https://ws.tailnet.ts.net:8444" in err
     assert "amc_automation.yaml" in err and "journalctl -u mv3dt-amc-control" in err
+    assert f"web project folders: {_projects(ctx)}" in err
+    assert f"link to them: {_link(ctx)}" in err
