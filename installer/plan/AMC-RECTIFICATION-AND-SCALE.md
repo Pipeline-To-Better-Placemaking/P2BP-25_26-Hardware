@@ -79,6 +79,10 @@ always run the flow below, also on Continue; they never take the
   `web_project` run's reused AMC project can still hold the previous run's
   videos while step 2 waits for new footage, so the count alone is not
   enough. AMC's own UI disables Start when there are no videos.
+- **Alignment after rectification**: while step 4 waits for the videos, a
+  step 5 with no saved alignment also waits with `needs_user=False`
+  ("Manual Alignment comes after rectification"), so the user is never asked
+  to align before the run has rectified; AMC's UI orders them the same way.
 - **Configuration**: AMC's UI posts the configuration just before starting;
   the run already posted it in step 3
   ([section 4](#4-step-3-the-scale-locked)), so it posts nothing extra.
@@ -100,8 +104,9 @@ footage this run has just replaced.
 2. **Start**: `_changing_amc()`, save `rectification_started` and
    `rectification_phase: estimate`, then `POST /v1/rectification/{id}`.
 3. **Estimate**: poll every `rectification.api.poll_seconds` until the state
-   leaves `RUNNING`, within its own `rectification.api.timeout_seconds`. The
-   step message shows the state.
+   is `READY_FOR_REVIEW`, within its own `rectification.api.timeout_seconds`.
+   A `COMPLETED` or `NOT_STARTED` seen here is lag from before the start and
+   keeps the poll going. The step message shows the state.
 4. **Commit**: read the cameras and post `/manual` with each camera's
    `committed ?? auto_estimate`, mapped as in
    [section 2](#2-amcs-rectification-api), after saving
