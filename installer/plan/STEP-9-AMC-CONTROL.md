@@ -322,7 +322,7 @@ Step 9 is implemented; these are the units as they shipped.
 | A2 Sudo rule targets the installer binary (PR #69) | `feat/installer-amc-sudo-root-target` | `steps/step9_amc_control.py`, `assets/amc_control/mv3dt_amc_control/api.py`, `controller.py`, `assets/systemd/mv3dt-amc-control.service.in`, this doc sections 3 to 5, `tests/test_step9_amc_control.py`, `tests/amc_control/test_amc_control_controller.py` | A1 | 2 |
 | A3 CI installs service test requirements (PR #68) | `feat/installer-ci-service-deps` | `.github/workflows/installer-tests.yml`, `tests/amc_control/test_amc_control_api.py` | A1 | 2 |
 | A4 Doc follow-ups | `feat/installer-step9-doc-fixes` | this doc, `DEVELOPMENT-STATUS.md`, `installer/README.md`, `CLAUDE.md`, the `report` line in `steps/step9_amc_control.py` and its test | A2 | 3 |
-| H1 to H5 AMC web projects (PRs #73, #74, #76, #75 and the H5 PR) | `feat/installer-amc-project-store` to `feat/installer-step9-projects-root` | the units in [`AMC-WEB-PROJECTS` section 13](AMC-WEB-PROJECTS.md#13-decomposition); H5 is `steps/step9_amc_control.py`, `tests/test_step9_amc_control.py` and this doc | A4 | 4 |
+| H1 to H5 AMC web projects (PRs #73, #74, #76, #75 and #77) | `feat/installer-amc-project-store` to `feat/installer-step9-projects-root` | the units in [`AMC-WEB-PROJECTS` section 13](AMC-WEB-PROJECTS.md#13-decomposition); H5 is `steps/step9_amc_control.py`, `tests/test_step9_amc_control.py` and this doc | A4 | 4 |
 
 Package paths are relative to `installer/mv3dt_installer/`; test paths are
 relative to `installer/`. A4 is stacked on A2 because both edit this doc. The

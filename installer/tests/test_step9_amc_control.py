@@ -497,15 +497,23 @@ def test_rerun_and_update_keep_the_projects_root_and_its_folders(tmp_path):
     assert stat.S_IMODE(_projects(ctx).stat().st_mode) == 0o750
 
 
-def test_a_symlinked_projects_root_is_refused_not_replaced(tmp_path):
+@pytest.mark.parametrize("kind", ["symlink", "file"])
+def test_a_projects_root_that_is_not_a_directory_is_refused_not_replaced(tmp_path, kind):
     ctx = Context(tmp_path)
     elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    _projects(ctx).symlink_to(elsewhere)
+    if kind == "symlink":
+        elsewhere.mkdir()
+        _projects(ctx).symlink_to(elsewhere)
+    else:
+        _projects(ctx).write_text("mine\n")
 
     result = s9.Step9AmcControl().run(ctx)
     assert result.status is StepStatus.FAILED and str(_projects(ctx)) in result.message
-    assert os.readlink(_projects(ctx)) == str(elsewhere)
+    if kind == "symlink":
+        assert os.readlink(_projects(ctx)) == str(elsewhere)
+    else:
+        assert _projects(ctx).is_file() and not _projects(ctx).is_symlink()
+        assert _projects(ctx).read_text() == "mine\n"
 
 
 def test_run_links_the_projects_root_into_the_users_home(tmp_path, monkeypatch, capsys):
