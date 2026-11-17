@@ -83,6 +83,9 @@ always run the flow below, also on Continue; they never take the
   step 5 with no saved alignment also waits with `needs_user=False`
   ("Manual Alignment comes after rectification"), so the user is never asked
   to align before the run has rectified; AMC's UI orders them the same way.
+  On Continue, a step 5 that waited only for this reason (`NeedsUser` false)
+  runs as a first pass, not through the resume check, so the user is then
+  asked to align the new footage.
 - **Configuration**: AMC's UI posts the configuration just before starting;
   the run already posted it in step 3
   ([section 4](#4-step-3-the-scale-locked)), so it posts nothing extra.
@@ -105,8 +108,7 @@ footage this run has just replaced.
    `rectification_phase: estimate`, then `POST /v1/rectification/{id}`.
 3. **Estimate**: poll every `rectification.api.poll_seconds` until the state
    is `READY_FOR_REVIEW`, within its own `rectification.api.timeout_seconds`.
-   A `COMPLETED` or `NOT_STARTED` seen here is lag from before the start and
-   keeps the poll going. The step message shows the state.
+   The step message shows the state.
 4. **Commit**: read the cameras and post `/manual` with each camera's
    `committed ?? auto_estimate`, mapped as in
    [section 2](#2-amcs-rectification-api), after saving
@@ -114,6 +116,15 @@ footage this run has just replaced.
    with `k1 = k2 = 0`, as AMC's UI would, and the step message names it.
 5. **Generate**: poll the same way, with a fresh timeout, until
    `COMPLETED`, which is done; the message names each camera's model.
+
+**Lag window (REQUIRED):** AMC may still report the state from before a
+request. After the start (item 2), the commit (item 4) or the linear stage,
+a **lag window** lasts until `RUNNING` is seen, in the request's own reply
+(`rectification_state`) or a poll, or for at most 3 polls. Inside it, every
+state except the one the phase is waiting for (`READY_FOR_REVIEW` for the
+estimate, `COMPLETED` for generate and linear) keeps the poll going, `ERROR`
+included. After it, `ERROR` fails the step, and any other state that is not
+`RUNNING` or the awaited one fails it with a message naming that state.
 
 `ERROR`, or a timeout, fails the step with the last 10 lines of
 `GET /v1/rectification/{id}/log`. Cancel is honoured between polls, as in
@@ -220,6 +231,7 @@ Otherwise it stays `waiting`, with a message saying what AMC reports:
 | 2 Video Configuration | `get_project_info`: `video_files_count` at least 1 and `layout_file` true |
 | 3 Parameters | [section 4.2](#42-posting-and-waiting) item 3 |
 | 4 Rectification (`ui`) | `rectification_state` is `COMPLETED` |
+| 5 Manual Alignment, waited only for rectification (`NeedsUser` false) | not checked: runs as a first pass ([section 3.1](#31-before-starting)) |
 | 5 Manual Alignment | `get_project_info`: `alignment_file` true |
 
 `skip` modes and steps turned off in the config are not checked. A step that
