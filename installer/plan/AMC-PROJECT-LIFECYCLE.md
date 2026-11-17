@@ -219,7 +219,7 @@ instead of only stopping it. Other modes are unchanged.
 
 ### 5.1 What the job records
 
-Three job fields are saved, each before the change it records:
+These job fields are saved, each before or as the change it records:
 
 | Field | Set |
 |---|---|
