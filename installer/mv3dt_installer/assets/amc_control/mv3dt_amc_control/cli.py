@@ -1,4 +1,4 @@
-"""`python -m mv3dt_amc_control serve | openapi | check-config`."""
+"""`python -m mv3dt_amc_control serve | openapi | check-config | projects`."""
 
 from __future__ import annotations
 
@@ -71,12 +71,46 @@ def _check_config(settings: Settings) -> int:
     return 0
 
 
+def _projects(settings: Settings) -> int:
+    """One row per web project folder (AMC-WEB-PROJECTS.md section 7)."""
+    from datetime import datetime, timezone
+
+    from .projects import ProjectStore, default_projects_root
+
+    store = ProjectStore(default_projects_root())
+    bindings = store.list()
+    if not bindings:
+        print(f"no project folders in {store.root}")
+        return 0
+
+    def when(ts: int | None) -> str:
+        if ts is None:
+            return "-"
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    header = ("FOLDER", "TITLE", "WEB PROJECT", "AMC PROJECT", "STATE", "LAST RUN", "RUNS", "PATH")
+    rows = [header] + [
+        (b.folder, b.title or "-", b.project_id, b.amc_project_id or "-", b.state,
+         when(b.last_run_at), str(b.calib_runs), str(store.root / b.folder))
+        for b in bindings
+    ]
+    widths = [max(len(r[i]) for r in rows) for i in range(len(header) - 1)]
+    for r in rows:
+        print("  ".join([c.ljust(w) for c, w in zip(r, widths)] + [r[-1]]))
+    for b in bindings:
+        if b.state == "failed" and b.error:
+            print(f"{b.folder}: failed: {b.error}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m mv3dt_amc_control")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("serve", help="run the AMC control API (what the systemd unit runs)")
     sub.add_parser("openapi", help="print AMC's /openapi.yaml (AMC must be running)")
     sub.add_parser("check-config", help="validate the automation settings")
+    sub.add_parser("projects", help="list the web project folders on this workstation")
     args = parser.parse_args(argv)
     settings = Settings.from_env()
-    return {"serve": _serve, "openapi": _openapi, "check-config": _check_config}[args.command](settings)
+    return {"serve": _serve, "openapi": _openapi, "check-config": _check_config,
+            "projects": _projects}[args.command](settings)
