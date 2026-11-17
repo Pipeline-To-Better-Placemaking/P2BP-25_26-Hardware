@@ -779,12 +779,39 @@ class CalibrationRunner:
                 t.start()
             final: dict | None = None
             deadline = time.monotonic() + seconds + self.record_overrun
+            eof = False          # the recorder's stdout closed
+            exited_at = None     # when proc.poll() first saw the recorder gone
             try:
+                # One bounded loop until the recorder has exited: its stdout closing
+                # is not the end (it may still be running), and a leftover child can
+                # hold stdout open after it exits, so poll() decides. Cancel and the
+                # deadline apply the whole time.
                 while True:
                     try:
                         line = lines.get(timeout=0.2)
                     except queue.Empty:
                         line = ""
+                    if line is None:
+                        eof, line = True, ""
+                    msg = _json_object(line) if line else None
+                    if msg is not None:
+                        progress = msg.get("progress")
+                        if "ok" in msg:
+                            final = msg
+                        elif isinstance(progress, (int, float)) and not isinstance(progress, bool):
+                            text = (f"recording {_clock_text(min(max(progress, 0.0), 1.0) * seconds)} "
+                                    f"of {total}; {hint}")
+                            if text != shown:
+                                shown = text
+                                self._set_step("video_configuration", "running", text)
+                    if proc.poll() is not None:
+                        if exited_at is None:
+                            exited_at = time.monotonic()
+                        # Take what is already in the pipe; give the reader a moment
+                        # to deliver the final line unless stdout has closed.
+                        if eof or (lines.empty() and time.monotonic() - exited_at >= 1.0):
+                            break
+                        continue
                     if self._cancel.is_set():
                         self._cancel_recorder(proc)
                         raise _Cancelled()
@@ -796,28 +823,20 @@ class CalibrationRunner:
                         raise StepFailed(f"recording footage was still running after {limit} and did not "
                                          f"stop within {int(self.record_cancel_grace)} seconds of being "
                                          "cancelled")
-                    if line is None:
-                        break
-                    msg = _json_object(line)
-                    if msg is None:
-                        continue
-                    progress = msg.get("progress")
-                    if "ok" in msg:
-                        final = msg
-                    elif isinstance(progress, (int, float)) and not isinstance(progress, bool):
-                        text = (f"recording {_clock_text(min(max(progress, 0.0), 1.0) * seconds)} "
-                                f"of {total}; {hint}")
-                        if text != shown:
-                            shown = text
-                            self._set_step("video_configuration", "running", text)
-                rc = proc.wait()
+                rc = proc.returncode
             finally:
                 if proc.poll() is None and not proc.stdin.closed:  # an unexpected error above
                     self._cancel_recorder(proc)
-                if proc.poll() is not None:  # a recorder still running keeps its pipes
-                    for t in readers:
-                        t.join(timeout=5)
-                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if proc.poll() is not None:
+                    # stdin stays open while the recorder runs (end of file means cancel to it).
+                    try:
+                        proc.stdin.close()
+                    except (OSError, ValueError):
+                        pass
+                # Close a pipe only once its reader is done: a leftover child may hold it open.
+                for t, stream in zip(readers, (proc.stdout, proc.stderr)):
+                    t.join(timeout=1)
+                    if not t.is_alive():
                         try:
                             stream.close()
                         except (OSError, ValueError):

@@ -48,6 +48,10 @@ def final(ok=False, cancelled=False, reason="", files=(), failed=()):
          "seconds": req["seconds"]})
 
 if mode == "ok":
+    import select
+    if select.select([sys.stdin], [], [], 0.2)[0]:   # end of file on stdin would mean cancel
+        print("stdin closed before the recorder finished", file=sys.stderr, flush=True)
+        sys.exit(4)
     os.makedirs(os.path.join(footage, "previous"), exist_ok=True)
     for name in os.listdir(footage):
         if name.endswith(".mp4"):
@@ -84,6 +88,23 @@ if mode == "hang":
         fh.write(got)
     final(cancelled=True, reason="cancelled")
     sys.exit(3)
+if mode == "closedout":
+    # Still running with stdout closed: only stdin (cancel) ends it.
+    out({"progress": 0.25})
+    sys.stdout.close()
+    got = sys.stdin.readline()
+    with open(log + ".cancel", "w") as fh:
+        fh.write(got)
+    sys.exit(3)
+if mode == "leftover":
+    # Exits while a grandchild still holds stdout and stderr open.
+    import subprocess
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    with open(log, "a") as fh:
+        fh.write(json.dumps({"pid": child.pid}) + "\n")
+    final(reason="1 of 2 cameras failed", files=["c1-left.mp4"],
+          failed=[{"id": "c2-right", "ip": "169.254.1.2", "error": "connection refused"}])
+    os._exit(1)
 if mode == "stubborn":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     out({"progress": 0.1})
@@ -120,15 +141,20 @@ def recorder(ws, web, tmp_path):
     def seen():
         if not log.exists():
             return []
-        return [json.loads(line) for line in log.read_text().splitlines()]
+        return [c for c in (json.loads(line) for line in log.read_text().splitlines()) if "request" in c]
+
+    def pids():
+        if not log.exists():
+            return []
+        return [json.loads(line)["pid"] for line in log.read_text().splitlines()]
 
     make.seen = seen
     make.cancel_line = log.parent / (log.name + ".cancel")
     make.request = install / "amc_control" / "state" / "record-request.json"
     yield make
-    for call in seen():  # never leave a stubborn fake behind
+    for pid in pids():  # never leave a stubborn fake or a leftover child behind
         try:
-            os.kill(call["pid"], signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
 
@@ -293,6 +319,41 @@ def test_an_overrun_recording_that_ignores_cancel_fails_the_step(recorder):
     assert job["State"] == "failed", job
     assert "did not stop within 0 seconds of being cancelled" in job["Steps"][1]["Message"]
     assert alive(recorder.seen()[0]["pid"])
+    assert not recorder.request.exists()
+
+
+def test_cancel_still_works_after_the_recorder_closes_stdout(recorder):
+    runner = recorder("closedout")
+    runner._threaded = True
+    runner.start(spec(), record_seconds=600)
+    wait_for_message(runner, "recording 2:30 of 10:00")
+    time.sleep(0.5)                            # stdout has closed; the recorder is still running
+    assert runner.status()["State"] == "running"
+    runner.cancel()
+    runner.join(20)
+    assert runner.status()["State"] == "cancelled"
+    assert recorder.cancel_line.read_text() == "cancel\n"
+    assert not recorder.request.exists()
+
+
+def test_the_deadline_still_applies_after_the_recorder_closes_stdout(recorder):
+    runner = recorder("closedout")
+    runner.record_overrun = 1.0 - 30
+    job = runner.start(spec(), record_seconds=30)
+    assert job["State"] == "failed", job
+    assert job["Steps"][1]["Message"].endswith("was cancelled")
+    assert recorder.cancel_line.read_text() == "cancel\n"
+
+
+def test_a_recorder_that_exits_while_a_child_holds_stdout_is_detected(recorder, web):
+    _, _, fake = web
+    started = time.monotonic()
+    job = recorder("leftover").start(spec(), record_seconds=60)
+    assert time.monotonic() - started < 15     # not the grandchild's 60 s
+    assert job["State"] == "failed", job
+    msg = job["Steps"][1]["Message"]
+    assert "exit 1" in msg and "c2-right (169.254.1.2): connection refused" in msg
+    assert calls(fake, "upload_video_files") == []
     assert not recorder.request.exists()
 
 
