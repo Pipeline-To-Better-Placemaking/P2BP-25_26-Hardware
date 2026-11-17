@@ -488,6 +488,99 @@ def test_write_env_atomic_reports_changed_on_content_change(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# UI cache override -- AMC-PROJECT-LIFECYCLE section 2
+# ---------------------------------------------------------------------------
+
+
+def _location_block(conf: str, header: str) -> str:
+    start = conf.index(header)
+    return conf[start : conf.index("}", start)]
+
+
+def test_ui_nginx_conf_keeps_the_pinned_image_defaults(tmp_path):
+    conf = step3.render_ui_nginx_conf(_cfg(tmp_path))
+    assert "listen 5000;" in conf
+    assert "root /usr/share/nginx/html;" in conf
+    assert "client_max_body_size 4g;" in conf
+    assert "client_body_timeout 1800s;" in conf
+    assert "try_files $uri $uri/ /index.html;" in conf
+    assert "location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {" in conf
+    assert 'add_header Cache-Control "public, immutable";' in conf
+    assert "gzip on;" in conf
+    assert conf.count("{") == conf.count("}")
+
+
+def test_ui_nginx_conf_never_caches_env_config(tmp_path):
+    conf = step3.render_ui_nginx_conf(_cfg(tmp_path))
+    block = _location_block(conf, "location = /env-config.js {")
+    assert 'add_header Cache-Control "no-store" always;' in block
+    assert "expires off;" in block
+
+
+@pytest.mark.parametrize(
+    "overrides, api_url",
+    [
+        (dict(host_ip="100.95.170.92", ms_port="8001"), "http://100.95.170.92:8001/v1"),
+        (
+            dict(host_ip="100.95.170.92", ms_api_url="http://amc.example:9000/v1"),
+            "http://amc.example:9000/v1",
+        ),
+    ],
+)
+def test_ui_nginx_conf_versions_the_script_url_by_api_url(tmp_path, overrides, api_url):
+    import hashlib
+
+    cfg = _cfg(tmp_path, **overrides)
+    assert step3.ui_api_url(cfg) == api_url
+    digest = hashlib.sha256(api_url.encode()).hexdigest()[:12]
+    block = _location_block(step3.render_ui_nginx_conf(cfg), "location / {")
+    assert 'add_header Cache-Control "no-cache" always;' in block
+    assert (
+        f"sub_filter '/env-config.js\"' '/env-config.js?v={digest}\"';" in block
+    )
+    assert "sub_filter_once on;" in block
+    assert "try_files $uri $uri/ /index.html;" in block
+
+
+def test_ui_nginx_conf_hash_changes_with_host_ip(tmp_path):
+    a = step3.render_ui_nginx_conf(_cfg(tmp_path, host_ip="192.168.4.106"))
+    b = step3.render_ui_nginx_conf(_cfg(tmp_path, host_ip="100.95.170.92"))
+    assert a != b
+
+
+def test_compose_override_mounts_the_conf_read_only():
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load(step3.render_compose_override())
+    assert data == {
+        "services": {
+            "auto-magic-calib-ui": {
+                "volumes": [
+                    "./mv3dt-ui-nginx.conf:/etc/nginx/conf.d/default.conf:ro"
+                ]
+            }
+        }
+    }
+
+
+def test_write_ui_cache_override_is_idempotent(tmp_path):
+    compose_dir = tmp_path / "compose"
+    compose_dir.mkdir()
+    cfg = _cfg(tmp_path)
+    assert step3.write_ui_cache_override(compose_dir, cfg) is True
+    assert (compose_dir / "mv3dt-ui-nginx.conf").read_text() == (
+        step3.render_ui_nginx_conf(cfg)
+    )
+    assert (compose_dir / "compose.override.yml").read_text() == (
+        step3.render_compose_override()
+    )
+    assert step3.write_ui_cache_override(compose_dir, cfg) is False
+    assert step3.write_ui_cache_override(
+        compose_dir, _cfg(tmp_path, host_ip="10.0.0.1")
+    ) is True
+    assert not list(compose_dir.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
 # clone_amc() -- section 4 step 3
 # ---------------------------------------------------------------------------
 
@@ -567,6 +660,8 @@ def test_clone_amc_allows_env_and_untracked_runtime_data(tmp_path):
     runner = _existing_clone_runner(
         porcelain=(
             " M tools/auto-magic-calib/compose/.env\n"
+            "?? tools/auto-magic-calib/compose/mv3dt-ui-nginx.conf\n"
+            "?? tools/auto-magic-calib/compose/compose.override.yml\n"
             "?? tools/auto-magic-calib/projects/Living-Room/\n"
             "?? tools/auto-magic-calib/models/vggt/vggt_1B_commercial.pt\n"
         )
@@ -1836,7 +1931,95 @@ def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
     assert ctx.conf[step3.CONF_UI_PORT_KEY] == "5001"
     assert ctx.conf[step3.CONF_MS_PORT_KEY] == "8001"
     assert not any(call[:3] == ("docker", "compose", "pull") for call in runner.calls)
+    # The first launch writes the compose config, so only the UI is
+    # recreated; the microservice keeps running.
+    ups = [call for call in runner.calls if call[:3] == ("docker", "compose", "up")]
+    assert ups == [
+        (
+            "docker", "compose", "up", "-d", "--force-recreate", "--no-deps",
+            "auto-magic-calib-ui",
+        )
+    ]
+
+    # Nothing changed on the second launch: the stack is reused untouched.
+    runner.calls.clear()
+    result = step3.launch_amc(ctx, keep_up=True, non_interactive=True)
+    assert result.status is StepStatus.COMPLETE
     assert not any(call[:3] == ("docker", "compose", "up") for call in runner.calls)
+
+
+@pytest.mark.parametrize(
+    "name", [".env", "mv3dt-ui-nginx.conf", "compose.override.yml"]
+)
+def test_changed_compose_config_recreates_the_ui_on_a_running_stack(
+    tmp_path, monkeypatch, name
+):
+    runner = _running_stack_runner(
+        _ps_json(step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE)
+    )
+    runner.when(
+        lambda a: a[:4] == ("docker", "compose", "port", "auto-magic-calib-ui"),
+        stdout="0.0.0.0:5000\n",
+    )
+    runner.when(
+        lambda a: a[:4] == ("docker", "compose", "port", "auto-magic-calib-ms"),
+        stdout="0.0.0.0:8000\n",
+    )
+    ctx = FakeContext(tmp_path, runner_user=runner)
+    amc_root = _stub_amc_root_with_compose(ctx)
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    recreated: list[int] = []
+    monkeypatch.setattr(
+        step3, "compose_recreate_ui", lambda ctx, path: recreated.append(1)
+    )
+
+    def _launch():
+        result = step3.launch_amc(ctx, no_open=True, non_interactive=True)
+        assert result.status is StepStatus.COMPLETE
+
+    _launch()
+    assert recreated == [1]
+    _launch()
+    assert recreated == [1]
+    (amc_root / "compose" / name).write_text("stale\n")
+    _launch()
+    assert recreated == [1, 1]
+
+
+def test_stopped_stack_comes_up_without_a_ui_recreate(tmp_path, monkeypatch):
+    ctx = FakeContext(tmp_path, runner_user=_passing_runner())
+    _stub_amc_root_with_compose(ctx)
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(step3, "resolve_ports", lambda ctx, cfg: cfg)
+    monkeypatch.setattr(
+        step3,
+        "compose_recreate_ui",
+        lambda ctx, path: pytest.fail("a stack that was down comes up as usual"),
+    )
+
+    result = step3.launch_amc(ctx, no_open=True, non_interactive=True)
+
+    assert result.status is StepStatus.COMPLETE
+    compose = step3.default_amc_root(ctx.user.home) / "compose"
+    assert (compose / "mv3dt-ui-nginx.conf").is_file()
+    assert (compose / "compose.override.yml").is_file()
+    chowns = [c for c in ctx.runner_root.calls if c[:1] == ("chown",)]
+    assert chowns and chowns[-1][2:] == (
+        str(compose / ".env"),
+        str(compose / "mv3dt-ui-nginx.conf"),
+        str(compose / "compose.override.yml"),
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        " M tools/auto-magic-calib/compose/mv3dt-ui-nginx.conf",
+        "?? tools/auto-magic-calib/compose/other.yml",
+    ],
+)
+def test_checkout_check_only_allows_the_override_files_untracked(line):
+    assert step3._expected_amc_worktree_change(line) is False
 
 
 def test_keyboard_interrupt_returns_failure_and_cleans_up(tmp_path, monkeypatch):
