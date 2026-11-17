@@ -18,15 +18,25 @@ In project.mode web_project a run is locked to the web project's workstation
 folder and its AMC project (installer/plan/AMC-WEB-PROJECTS.md section 6):
 footage comes from <folder>/footage/, results go to <folder>/calibration/,
 and every finished run leaves <folder>/runs/<job id>.json.
+
+A web_project run started with Record (installer/plan/AMC-FOOTAGE-RECORDING.md
+section 6) first records new footage in step 2: it writes the request file
+<install_dir>/amc_control/state/record-request.json and runs
+`[sudo -n] <install_dir>/bin/mv3dt-installer record-footage --pending`, which
+records every camera into <folder>/footage/ and reports on stdout (section 5).
+Only the run's first pass records; Continue never records again.
 """
 from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
+import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +65,75 @@ ACTIVE = {"running"}
 RESUMABLE = {"waiting_for_user", "failed", "interrupted"}
 TERMINAL = {"completed", "failed", "cancelled"}
 WEB_PROJECT = "web_project"
+
+# Recording from step 2 (AMC-FOOTAGE-RECORDING.md sections 4 to 6).
+RECORD_MIN_SECONDS = 30
+RECORD_MAX_SECONDS = 1800
+RECORD_REQUEST_NAME = "record-request.json"
+RECORD_SUBCOMMAND = ("record-footage", "--pending")
+RECORD_EXIT_FAILED, RECORD_EXIT_INVALID, RECORD_EXIT_CANCELLED = 1, 2, 3
+# The service cannot signal the root-owned sudo process, so it cancels the
+# recorder through stdin and never kills it (that would orphan its ffmpegs).
+RECORD_CANCEL_GRACE_SECONDS = 60.0
+# The recorder is cancelled once it runs this much longer than the recording.
+RECORD_OVERRUN_SECONDS = 180.0
+STDERR_TAIL_LINES = 10
+
+
+def default_record_argv(install_dir: Path) -> list[str]:
+    """`[sudo -n] <install_dir>/bin/mv3dt-installer record-footage --pending`.
+
+    Same convention as the controller: `sudo -n` unless AMC_USE_SUDO=0. The
+    command line is fixed; everything variable is in the request file.
+    """
+    use_sudo = os.environ.get("AMC_USE_SUDO", "1") != "0"
+    return (["sudo", "-n"] if use_sudo else []) + [str(Path(install_dir) / "bin" / "mv3dt-installer"),
+                                                    *RECORD_SUBCOMMAND]
+
+
+def _clock_text(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _pump(stream, sink: Callable[[str], Any], done: Callable[[], Any] | None) -> None:
+    """Feed a child's output to `sink` line by line, then call `done`."""
+    try:
+        for line in stream:
+            sink(line.rstrip("\r\n"))
+    except (OSError, ValueError):
+        pass
+    finally:
+        if done is not None:
+            done()
+
+
+def _json_object(line: str) -> dict | None:
+    try:
+        value = json.loads(line)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+_RECORD_REASONS = {
+    RECORD_EXIT_FAILED: "a camera failed or there is not enough free space",
+    RECORD_EXIT_INVALID: "the workstation refused the recording request or is not set up for it",
+}
+
+
+def _record_failure(rc: int, final: dict, stderr_tail: list[str]) -> str:
+    """Step 2's message for a recorder that exited non-zero with a result line."""
+    reason = str(final.get("reason") or "")
+    text = f"recording footage failed (exit {rc}): {reason or _RECORD_REASONS.get(rc, 'see the service log')}"
+    failed = [f for f in final.get("failed") or [] if isinstance(f, dict)]
+    if failed:
+        cams = "; ".join(f"{f.get('id', '?')}" + (f" ({f['ip']})" if f.get("ip") else "")
+                         + f": {f.get('error') or 'failed'}" for f in failed)
+        text += f"; failed cameras: {cams}"
+    elif not reason and stderr_tail:
+        text += "; last output: " + " | ".join(stderr_tail)
+    return text
 
 
 class Busy(RuntimeError):
@@ -109,6 +188,11 @@ class Job:
     folder: str = ""
     # True once step 2 uploaded this run's videos, so Continue never sends them twice.
     videos_uploaded: bool = False
+    # Seconds of new footage step 2 records first (web_project with Record), else 0.
+    record_seconds: int = 0
+    # True once step 2 recorded this run's footage. A run records at most once:
+    # Continue never records, so a new recording needs a new run.
+    footage_recorded: bool = False
     steps: list[dict] = field(default_factory=list)
     result: dict = field(default_factory=dict)
     started_at: int = field(default_factory=_now)
@@ -177,8 +261,13 @@ class CalibrationRunner:
         clock: Callable[[], float] = time.time,
         threaded: bool = True,
         store: ProjectStore | None = None,
+        record_argv: Callable[[], list[str]] | None = None,
     ):
         self.controller = controller
+        self._record_argv = record_argv or (lambda: default_record_argv(Path(self.controller.install_dir)))
+        self.record_cancel_grace = RECORD_CANCEL_GRACE_SECONDS
+        self.record_overrun = RECORD_OVERRUN_SECONDS
+        self._resuming = False
         self.store = store if store is not None else ProjectStore(default_projects_root())
         self._load_config = config_loader
         self._http_factory = http_client_factory
@@ -244,8 +333,15 @@ class CalibrationRunner:
             self._load_once()
             return bool(self._job and self._job.state in ACTIVE | {"waiting_for_user"})
 
-    def start(self, spec: CalibrationSpec) -> dict:
+    def start(self, spec: CalibrationSpec, record_seconds: int | None = None) -> dict:
         cfg = self.config()  # fail before creating a job if the config is broken
+        if record_seconds is not None:
+            if cfg.project.mode != WEB_PROJECT:
+                raise SpecError("recording footage needs project.mode web_project in the automation config")
+            if isinstance(record_seconds, bool) or not isinstance(record_seconds, int) \
+                    or not RECORD_MIN_SECONDS <= record_seconds <= RECORD_MAX_SECONDS:
+                raise SpecError(f"Record.Seconds must be a whole number from {RECORD_MIN_SECONDS} "
+                                f"to {RECORD_MAX_SECONDS}")
         with self._lock:
             self._load_once()
             if self._job and self._job.state in ACTIVE:
@@ -271,6 +367,7 @@ class CalibrationRunner:
                 steps=_new_steps(),
                 message="Starting",
                 folder=folder,
+                record_seconds=record_seconds or 0,
             )
             self._save()
             self._launch()
@@ -390,6 +487,7 @@ class CalibrationRunner:
 
     def _run(self, resuming: bool) -> None:
         job = self._job
+        self._resuming = resuming
         try:
             cfg = self.config()
             api = self._api(cfg)
@@ -529,7 +627,8 @@ class CalibrationRunner:
         found = {p.name: p for p in sorted(folder.glob(cfg.videos.pattern)) if p.is_file()}
         if not found and self._job.folder:
             return []  # web_project: the step waits for the user instead
-        if cfg.videos.order:
+        # videos.order names copied footage; clips this run recorded go up in file-name order.
+        if cfg.videos.order and not self._job.footage_recorded:
             missing = [n for n in cfg.videos.order if n not in found]
             if missing:
                 raise StepFailed(f"videos.order names files that are not in {folder}: {', '.join(missing)}")
@@ -573,6 +672,10 @@ class CalibrationRunner:
         job = self._job
         web = bool(job.folder)
         pid = job.amc_project_id
+        if web and job.record_seconds and not job.footage_recorded and self._resuming:
+            # A run records only on its first pass. After a failed, cancelled or interrupted
+            # recording step 2 stays failed, so a partial set is never uploaded.
+            raise StepFailed("this run's recording did not finish; start a new run to record again")
         if resumed:
             # web_project: footage copied into the folder during the pause is uploaded now,
             # unless this run already uploaded videos. Everything else was done in AMC's UI.
@@ -583,6 +686,8 @@ class CalibrationRunner:
                     return Outcome("done", f"{note}; the rest finished in AMC", done=note)
             return self._finished_in_amc("video_configuration")
         notes, todo = [], []
+        if web and job.record_seconds and not job.footage_recorded:  # first pass only (see above)
+            notes.append(self._record_footage(job.record_seconds))
         if cfg.videos.enabled and job.videos_uploaded:  # a failed step 2 being retried
             notes.append("videos already uploaded by this run")
         elif cfg.videos.enabled:
@@ -611,6 +716,169 @@ class CalibrationRunner:
         if todo:
             return Outcome("waiting", "; ".join(todo), done="; ".join(notes))
         return Outcome("done", "; ".join(notes))
+
+    # ---- step 2: recording new footage ------------------------------------------
+    @property
+    def record_request_path(self) -> Path:
+        """Fixed by AMC-FOOTAGE-RECORDING.md section 4; the root command reads exactly this path."""
+        return Path(self.controller.install_dir) / "amc_control" / "state" / RECORD_REQUEST_NAME
+
+    def _write_record_request(self, seconds: int) -> Path:
+        """Write the request atomically (temp file, fsync, os.replace), mode 600."""
+        path = self.record_request_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps({"schema_version": 1, "folder": self._job.folder, "seconds": seconds,
+                           "requested_at": int(self._clock())}).encode("utf-8")
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                os.fchmod(fd, 0o600)  # a leftover temp file keeps its old mode through O_TRUNC
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+        return path
+
+    def _record_footage(self, seconds: int) -> str:
+        """Run the root `record-footage` command and follow its stdout (section 5).
+
+        Exit 0 returns a note for step 2; exit 3 (or a cancel here) ends the run
+        cancelled; anything else fails the step with the command's reason and
+        per-camera errors. The request file is removed whatever happens. The
+        recorder runs as root behind sudo, so it is cancelled by writing
+        `cancel` to its stdin and closing it, never by a signal.
+        """
+        total = _clock_text(seconds)
+        hint = "keep people walking through every camera's view"
+        shown = f"recording 0:00 of {total}; {hint}"
+        self._set_step("video_configuration", "running", shown)
+        request = self._write_record_request(seconds)
+        try:
+            argv = self._record_argv()
+            try:
+                proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+            except OSError as e:
+                raise StepFailed(f"the workstation could not run the recording command ({' '.join(argv)}): "
+                                 f"{e}") from e
+            lines: queue.Queue = queue.Queue()
+            stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+            readers = [
+                threading.Thread(target=_pump, args=(proc.stdout, lines.put, lambda: lines.put(None)),
+                                 daemon=True),
+                threading.Thread(target=_pump, args=(proc.stderr, stderr_tail.append, None), daemon=True),
+            ]
+            for t in readers:
+                t.start()
+            final: dict | None = None
+            deadline = time.monotonic() + seconds + self.record_overrun
+            eof = False          # the recorder's stdout closed
+            exited_at = None     # when proc.poll() first saw the recorder gone
+            try:
+                # One bounded loop until the recorder has exited: its stdout closing
+                # is not the end (it may still be running), and a leftover child can
+                # hold stdout open after it exits, so poll() decides. Cancel and the
+                # deadline apply the whole time.
+                while True:
+                    try:
+                        line = lines.get(timeout=0.2)
+                    except queue.Empty:
+                        line = ""
+                    if line is None:
+                        eof, line = True, ""
+                    msg = _json_object(line) if line else None
+                    if msg is not None:
+                        progress = msg.get("progress")
+                        if "ok" in msg:
+                            final = msg
+                        elif isinstance(progress, (int, float)) and not isinstance(progress, bool):
+                            text = (f"recording {_clock_text(min(max(progress, 0.0), 1.0) * seconds)} "
+                                    f"of {total}; {hint}")
+                            if text != shown:
+                                shown = text
+                                self._set_step("video_configuration", "running", text)
+                    if proc.poll() is not None:
+                        if exited_at is None:
+                            exited_at = time.monotonic()
+                        # Take what is already in the pipe; give the reader a moment
+                        # to deliver the final line unless stdout has closed.
+                        if eof or (lines.empty() and time.monotonic() - exited_at >= 1.0):
+                            break
+                        continue
+                    if self._cancel.is_set():
+                        self._cancel_recorder(proc)
+                        raise _Cancelled()
+                    if time.monotonic() > deadline:
+                        limit = _clock_text(seconds + self.record_overrun)
+                        if self._cancel_recorder(proc):
+                            raise StepFailed(f"recording footage was still running after {limit} and was "
+                                             "cancelled")
+                        raise StepFailed(f"recording footage was still running after {limit} and did not "
+                                         f"stop within {int(self.record_cancel_grace)} seconds of being "
+                                         "cancelled")
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None and not proc.stdin.closed:  # an unexpected error above
+                    self._cancel_recorder(proc)
+                if proc.poll() is not None:
+                    # stdin stays open while the recorder runs (end of file means cancel to it).
+                    try:
+                        proc.stdin.close()
+                    except (OSError, ValueError):
+                        pass
+                # Close a pipe only once its reader is done: a leftover child may hold it open.
+                for t, stream in zip(readers, (proc.stdout, proc.stderr)):
+                    t.join(timeout=1)
+                    if not t.is_alive():
+                        try:
+                            stream.close()
+                        except (OSError, ValueError):
+                            pass
+        finally:
+            request.unlink(missing_ok=True)
+
+        if rc == RECORD_EXIT_CANCELLED:
+            raise _Cancelled()
+        if final is None:
+            tail = " | ".join(stderr_tail)
+            raise StepFailed(f"the workstation refused or could not run the recording command (exit {rc}); "
+                             "re-running the installer restores its sudo rule"
+                             + (f"; last output: {tail}" if tail else ""))
+        if rc != 0:
+            raise StepFailed(_record_failure(rc, final, list(stderr_tail)))
+        self._job.footage_recorded = True
+        self._save()
+        files = [f for f in final.get("files") or [] if isinstance(f, str)]
+        return f"recorded {len(files)} clips of {total} into {self._folder() / 'footage'}"
+
+    def _cancel_recorder(self, proc: subprocess.Popen) -> bool:
+        """Write `cancel` to the recorder's stdin, close it and wait; True once it exited.
+
+        Never a signal: the recorder is root behind sudo, and a kill would orphan
+        its ffmpeg children (AMC-FOOTAGE-RECORDING.md section 5).
+        """
+        if proc.poll() is None:
+            try:
+                proc.stdin.write("cancel\n")
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                pass  # it is exiting anyway, or stdin is already closed
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        try:
+            proc.wait(timeout=self.record_cancel_grace)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     # ---- step 3 ---------------------------------------------------------------
     def _scale(self, cfg: AutomationConfig) -> float | None:
