@@ -1,11 +1,12 @@
 """Recording footage from step 2 of a web_project run (AMC-FOOTAGE-RECORDING.md section 6).
 
 A small script stands in for `mv3dt-installer record-footage --pending`,
-following section 5's stdout and exit-code contract; it logs what it saw of
-the request file on every call. Run from installer/:
+following section 5's stdout, stdin-cancel and exit-code contract; it logs
+what it saw of the request file on every call. Run from installer/:
 `python3 -m pytest tests/amc_control -v`
 """
 import json
+import os
 import signal
 import sys
 import time
@@ -31,18 +32,21 @@ from test_amc_control_automation import (  # noqa: E402,F401  (ws, web and api a
 HINT = "keep people walking through every camera's view"
 
 FAKE_RECORDER = r'''
-import json, os, shutil, signal, stat, sys, time
+import json, os, shutil, signal, stat, sys, threading, time
 mode, request, footage, log = sys.argv[1:5]
 st = os.stat(request)
 with open(request) as fh:
     req = json.load(fh)
 with open(log, "a") as fh:
-    fh.write(json.dumps({"mode": stat.S_IMODE(st.st_mode), "request": req}) + "\n")
+    fh.write(json.dumps({"mode": stat.S_IMODE(st.st_mode), "request": req, "pid": os.getpid()}) + "\n")
 
 def out(obj):
     print(json.dumps(obj), flush=True)
 
-seconds = req["seconds"]
+def final(ok=False, cancelled=False, reason="", files=(), failed=()):
+    out({"ok": ok, "cancelled": cancelled, "reason": reason, "files": list(files), "failed": list(failed),
+         "seconds": req["seconds"]})
+
 if mode == "ok":
     os.makedirs(os.path.join(footage, "previous"), exist_ok=True)
     for name in os.listdir(footage):
@@ -51,37 +55,35 @@ if mode == "ok":
     print("not json", flush=True)
     for f in (0.0, 0.5, 1.0):
         out({"progress": f})
-    for name in ("c1-left.mp4", "c2-right.mp4"):
+    for name in ("c2-right.mp4", "c1-left.mp4"):
         with open(os.path.join(footage, name), "wb") as fh:
             fh.write(b"recorded")
-    out({"ok": True, "cancelled": False, "files": ["c1-left.mp4", "c2-right.mp4"], "failed": [],
-         "seconds": seconds})
+    final(ok=True, files=["c1-left.mp4", "c2-right.mp4"])
     sys.exit(0)
 if mode == "camfail":
     out({"progress": 1.0})
-    out({"ok": False, "cancelled": False, "files": ["c1-left.mp4"],
-         "failed": [{"id": "c2-right", "ip": "169.254.1.2", "error": "connection refused"}], "seconds": seconds})
+    final(reason="1 of 2 cameras failed", files=["c1-left.mp4"],
+          failed=[{"id": "c2-right", "ip": "169.254.1.2", "error": "connection refused"}])
     sys.exit(1)
 if mode == "invalid":
-    print("record-footage: the request is more than 300 seconds old", file=sys.stderr, flush=True)
-    out({"ok": False, "cancelled": False, "files": [], "failed": [], "seconds": seconds})
+    print("record-footage: diagnostics", file=sys.stderr, flush=True)
+    final(reason="the request is more than 300 seconds old")
     sys.exit(2)
 if mode == "nofinal":
     print("sudo: a password is required", file=sys.stderr, flush=True)
     sys.exit(1)
 if mode == "selfcancel":
-    out({"ok": False, "cancelled": True, "files": [], "failed": [], "seconds": seconds})
+    final(cancelled=True, reason="cancelled")
     sys.exit(3)
 if mode == "hang":
-    def stop(signum, frame):
-        with open(log + ".sigterm", "w") as fh:
-            fh.write(str(signum))
-        out({"ok": False, "cancelled": True, "files": [], "failed": [], "seconds": seconds})
-        sys.exit(3)
-    signal.signal(signal.SIGTERM, stop)
+    # Cancelled through stdin: a line "cancel" or end of file.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)   # signals are not how the service cancels
     out({"progress": 0.25})
-    while True:
-        time.sleep(0.05)
+    got = sys.stdin.readline()
+    with open(log + ".cancel", "w") as fh:
+        fh.write(got)
+    final(cancelled=True, reason="cancelled")
+    sys.exit(3)
 if mode == "stubborn":
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     out({"progress": 0.1})
@@ -121,9 +123,14 @@ def recorder(ws, web, tmp_path):
         return [json.loads(line) for line in log.read_text().splitlines()]
 
     make.seen = seen
-    make.sigterm = log.parent / (log.name + ".sigterm")
+    make.cancel_line = log.parent / (log.name + ".cancel")
     make.request = install / "amc_control" / "state" / "record-request.json"
-    return make
+    yield make
+    for call in seen():  # never leave a stubborn fake behind
+        try:
+            os.kill(call["pid"], signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def wait_for_message(runner, prefix):
@@ -131,6 +138,14 @@ def wait_for_message(runner, prefix):
     while not any(m.startswith(prefix) for m in runner.messages):
         assert time.time() < deadline, runner.messages
         time.sleep(0.05)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- success
@@ -163,6 +178,14 @@ def test_recording_from_step_2_uploads_the_new_clips(recorder, web):
     assert state["record_seconds"] == 300 and state["footage_recorded"] is True
 
 
+def test_recorded_clips_ignore_videos_order(recorder):
+    runner = recorder("ok", {**WEB, "videos": {"order": ["b.mp4", "a.mp4"]}})
+    job = runner.start(spec(), record_seconds=60)
+    assert job["State"] == "completed", job
+    msg = job["Steps"][1]["Message"]
+    assert "c1-left.mp4 as cam_00.mp4" in msg and "c2-right.mp4 as cam_01.mp4" in msg
+
+
 def test_a_run_without_record_never_runs_the_recorder(recorder, web):
     _, _, fake = web
     assert recorder("ok").start(spec())["State"] == "completed"
@@ -177,27 +200,29 @@ def test_recording_camera_failure_fails_step_2_with_each_cameras_error(recorder,
     assert job["State"] == "failed"
     assert job["Steps"][1]["State"] == "failed"
     msg = job["Steps"][1]["Message"]
-    assert "exit 1" in msg and "c2-right (169.254.1.2): connection refused" in msg
+    assert "exit 1" in msg and "1 of 2 cameras failed" in msg
+    assert "c2-right (169.254.1.2): connection refused" in msg
     assert calls(fake, "upload_video_files") == []
     assert not recorder.request.exists()
     assert json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())["State"] == "failed"
 
 
-def test_recording_refused_request_reports_the_recorders_diagnostics(recorder, web):
+def test_recording_refused_request_reports_the_reason(recorder, web):
     _, _, fake = web
     job = recorder("invalid").start(spec(), record_seconds=60)
     assert job["State"] == "failed"
     msg = job["Steps"][1]["Message"]
-    assert "exit 2" in msg and "more than 300 seconds old" in msg
+    assert "exit 2" in msg and "the request is more than 300 seconds old" in msg
     assert calls(fake, "upload_video_files") == []
     assert not recorder.request.exists()
 
 
-def test_recording_without_a_result_line_reports_the_exit_code_and_stderr(recorder):
+def test_recording_without_a_result_line_says_the_command_was_refused(recorder):
     job = recorder("nofinal").start(spec(), record_seconds=60)
     assert job["State"] == "failed"
     msg = job["Steps"][1]["Message"]
-    assert "exited 1 without a result" in msg and "sudo: a password is required" in msg
+    assert "refused or could not run the recording command (exit 1)" in msg
+    assert "re-running the installer" in msg and "sudo: a password is required" in msg
     assert not recorder.request.exists()
 
 
@@ -205,11 +230,12 @@ def test_recorder_that_cannot_start_fails_step_2(recorder, tmp_path):
     runner = recorder("ok")
     runner._record_argv = lambda: [str(tmp_path / "no-such-binary"), "record-footage", "--pending"]
     job = runner.start(spec(), record_seconds=60)
-    assert job["State"] == "failed" and "could not run the footage recorder" in job["Steps"][1]["Message"]
+    assert job["State"] == "failed"
+    assert "could not run the recording command" in job["Steps"][1]["Message"]
     assert not recorder.request.exists()
 
 
-# ---------------------------------------------------------------- cancel
+# ---------------------------------------------------------------- cancel and timeout
 def test_recorder_exit_3_ends_the_run_cancelled(recorder, web):
     _, _, fake = web
     job = recorder("selfcancel").start(spec(), record_seconds=60)
@@ -218,7 +244,7 @@ def test_recorder_exit_3_ends_the_run_cancelled(recorder, web):
     assert not recorder.request.exists()
 
 
-def test_cancel_during_recording_sends_sigterm_and_cancels_the_run(recorder, web):
+def test_cancel_during_recording_writes_cancel_to_stdin(recorder, web):
     _, folder, fake = web
     runner = recorder("hang")
     runner._threaded = True
@@ -229,15 +255,15 @@ def test_cancel_during_recording_sends_sigterm_and_cancels_the_run(recorder, web
     runner.join(20)
     job = runner.status()
     assert job["State"] == "cancelled", job
-    assert recorder.sigterm.read_text() == str(int(signal.SIGTERM))
+    assert recorder.cancel_line.read_text() == "cancel\n"
     assert not recorder.request.exists()
     assert calls(fake, "upload_video_files") == []
     assert json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())["State"] == "cancelled"
 
 
-def test_recorder_ignoring_sigterm_is_killed_after_the_grace_period(recorder):
+def test_a_recorder_that_does_not_stop_is_never_killed(recorder):
     runner = recorder("stubborn")
-    runner.record_term_grace = 0.2
+    runner.record_cancel_grace = 0.3
     runner._threaded = True
     runner.start(spec(), record_seconds=60)
     wait_for_message(runner, "recording 0:06 of 1:00")
@@ -245,18 +271,42 @@ def test_recorder_ignoring_sigterm_is_killed_after_the_grace_period(recorder):
     runner.join(20)
     assert runner.status()["State"] == "cancelled"
     assert not recorder.request.exists()
+    assert alive(recorder.seen()[0]["pid"])   # only stdin and a bounded wait, no SIGKILL
+
+
+def test_a_recording_that_overruns_is_cancelled_and_fails_the_step(recorder):
+    runner = recorder("hang")
+    runner.record_overrun = 0.5 - 30           # the deadline is half a second after the start
+    job = runner.start(spec(), record_seconds=30)
+    assert job["State"] == "failed", job
+    msg = job["Steps"][1]["Message"]
+    assert "still running after" in msg and msg.endswith("was cancelled")
+    assert recorder.cancel_line.read_text() == "cancel\n"
+    assert not recorder.request.exists()
+
+
+def test_an_overrun_recording_that_ignores_cancel_fails_the_step(recorder):
+    runner = recorder("stubborn")
+    runner.record_overrun = 0.5 - 30
+    runner.record_cancel_grace = 0.3
+    job = runner.start(spec(), record_seconds=30)
+    assert job["State"] == "failed", job
+    assert "did not stop within 0 seconds of being cancelled" in job["Steps"][1]["Message"]
+    assert alive(recorder.seen()[0]["pid"])
+    assert not recorder.request.exists()
 
 
 # ---------------------------------------------------------------- resume
-def test_continue_after_a_failed_recording_does_not_record_again(recorder, web):
+def test_continue_after_a_failed_recording_stays_failed(recorder, web):
     _, _, fake = web
     runner = recorder("camfail")
     assert runner.start(spec(), record_seconds=60)["State"] == "failed"
     job = runner.resume()
-    assert job["State"] == "completed", job
+    assert job["State"] == "failed", job
+    assert job["Steps"][1]["State"] == "failed"
+    assert "start a new run to record again" in job["Steps"][1]["Message"]
     assert len(recorder.seen()) == 1
-    # The footage already in the folder is uploaded instead.
-    assert calls(fake, "upload_video_files") == [{"names": ["cam_00.mp4", "cam_01.mp4"]}]
+    assert calls(fake, "upload_video_files") == []      # never a partial or an old set
 
 
 def test_continue_after_a_restart_does_not_record_again(recorder, web):
@@ -274,10 +324,10 @@ def test_continue_after_a_restart_does_not_record_again(recorder, web):
     assert len(calls(fake, "upload_video_files")) == 1
 
 
-def test_interrupted_run_does_not_record_on_continue(recorder, web):
+def test_interrupted_recording_stays_failed_on_continue(recorder, web):
     _, _, fake = web
     runner = recorder("ok")
-    runner._launch = lambda resuming=False: None        # the service dies right after the start
+    runner._launch = lambda resuming=False: None        # the service dies during the recording
     runner.start(spec(), record_seconds=60)
     state = json.loads(runner.state_path.read_text())
     state["steps"][1]["State"] = "running"
@@ -285,19 +335,20 @@ def test_interrupted_run_does_not_record_on_continue(recorder, web):
 
     runner2 = recorder("ok")
     assert runner2.status()["State"] == "interrupted"
-    assert runner2.resume()["State"] == "completed"
+    job = runner2.resume()
+    assert job["State"] == "failed" and "start a new run" in job["Steps"][1]["Message"]
     assert recorder.seen() == []
-    assert calls(fake, "upload_video_files") == [{"names": ["cam_00.mp4", "cam_01.mp4"]}]
+    assert calls(fake, "upload_video_files") == []
 
 
 def test_state_file_from_before_recording_still_loads(recorder, web):
     _, _, fake = web
-    job = recorder("ok").start(spec(floorplan=False))
+    runner = recorder("ok")
+    job = runner.start(spec(floorplan=False))
     assert job["State"] == "waiting_for_user"
-    state_path = recorder("ok").state_path
-    state = json.loads(state_path.read_text())
+    state = json.loads(runner.state_path.read_text())
     del state["record_seconds"], state["footage_recorded"]
-    state_path.write_text(json.dumps(state))
+    runner.state_path.write_text(json.dumps(state))
 
     runner2 = recorder("ok")
     assert runner2.status()["JobId"] == job["JobId"]

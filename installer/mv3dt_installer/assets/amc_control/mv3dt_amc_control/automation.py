@@ -32,7 +32,6 @@ import json
 import os
 import queue
 import shutil
-import signal
 import subprocess
 import threading
 import time
@@ -73,8 +72,11 @@ RECORD_MAX_SECONDS = 1800
 RECORD_REQUEST_NAME = "record-request.json"
 RECORD_SUBCOMMAND = ("record-footage", "--pending")
 RECORD_EXIT_FAILED, RECORD_EXIT_INVALID, RECORD_EXIT_CANCELLED = 1, 2, 3
-# How long a cancelled recorder gets to remove its .part files before it is killed.
-RECORD_TERM_GRACE_SECONDS = 30.0
+# The service cannot signal the root-owned sudo process, so it cancels the
+# recorder through stdin and never kills it (that would orphan its ffmpegs).
+RECORD_CANCEL_GRACE_SECONDS = 60.0
+# The recorder is cancelled once it runs this much longer than the recording.
+RECORD_OVERRUN_SECONDS = 180.0
 STDERR_TAIL_LINES = 10
 
 
@@ -122,7 +124,7 @@ _RECORD_REASONS = {
 
 def _record_failure(rc: int, final: dict, stderr_tail: list[str]) -> str:
     """Step 2's message for a recorder that exited non-zero with a result line."""
-    reason = next((str(final[k]) for k in ("error", "reason", "message") if final.get(k)), "")
+    reason = str(final.get("reason") or "")
     text = f"recording footage failed (exit {rc}): {reason or _RECORD_REASONS.get(rc, 'see the service log')}"
     failed = [f for f in final.get("failed") or [] if isinstance(f, dict)]
     if failed:
@@ -263,7 +265,8 @@ class CalibrationRunner:
     ):
         self.controller = controller
         self._record_argv = record_argv or (lambda: default_record_argv(Path(self.controller.install_dir)))
-        self.record_term_grace = RECORD_TERM_GRACE_SECONDS
+        self.record_cancel_grace = RECORD_CANCEL_GRACE_SECONDS
+        self.record_overrun = RECORD_OVERRUN_SECONDS
         self._resuming = False
         self.store = store if store is not None else ProjectStore(default_projects_root())
         self._load_config = config_loader
@@ -624,7 +627,8 @@ class CalibrationRunner:
         found = {p.name: p for p in sorted(folder.glob(cfg.videos.pattern)) if p.is_file()}
         if not found and self._job.folder:
             return []  # web_project: the step waits for the user instead
-        if cfg.videos.order:
+        # videos.order names copied footage; clips this run recorded go up in file-name order.
+        if cfg.videos.order and not self._job.footage_recorded:
             missing = [n for n in cfg.videos.order if n not in found]
             if missing:
                 raise StepFailed(f"videos.order names files that are not in {folder}: {', '.join(missing)}")
@@ -668,6 +672,10 @@ class CalibrationRunner:
         job = self._job
         web = bool(job.folder)
         pid = job.amc_project_id
+        if web and job.record_seconds and not job.footage_recorded and self._resuming:
+            # A run records only on its first pass. After a failed, cancelled or interrupted
+            # recording step 2 stays failed, so a partial set is never uploaded.
+            raise StepFailed("this run's recording did not finish; start a new run to record again")
         if resumed:
             # web_project: footage copied into the folder during the pause is uploaded now,
             # unless this run already uploaded videos. Everything else was done in AMC's UI.
@@ -678,9 +686,7 @@ class CalibrationRunner:
                     return Outcome("done", f"{note}; the rest finished in AMC", done=note)
             return self._finished_in_amc("video_configuration")
         notes, todo = [], []
-        # Record only on the run's first pass: Continue (after a pause, a failure or a
-        # restart) never records again, so a new recording needs a new run.
-        if web and job.record_seconds and not job.footage_recorded and not self._resuming:
+        if web and job.record_seconds and not job.footage_recorded:  # first pass only (see above)
             notes.append(self._record_footage(job.record_seconds))
         if cfg.videos.enabled and job.videos_uploaded:  # a failed step 2 being retried
             notes.append("videos already uploaded by this run")
@@ -745,7 +751,9 @@ class CalibrationRunner:
 
         Exit 0 returns a note for step 2; exit 3 (or a cancel here) ends the run
         cancelled; anything else fails the step with the command's reason and
-        per-camera errors. The request file is removed whatever happens.
+        per-camera errors. The request file is removed whatever happens. The
+        recorder runs as root behind sudo, so it is cancelled by writing
+        `cancel` to its stdin and closing it, never by a signal.
         """
         total = _clock_text(seconds)
         hint = "keep people walking through every camera's view"
@@ -755,10 +763,11 @@ class CalibrationRunner:
         try:
             argv = self._record_argv()
             try:
-                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
             except OSError as e:
-                raise StepFailed(f"could not run the footage recorder ({' '.join(argv)}): {e}") from e
+                raise StepFailed(f"the workstation could not run the recording command ({' '.join(argv)}): "
+                                 f"{e}") from e
             lines: queue.Queue = queue.Queue()
             stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
             readers = [
@@ -769,6 +778,7 @@ class CalibrationRunner:
             for t in readers:
                 t.start()
             final: dict | None = None
+            deadline = time.monotonic() + seconds + self.record_overrun
             try:
                 while True:
                     try:
@@ -776,8 +786,16 @@ class CalibrationRunner:
                     except queue.Empty:
                         line = ""
                     if self._cancel.is_set():
-                        self._stop_recorder(proc)
+                        self._cancel_recorder(proc)
                         raise _Cancelled()
+                    if time.monotonic() > deadline:
+                        limit = _clock_text(seconds + self.record_overrun)
+                        if self._cancel_recorder(proc):
+                            raise StepFailed(f"recording footage was still running after {limit} and was "
+                                             "cancelled")
+                        raise StepFailed(f"recording footage was still running after {limit} and did not "
+                                         f"stop within {int(self.record_cancel_grace)} seconds of being "
+                                         "cancelled")
                     if line is None:
                         break
                     msg = _json_object(line)
@@ -794,15 +812,16 @@ class CalibrationRunner:
                             self._set_step("video_configuration", "running", text)
                 rc = proc.wait()
             finally:
-                if proc.poll() is None:  # an unexpected error above: never leave a recorder behind
-                    self._stop_recorder(proc)
-                for t in readers:
-                    t.join(timeout=5)
-                for stream in (proc.stdout, proc.stderr):
-                    try:
-                        stream.close()
-                    except (OSError, ValueError):
-                        pass
+                if proc.poll() is None and not proc.stdin.closed:  # an unexpected error above
+                    self._cancel_recorder(proc)
+                if proc.poll() is not None:  # a recorder still running keeps its pipes
+                    for t in readers:
+                        t.join(timeout=5)
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        try:
+                            stream.close()
+                        except (OSError, ValueError):
+                            pass
         finally:
             request.unlink(missing_ok=True)
 
@@ -810,7 +829,8 @@ class CalibrationRunner:
             raise _Cancelled()
         if final is None:
             tail = " | ".join(stderr_tail)
-            raise StepFailed(f"recording footage exited {rc} without a result"
+            raise StepFailed(f"the workstation refused or could not run the recording command (exit {rc}); "
+                             "re-running the installer restores its sudo rule"
                              + (f"; last output: {tail}" if tail else ""))
         if rc != 0:
             raise StepFailed(_record_failure(rc, final, list(stderr_tail)))
@@ -819,19 +839,27 @@ class CalibrationRunner:
         files = [f for f in final.get("files") or [] if isinstance(f, str)]
         return f"recorded {len(files)} clips of {total} into {self._folder() / 'footage'}"
 
-    def _stop_recorder(self, proc: subprocess.Popen) -> None:
-        """SIGTERM (the recorder removes its .part files), then a bounded wait, then kill."""
-        if proc.poll() is not None:
-            return
+    def _cancel_recorder(self, proc: subprocess.Popen) -> bool:
+        """Write `cancel` to the recorder's stdin, close it and wait; True once it exited.
+
+        Never a signal: the recorder is root behind sudo, and a kill would orphan
+        its ffmpeg children (AMC-FOOTAGE-RECORDING.md section 5).
+        """
+        if proc.poll() is None:
+            try:
+                proc.stdin.write("cancel\n")
+                proc.stdin.flush()
+            except (OSError, ValueError):
+                pass  # it is exiting anyway, or stdin is already closed
+            try:
+                proc.stdin.close()
+            except (OSError, ValueError):
+                pass
         try:
-            proc.send_signal(signal.SIGTERM)
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=self.record_term_grace)
+            proc.wait(timeout=self.record_cancel_grace)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            return False
+        return True
 
     # ---- step 3 ---------------------------------------------------------------
     def _scale(self, cfg: AutomationConfig) -> float | None:
