@@ -25,6 +25,7 @@ class FakeAmc:
     ui_alignment_done: bool = False  # set by a test to stand in for the user's UI work
     with_gt: bool = False
     next_id: int = 1
+    delete_status: int | None = None  # set by a test to make delete_project answer this status
 
     def add_project(self, pid: str, name: str = "Existing") -> None:
         self.projects[pid] = {"name": name, "state": "COMPLETED", "videos": [], "layout": None,
@@ -110,6 +111,23 @@ class FakeAmc:
             p = project(pid)
             p["state"], p["polls"] = "RUNNING", 0
             log("calibrate", detector_type=body.get("detector_type"))
+            return {"code": 0}
+
+        @app.post("/v1/stop_calibration/{pid}")
+        def stop_calibration(pid: str):
+            p = project(pid)
+            if p["state"] == "RUNNING":
+                p["state"] = "INIT"
+            log("stop_calibration", pid=pid)
+            return {"code": 0}
+
+        @app.delete("/v1/delete_project/{pid}")
+        def delete_project(pid: str):
+            log("delete_project", pid=pid)
+            if fake.delete_status is not None:
+                raise HTTPException(fake.delete_status, "refused by the test")
+            project(pid)
+            del fake.projects[pid]
             return {"code": 0}
 
         @app.get("/v1/amc/calibrate/{pid}/log", response_class=PlainTextResponse)

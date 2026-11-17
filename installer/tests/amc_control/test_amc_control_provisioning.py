@@ -67,6 +67,7 @@ class FakeController:
         self.started = 0
         self.stopped = 0
         self.comes_up = True
+        self.error = ""  # the controller's last start error
 
     def start(self):
         self.started += 1
@@ -77,7 +78,7 @@ class FakeController:
         self.stopped += 1
 
     def status(self):
-        return {"State": "ready" if self.fake.ready else "down", "UiUrl": "", "Error": "", "UpdatedAt": 0}
+        return {"State": "ready" if self.fake.ready else "down", "UiUrl": "", "Error": self.error, "UpdatedAt": 0}
 
     def ports(self):
         return 18000, 15000
@@ -89,12 +90,16 @@ class FakeRunner:
         self.started = []
         self.resumed = 0
         self.inside_start = None  # a test hook run inside start()
+        self.job_pid = None  # set by a test: status() then reports a run of this project
+        self.job_state = "running"
 
     def uses_amc(self):
         return self.active
 
     def status(self):
-        return None
+        if not self.job_pid:
+            return None
+        return {**self._job(self.job_pid), "State": self.job_state}
 
     def _job(self, pid="proj-1", title="Living Room", by="user-1"):
         now = int(time.time())
@@ -140,6 +145,7 @@ class Env:
         self.provisioner = Provisioner(
             self.store, self.controller,
             runner_busy=lambda: self.runner.uses_amc(),
+            runner_job=lambda: self.runner.status(),
             config_loader=lambda: load_config(cfg),
             http_client_factory=lambda: TestClient(self.fake.app()),
             download_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(serve_floorplan)),
@@ -422,12 +428,12 @@ def test_provision_ticket_is_accepted_on_current(env):
 def test_provision_ticket_is_refused_on_file_routes(env):
     c = env.client()
     provision(c)
-    (env.root / "living-room" / "footage" / "cam_00.mp4").write_bytes(b"v")
+    (env.root / "living-room" / "calibration" / "result.yml").write_bytes(b"r")
     h = auth(scope="amc-provision")
     assert c.get("/projects/current/files", headers=h).status_code == 403
-    assert c.get("/projects/current/files/footage/cam_00.mp4", headers=h).status_code == 403
+    assert c.get("/projects/current/files/calibration/result.yml", headers=h).status_code == 403
     q = make_ticket(scope="amc-provision")
-    assert c.get(f"/projects/current/files/footage/cam_00.mp4?ticket={q}").status_code == 403
+    assert c.get(f"/projects/current/files/calibration/result.yml?ticket={q}").status_code == 403
 
 
 def test_amc_ticket_is_refused_on_provision(env):
@@ -448,7 +454,7 @@ def test_project_routes_need_a_ticket(env, method, path):
 
 
 @pytest.mark.parametrize("path", ["/projects/current", "/projects/current/files",
-                                  "/projects/current/files/footage/cam_00.mp4"])
+                                  "/projects/current/files/floorplan/layout.png"])
 def test_no_folder_is_404(env, path):
     r = env.client().get(path, headers=auth())
     assert r.status_code == 404 and "no workstation folder" in r.json()["detail"]
@@ -479,11 +485,17 @@ def files(env, tmp_path):
     provision(c, floorplan=True)
     folder = env.root / "living-room"
     (folder / "footage" / "cam_00.mp4").write_bytes(b"video-0")
-    (folder / "footage" / "cam 01.mp4").write_bytes(b"video-1")
+    (folder / "footage" / "notes.txt").write_bytes(b"footage notes")
+    (folder / "calibration" / "a.MP4").write_bytes(b"video-a")
+    (folder / "calibration" / "result.yml").write_bytes(b"result-0")
+    (folder / "calibration" / "run 1.yml").write_bytes(b"result-1")
     outside = tmp_path / "secret.txt"
     outside.write_text("secret")
-    (folder / "footage" / "escape.mp4").symlink_to(outside)
+    (folder / "calibration" / "escape.yml").symlink_to(outside)
     (folder / "linked-dir").symlink_to(tmp_path)
+    (folder / "calibration" / "clip-link.yml").symlink_to(folder / "footage" / "cam_00.mp4")
+    (folder / "calibration" / "notes-link.yml").symlink_to(folder / "footage" / "notes.txt")
+    (folder / "calibration" / "result-link.yml").symlink_to(folder / "calibration" / "result.yml")
     return c, folder
 
 
@@ -492,41 +504,312 @@ def test_listing(files):
     r = c.get("/projects/current/files", headers=auth())
     assert r.status_code == 200
     paths = [e["Path"] for e in r.json()]
-    assert paths == ["floorplan/layout.png", "footage/cam 01.mp4", "footage/cam_00.mp4"]
-    entry = r.json()[2]
+    assert paths == ["calibration/a.MP4", "calibration/result.yml", "calibration/run 1.yml",
+                     "floorplan/layout.png", "footage/cam_00.mp4", "footage/notes.txt"]
+    entry = r.json()[4]
     assert entry["Size"] == len(b"video-0") and isinstance(entry["ModifiedAt"], int)
+
+
+def test_listing_marks_video_files_not_downloadable(files):
+    c, _ = files
+    flags = {e["Path"]: e["Downloadable"] for e in c.get("/projects/current/files", headers=auth()).json()}
+    assert flags == {"calibration/a.MP4": False, "calibration/result.yml": True, "calibration/run 1.yml": True,
+                     "floorplan/layout.png": True, "footage/cam_00.mp4": False, "footage/notes.txt": False}
 
 
 def test_download_with_header(files):
     c, _ = files
-    r = c.get("/projects/current/files/footage/cam_00.mp4", headers=auth())
-    assert r.status_code == 200 and r.content == b"video-0"
+    r = c.get("/projects/current/files/calibration/result.yml", headers=auth())
+    assert r.status_code == 200 and r.content == b"result-0"
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["content-disposition"].startswith("attachment")
-    assert "cam_00.mp4" in r.headers["content-disposition"]
+    assert "result.yml" in r.headers["content-disposition"]
 
 
 def test_download_with_percent_encoded_segment(files):
     c, _ = files
-    r = c.get("/projects/current/files/footage/cam%2001.mp4", headers=auth())
-    assert r.status_code == 200 and r.content == b"video-1"
+    r = c.get("/projects/current/files/calibration/run%201.yml", headers=auth())
+    assert r.status_code == 200 and r.content == b"result-1"
 
 
 def test_download_with_query_ticket(files):
     c, _ = files
-    r = c.get(f"/projects/current/files/footage/cam_00.mp4?ticket={make_ticket()}")
-    assert r.status_code == 200 and r.content == b"video-0"
-    assert c.get("/projects/current/files/footage/cam_00.mp4?ticket=junk").status_code == 401
+    r = c.get(f"/projects/current/files/calibration/result.yml?ticket={make_ticket()}")
+    assert r.status_code == 200 and r.content == b"result-0"
+    assert c.get("/projects/current/files/calibration/result.yml?ticket=junk").status_code == 401
 
 
 @pytest.mark.parametrize("path", [
-    "%2E%2E/secret.txt", "footage/%2E%2E/%2E%2E/secret.txt", "%2Fetc%2Fpasswd",
-    "footage/escape.mp4", "linked-dir/secret.txt", "project.json", "footage", "footage/missing.mp4",
+    "footage/cam_00.mp4", "footage/notes.txt", "calibration/a.MP4", "footage", "footage/missing.txt",
+    "x.mkv", "a/b.MOV", "c.avi", "d.ts", "e.h264", "f.H265", "footage%2Fcam_00.mp4",
+    "calibration/%2E%2E/footage/cam_00.mp4", "./footage/notes.txt",
+    "calibration/clip-link.yml", "calibration/notes-link.yml",
+])
+def test_video_files_are_403(files, path):
+    c, _ = files
+    r = c.get(f"/projects/current/files/{path}", headers=auth())
+    assert r.status_code == 403, path
+    assert r.json()["detail"] == "Video files stay on the workstation"
+    assert c.get(f"/projects/current/files/{path}?ticket={make_ticket()}").status_code == 403, path
+
+
+def test_link_to_a_non_video_file_still_downloads(files):
+    c, _ = files
+    r = c.get("/projects/current/files/calibration/result-link.yml", headers=auth())
+    assert r.status_code == 200 and r.content == b"result-0"
+
+
+def test_video_rule_is_decided_before_any_disk_access(env, monkeypatch):
+    """No folder, and the store is never consulted: the path alone decides."""
+    c = env.client()
+
+    def boom(*a, **kw):
+        raise AssertionError("touched the disk")
+
+    monkeypatch.setattr(env.store, "get_by_pid", boom)
+    monkeypatch.setattr(env.store, "resolve_file", boom)
+    assert c.get("/projects/current/files/footage/cam_00.mp4", headers=auth()).status_code == 403
+
+
+@pytest.mark.parametrize("path", [
+    "%2E%2E/secret.txt", "calibration/%2E%2E/%2E%2E/secret.txt", "%2Fetc%2Fpasswd",
+    "calibration/escape.yml", "linked-dir/secret.txt", "project.json", "calibration", "calibration/missing.yml",
 ])
 def test_unsafe_or_missing_paths_are_404(files, path):
     c, _ = files
     r = c.get(f"/projects/current/files/{path}", headers=auth())
     assert r.status_code == 404, path
+
+
+# ---------------------------------------------------------------- deleting a project
+def delete(client, pid="proj-1", scope="amc-delete"):
+    return client.delete("/projects/current", headers=auth(pid, scope))
+
+
+def test_delete_removes_the_amc_project_and_the_folder(env):
+    c = env.client()
+    provision(c)
+    amc_id = env.store.get_by_pid("proj-1").amc_project_id
+    (env.root / "living-room" / "footage" / "cam_00.mp4").write_bytes(b"v")
+    r = delete(c)
+    assert r.status_code == 200
+    assert r.json() == {"Folder": "living-room", "AmcProjectId": amc_id, "AmcProjectDeleted": True,
+                        "Leftover": None}
+    assert calls(env.fake, "delete_project") == [{"pid": amc_id}]
+    assert amc_id not in env.fake.projects
+    assert list(env.root.iterdir()) == []
+    assert env.store.get_by_pid("proj-1") is None
+    assert c.get("/projects/current", headers=auth()).status_code == 404
+    assert env.controller.stopped == 0  # AMC is left running
+
+
+def test_delete_without_an_amc_project_skips_amc(env):
+    env.store.create("proj-1", "living-room", "Living Room")
+    env.fake.ready = False
+    r = delete(env.client())
+    assert r.status_code == 200
+    assert r.json() == {"Folder": "living-room", "AmcProjectId": None, "AmcProjectDeleted": False,
+                        "Leftover": None}
+    assert env.controller.started == 0 and calls(env.fake, "delete_project") == []
+    assert not (env.root / "living-room").exists()
+
+
+def test_delete_while_amc_is_down_starts_it_and_is_503_without_waiting(env):
+    c = env.client()
+    provision(c)
+    env.fake.ready = False
+    env.controller.comes_up = False
+    started, now = env.controller.started, env.now[0]
+    r = delete(c)
+    assert r.status_code == 503 and r.headers["retry-after"] == "15"
+    assert "AMC is starting" in r.json()["detail"] and "last start error" not in r.json()["detail"]
+    assert env.controller.started == started + 1 and env.now[0] == now  # never waited
+    assert calls(env.fake, "delete_project") == []
+    assert env.store.get_by_pid("proj-1") is not None and (env.root / "living-room").is_dir()
+    assert not env.provisioner.busy()
+    env.fake.ready = True  # AMC came up; the client retries
+    assert delete(c).status_code == 200
+    assert not (env.root / "living-room").exists()
+
+
+def test_delete_503_includes_the_controllers_last_start_error(env):
+    c = env.client()
+    provision(c)
+    env.fake.ready = False
+    env.controller.comes_up = False
+    env.controller.error = "Tailscale address unavailable"
+    r = delete(c)
+    assert r.status_code == 503 and r.headers["retry-after"] == "15"
+    assert "last start error: Tailscale address unavailable" in r.json()["detail"]
+
+
+def test_delete_503_exposes_retry_after_to_the_browser(env):
+    c = env.client()
+    provision(c)
+    env.fake.ready = False
+    env.controller.comes_up = False
+    r = c.delete("/projects/current", headers={**auth(scope="amc-delete"), "Origin": ORIGIN})
+    assert r.status_code == 503 and r.headers["retry-after"] == "15"
+    assert r.headers["access-control-allow-origin"] == ORIGIN
+    exposed = [h.strip().lower() for h in r.headers["access-control-expose-headers"].split(",")]
+    assert "retry-after" in exposed
+
+
+def test_amc_404_on_delete_counts_as_deleted(env):
+    c = env.client()
+    provision(c)
+    env.fake.projects.clear()
+    r = delete(c)
+    assert r.status_code == 200 and r.json()["AmcProjectDeleted"] is True
+    assert not (env.root / "living-room").exists()
+
+
+@pytest.mark.parametrize("status", [400, 409, 500])
+def test_amc_refusing_the_delete_is_502_and_removes_nothing(env, status):
+    c = env.client()
+    provision(c)
+    (env.root / "living-room" / "footage" / "cam_00.mp4").write_bytes(b"v")
+    env.fake.delete_status = status
+    r = delete(c)
+    assert r.status_code == 502 and f"HTTP {status}" in r.json()["detail"]
+    assert (env.root / "living-room" / "footage" / "cam_00.mp4").read_bytes() == b"v"
+    assert env.store.get_by_pid("proj-1").state == "ready"
+    assert [p.name for p in env.root.iterdir()] == ["living-room"]
+    env.fake.delete_status = None  # the user retries
+    assert delete(c).status_code == 200
+
+
+def test_delete_without_a_folder_is_404(env):
+    r = delete(env.client())
+    assert r.status_code == 404 and "no workstation folder" in r.json()["detail"]
+
+
+def test_delete_answers_for_the_tickets_project_only(env):
+    c = env.client()
+    provision(c)
+    assert delete(c, pid="proj-2").status_code == 404
+    assert env.store.get_by_pid("proj-1") is not None
+
+
+@pytest.mark.parametrize("state", ["running", "waiting_for_user", "failed", "interrupted"])
+def test_delete_is_409_while_this_project_has_an_unfinished_run(env, state):
+    c = env.client()
+    provision(c)
+    env.runner.job_pid, env.runner.job_state = "proj-1", state
+    r = delete(c)
+    assert r.status_code == 409 and "Cancel this project's run first" in r.json()["detail"]
+    assert calls(env.fake, "delete_project") == [] and env.store.get_by_pid("proj-1") is not None
+
+
+@pytest.mark.parametrize("state", ["completed", "cancelled"])
+def test_delete_is_allowed_after_this_projects_run_finished(env, state):
+    c = env.client()
+    provision(c)
+    env.runner.job_pid, env.runner.job_state = "proj-1", state
+    assert delete(c).status_code == 200
+
+
+def test_delete_is_allowed_while_another_projects_run_is_active(env):
+    c = env.client()
+    provision(c)
+    env.runner.active, env.runner.job_pid = True, "proj-2"
+    assert delete(c).status_code == 200
+
+
+def test_delete_is_409_while_provisioning(slow):
+    c = slow.client()
+    provision(c)
+    r = delete(c)
+    assert r.status_code == 409 and "being set up" in r.json()["detail"]
+    assert (slow.root / "living-room").is_dir()
+
+
+def test_create_app_wires_the_runners_project_into_delete(env):
+    """create_app builds its own provisioner from the runner's status()."""
+    env.store.create("proj-1", "living-room", "Living Room")
+    env.runner.job_pid, env.runner.job_state = "proj-1", "failed"
+    app = create_app(SETTINGS, controller=env.controller, runner=env.runner, store=env.store)
+    r = TestClient(app).delete("/projects/current", headers=auth(scope="amc-delete"))
+    assert r.status_code == 409 and "Cancel this project's run first" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("scope", ["amc", "amc-provision", "tracking"])
+def test_only_a_delete_ticket_can_delete(env, scope):
+    c = env.client()
+    provision(c)
+    r = delete(c, scope=scope)
+    assert r.status_code == 403 and "project deletion" in r.json()["detail"]
+    assert env.store.get_by_pid("proj-1") is not None
+
+
+def test_delete_ticket_is_refused_elsewhere(env):
+    c = env.client()
+    provision(c)
+    h = auth(scope="amc-delete")
+    assert c.get("/projects/current", headers=h).status_code == 403
+    assert c.get("/projects/current/files", headers=h).status_code == 403
+    assert c.post("/amc/start", headers=h).status_code == 403
+    assert c.post("/projects", json={"Spec": make_spec()}, headers=h).status_code == 403
+
+
+def test_delete_needs_a_ticket(env):
+    c = env.client()
+    assert c.delete("/projects/current").status_code == 401
+    assert c.delete("/projects/current", headers={"Authorization": "Bearer junk"}).status_code == 401
+
+
+def test_folder_name_is_reusable_after_delete(env):
+    c = env.client()
+    provision(c)
+    assert delete(c).status_code == 200
+    assert provision(c, pid="proj-2").status_code == 202
+    b = env.store.get_by_pid("proj-2")
+    assert b.folder == "living-room" and b.state == "ready"
+
+
+def test_removal_error_is_reported_as_leftover(env, monkeypatch):
+    c = env.client()
+    provision(c)
+
+    def fail(path, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr("mv3dt_amc_control.projects.shutil.rmtree", fail)
+    r = delete(c)
+    assert r.status_code == 200
+    leftover = r.json()["Leftover"]
+    assert leftover and os.path.basename(leftover).startswith(".deleting-living-room-")
+    assert os.path.isdir(leftover)
+    assert env.store.get_by_pid("proj-1") is None and env.store.list() == []
+    assert provision(c, pid="proj-2").status_code == 202  # the name is free anyway
+
+
+def test_delete_cors_preflight_allows_delete(env):
+    r = env.client().options("/projects/current", headers={
+        "Origin": ORIGIN, "Access-Control-Request-Method": "DELETE",
+        "Access-Control-Request-Headers": "authorization", "Access-Control-Request-Private-Network": "true"})
+    assert r.status_code == 200 and "DELETE" in r.headers["access-control-allow-methods"]
+
+
+def test_amc_api_delete_project_and_stop_calibration():
+    from mv3dt_amc_control.amc_api import AmcApi, AmcApiError
+
+    fake = FakeAmc()
+    fake.add_project("p1")
+    fake.projects["p1"]["state"] = "RUNNING"
+    api = AmcApi("http://amc/v1", client=TestClient(fake.app(), base_url="http://amc"))
+    api.stop_calibration("p1")
+    assert fake.projects["p1"]["state"] == "INIT"
+    assert api.delete_project("p1") is True and "p1" not in fake.projects
+    assert api.delete_project("p1") is False  # AMC's 404: already gone
+    with pytest.raises(AmcApiError) as exc:
+        api.stop_calibration("p1")
+    assert exc.value.status == 404
+    fake.add_project("p2")
+    fake.delete_status = 500
+    with pytest.raises(AmcApiError) as exc:
+        api.delete_project("p2")
+    assert exc.value.status == 500 and "delete_project failed" in str(exc.value)
 
 
 # ---------------------------------------------------------------- CLI

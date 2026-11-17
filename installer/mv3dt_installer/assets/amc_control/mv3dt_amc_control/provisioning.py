@@ -11,7 +11,12 @@ Only one AMC user at a time: while a job runs `busy()` is true, and the API
 refuses a second provision, `POST /amc/stop` and an automated run. A run that
 is active or waiting for the user likewise blocks provisioning.
 
-See installer/plan/AMC-WEB-PROJECTS.md section 5.
+`Provisioner.delete` removes a project from the workstation (its AMC project,
+then its folder) inside the same exclusive section, so no provisioning job or
+run can start meanwhile.
+
+See installer/plan/AMC-WEB-PROJECTS.md section 5 and AMC-PROJECT-LIFECYCLE.md
+section 3.
 """
 from __future__ import annotations
 
@@ -28,10 +33,14 @@ from .amc_api import AmcApi, AmcApiError, default_base_url
 from .automation_config import AutomationConfig, load_config
 from .calibration_spec import CalibrationSpec, download_floorplan_png
 from .projects import (STATE_FAILED, STATE_PROVISIONING, STATE_READY, SUBDIRS, Binding, FolderTaken,
-                       InvalidFolder, ProjectAlreadyBound, ProjectStore, validate_folder)
+                       InvalidFolder, ProjectAlreadyBound, ProjectNotFound, ProjectStore, validate_folder)
 
 RESTART_ERROR = "interrupted by a service restart; set it up again"
 BUSY_MESSAGE = "A project is being set up on the workstation; try again when it finishes"
+NO_FOLDER = "This project has no workstation folder"
+AMC_STARTING_RETRY_SECONDS = 15
+# A run in any other state could still be continued or cancelled, so its project cannot be deleted.
+RUN_FINISHED_STATES = frozenset(("completed", "cancelled"))
 T = TypeVar("T")
 LAYOUT_FILE = Path("floorplan") / "layout.png"
 
@@ -39,10 +48,11 @@ LAYOUT_FILE = Path("floorplan") / "layout.png"
 class ProvisionError(Exception):
     """A refused provision request, with the HTTP status the API answers."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, retry_after: int | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.message = message
+        self.retry_after = retry_after  # seconds, for a Retry-After header
 
 
 def _spawn_thread(fn: Callable[[], None]) -> None:
@@ -72,6 +82,7 @@ class Provisioner:
         controller,
         *,
         runner_busy: Callable[[], bool] = lambda: False,
+        runner_job: Callable[[], dict | None] = lambda: None,
         config_loader: Callable[[], AutomationConfig] = load_config,
         api_factory: Callable[[AutomationConfig], AmcApi] | None = None,
         http_client_factory: Callable[[], httpx.Client] = httpx.Client,
@@ -83,6 +94,8 @@ class Provisioner:
         self.store = store
         self.controller = controller
         self._runner_busy = runner_busy
+        # The runner's current or last job (its public dict, with ProjectId and State), or None.
+        self._runner_job = runner_job
         self._load_config = config_loader
         self._api_factory = api_factory or self._default_api
         self._http_factory = http_client_factory
@@ -180,6 +193,59 @@ class Provisioner:
             self.store.update(folder, state=STATE_FAILED, error="could not start the setup job")
             raise
         return binding, True
+
+    def delete(self, pid: str) -> dict:
+        """Delete `pid`'s AMC project and folder; the DELETE /projects/current body.
+
+        Raises ProvisionError: 404 without a folder; 409 while a provisioning
+        job runs or this project has a run that is not completed or
+        cancelled; 503 with a retry delay when AMC is not ready (it is asked
+        to start, nothing waits for it and nothing is removed); 502 when AMC
+        refuses the delete (nothing is removed then). AMC is left running.
+        """
+        return self.run_exclusive(lambda: self._delete(pid))
+
+    def _delete(self, pid: str) -> dict:
+        binding = self.store.get_by_pid(pid)
+        if binding is None:
+            raise ProvisionError(404, NO_FOLDER)
+        job = self._runner_job()
+        if job and job.get("ProjectId") == pid and job.get("State") not in RUN_FINISHED_STATES:
+            raise ProvisionError(409, "Cancel this project's run first")
+        amc_deleted = False
+        if binding.amc_project_id:
+            cfg = self._load_config()
+            api = self._api_factory(cfg)
+            try:
+                if not api.ready():
+                    raise self._amc_starting()
+                try:
+                    api.delete_project(binding.amc_project_id)  # its 404 counts as deleted
+                except (AmcApiError, httpx.HTTPError) as exc:
+                    raise ProvisionError(502, f"AMC did not delete project {binding.amc_project_id}: {exc}") from exc
+                amc_deleted = True
+            finally:
+                api.close()
+        try:
+            leftover = self.store.remove(binding.folder)
+        except ProjectNotFound:
+            raise ProvisionError(404, NO_FOLDER) from None
+        except OSError as exc:
+            raise ProvisionError(500, f"could not remove workstation folder {binding.folder!r}: {exc}") from exc
+        return {"Folder": binding.folder, "AmcProjectId": binding.amc_project_id,
+                "AmcProjectDeleted": amc_deleted, "Leftover": leftover}
+
+    def _amc_starting(self) -> ProvisionError:
+        """Ask AMC to start (returns at once) and build the 503 the client retries after."""
+        self.controller.start()
+        message = "AMC is starting on the workstation; try again shortly"
+        try:
+            error = self.controller.status().get("Error") or ""
+        except Exception:
+            error = ""
+        if error:
+            message += f" (last start error: {error})"
+        return ProvisionError(503, message, retry_after=AMC_STARTING_RETRY_SECONDS)
 
     # ---- background job -----------------------------------------------------
     def _job(self, folder: str, spec: CalibrationSpec) -> None:

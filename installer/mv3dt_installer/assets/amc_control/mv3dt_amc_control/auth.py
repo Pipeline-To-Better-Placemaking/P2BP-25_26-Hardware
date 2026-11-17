@@ -9,9 +9,11 @@ TICKET_ISSUER is set) from another issuer is refused with 401.
 The service serves any web project: the web app checks the user's project
 permission before it signs, so any valid ticket's `pid` is accepted. Each
 route accepts exactly the scopes it lists: "amc" (AMC control and the read
-routes), "amc-provision" (POST /projects) or, for GET /projects/current,
-either. A valid ticket with any other scope is refused with 403. A tracking ticket (scope "tracking") signed with
-the same secret therefore cannot control AMC.
+routes), "amc-provision" (POST /projects), "amc-delete"
+(DELETE /projects/current, and nothing else) or, for GET /projects/current,
+"amc" or "amc-provision". A valid ticket with any other scope is refused with
+403. A tracking ticket (scope "tracking") signed with the same secret
+therefore cannot control AMC.
 """
 
 from __future__ import annotations
@@ -24,9 +26,10 @@ from fastapi import HTTPException, Request
 AUDIENCE = "p2bp-workstation"
 SCOPE = "amc"
 PROVISION_SCOPE = "amc-provision"
+DELETE_SCOPE = "amc-delete"
 ALGORITHM = "HS256"
 INVALID = "Invalid or expired ticket"
-_PURPOSE = {SCOPE: "AMC control", PROVISION_SCOPE: "project provisioning"}
+_PURPOSE = {SCOPE: "AMC control", PROVISION_SCOPE: "project provisioning", DELETE_SCOPE: "project deletion"}
 
 # One scope, or a set of scopes any of which a route accepts.
 Scopes = Union[str, Iterable[str]]
