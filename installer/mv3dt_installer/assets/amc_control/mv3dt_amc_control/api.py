@@ -1,6 +1,7 @@
 """The AMC control API: start/stop/status of AMC and the automated workflow.
 
-Routes (all but /health need a web app ticket with scope "amc"):
+Routes (all but /health need a web app ticket with scope "amc", for any web
+project):
 
     GET  /health                  open; for the installer's verify and monitoring
     GET  /amc/status              AMC's state and, when ready, the address to open
@@ -23,7 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import __version__
-from .auth import ticket_dependency
+from .auth import SCOPE, ticket_dependency
 from .automation import Busy, CalibrationRunner, NothingToResume
 from .automation_config import ConfigError, load_config
 from .calibration_spec import SpecError, verify_spec
@@ -60,7 +61,7 @@ def create_app(
         allow_private_network=True,
     )
 
-    ticket = ticket_dependency(settings.ticket_secret, settings.project_id, settings.ticket_issuer)
+    ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, SCOPE)
 
     def same_project(claims: dict) -> None:
         job = runner.status()
