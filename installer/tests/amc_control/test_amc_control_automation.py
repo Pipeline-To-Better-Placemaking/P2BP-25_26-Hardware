@@ -122,12 +122,20 @@ def make_runner(ws, overrides, fake=None, floorplan_bytes=PNG, download_status=2
         downloads.append(str(request.url))
         return httpx.Response(download_status, content=floorplan_bytes)
 
+    # Sleeping moves the runner's clock on instead of waiting, so polls with the default
+    # poll_seconds (rectification's is 10) finish at once while real time still counts.
+    skew = [0.0]
+
+    def sleep(seconds):
+        skew[0] += seconds
+
     runner = CalibrationRunner(
         FakeController(install),
         config_loader=lambda: load_config(cfg_path),
         http_client_factory=lambda: TestClient(fake.app()),
         download_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(serve_floorplan)),
-        sleep=lambda s: None,
+        sleep=sleep,
+        clock=lambda: time.time() + skew[0],
         threaded=False,
         store=store if store is not None else ProjectStore(tmp_path / "amc_projects"),
     )
@@ -191,10 +199,11 @@ def test_default_config_pauses_once_with_a_todo_list_then_finishes(ws):
     assert job["State"] == "waiting_for_user"
     states = {s["Key"]: s["State"] for s in job["Steps"]}
     assert states == {"project_setup": "done", "video_configuration": "done", "parameters": "waiting",
-                      "rectification": "waiting", "manual_alignment": "waiting", "execute": "pending",
+                      "rectification": "done", "manual_alignment": "waiting", "execute": "pending",
                       "results": "pending"}
     todo = " | ".join(job["UserActions"])
-    assert "100.00 layout px/m" in todo and "Rectification" in todo and "Manual Alignment" in todo
+    assert "100.00 layout px/m" in todo and "Rectification" not in todo and "Manual Alignment" in todo
+    assert len(calls(fake, "start_rectification")) == 1   # rectification is automatic by default
     assert calls(fake, "calibrate") == []          # nothing calibrates before the user is done
     assert calls(fake, "upload_video_files")       # but everything that could be uploaded was
 
@@ -398,7 +407,7 @@ def test_overrides_without_a_settings_file_fail_instead_of_posting_a_partial_fil
 
 def test_base_config_loads_on_its_own():
     cfg = load_config()
-    assert cfg.rectification.mode == "ui" and cfg.alignment.file == "auto"
+    assert cfg.rectification.mode == "auto" and cfg.alignment.file == "auto"
 
 
 # ---------------------------------------------------------------- signed spec
@@ -1147,3 +1156,259 @@ def test_other_modes_keep_the_plain_cancel(ws):
     assert calls(fake, "delete_project") == [] and calls(fake, "stop_calibration") == []
     saved = job_file(runner)
     assert saved["amc_changed"] is False and saved["undone"] == []
+
+
+# ---------------------------------------------------------------- step 4: rectification.mode auto and linear
+AUTO = {**FULLY_AUTOMATED, "rectification": {"mode": "auto"}}
+INSTALLER_AMC_ID = "20261019_151133_2885"
+
+
+def amc_project(fake, pid=INSTALLER_AMC_ID):
+    return fake.projects[pid]
+
+
+def rect_states(fake):
+    return [kw["state"] for kw in calls(fake, "rectification_state")]
+
+
+def test_auto_rectification_estimates_commits_and_generates(ws):
+    runner, fake = make_runner(ws, AUTO)
+    changing = runner._changing_amc
+
+    def spy():
+        fake.calls.append(("changing_amc", {}))
+        changing()
+    runner._changing_amc = spy
+
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "start_rectification")) == 1
+    assert calls(fake, "commit_rectification") == [{"body": {"cameras": {
+        "0": {"model": "simple_radial", "k1": -0.12, "k2": 0},
+        "1": {"model": "simple_divisional", "k1": -0.3, "k2": 0.01}}}}]
+    order = [n for n, _ in fake.calls]
+    assert order[order.index("start_rectification") - 1] == "changing_amc"
+    assert order[order.index("commit_rectification") - 1] == "changing_amc"
+    assert order.index("commit_rectification") < order.index("upload_alignment")
+    message = job["Steps"][3]["Message"]
+    assert job["Steps"][3]["State"] == "done"
+    assert "camera 0 simple_radial (k1 -0.12, k2 0)" in message
+    assert "camera 1 simple_divisional (k1 -0.3, k2 0.01)" in message
+    saved = job_file(runner)
+    assert saved["rectification_started"] is True and saved["rectification_phase"] == "generate"
+
+
+def test_auto_rectification_never_trusts_an_earlier_completed_state(ws):
+    fake = FakeAmc()
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    amc_project(fake)["rect_state"] = "COMPLETED"   # from footage this run replaces
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    assert runner.start(spec())["State"] == "completed"
+    assert len(calls(fake, "start_rectification")) == 1 and len(calls(fake, "commit_rectification")) == 1
+
+
+def test_auto_rectification_waits_for_an_earlier_running_one_then_starts(ws):
+    fake = FakeAmc(rect_running_polls=2)
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    p = amc_project(fake)
+    p["rect_state"], p["rect_phase"] = "RUNNING", "estimate"
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    assert runner.start(spec())["State"] == "completed"
+    assert rect_states(fake)[:3] == ["RUNNING", "RUNNING", "READY_FOR_REVIEW"]   # waited, then started anyway
+    names = [n for n, _ in fake.calls]
+    assert names[:names.index("start_rectification")].count("rectification_state") == 3
+    assert len(calls(fake, "start_rectification")) == 1
+
+
+def failed_rectification(ws, phase):
+    """A run whose rectification failed in `phase`, ready to be continued."""
+    fake = FakeAmc(rect_fail=phase)
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and job["Steps"][3]["State"] == "failed", job
+    fake.rect_fail = ""
+    return runner, fake
+
+
+def test_auto_rectification_error_fails_with_the_log_tail_and_continue_starts_over(ws):
+    runner, fake = failed_rectification(ws, "estimate")
+    message = runner.status()["Steps"][3]["Message"]
+    assert "ERROR while estimating distortion" in message
+    assert "no grid lines found" in message and "rect line 6" in message and "rect line 5" not in message
+    assert calls(fake, "commit_rectification") == []
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "start_rectification")) == 2 and len(calls(fake, "commit_rectification")) == 1
+
+
+def test_auto_rectification_resumes_at_ready_for_review_by_committing(ws):
+    runner, fake = failed_rectification(ws, "estimate")
+    amc_project(fake)["rect_state"] = "READY_FOR_REVIEW"
+    assert runner.resume()["State"] == "completed"
+    assert len(calls(fake, "start_rectification")) == 1 and len(calls(fake, "commit_rectification")) == 1
+
+
+def test_auto_rectification_resumes_a_running_estimate(ws):
+    runner, fake = failed_rectification(ws, "estimate")
+    p = amc_project(fake)
+    p["rect_state"], p["rect_phase"], p["rect_n"] = "RUNNING", "estimate", 0
+    assert runner.resume()["State"] == "completed"
+    assert len(calls(fake, "start_rectification")) == 1 and len(calls(fake, "commit_rectification")) == 1
+
+
+def test_auto_rectification_resumes_a_running_generate_without_committing_again(ws):
+    runner, fake = failed_rectification(ws, "generate")
+    assert "ERROR while generating rectified videos" in runner.status()["Steps"][3]["Message"]
+    assert job_file(runner)["rectification_phase"] == "generate"
+    p = amc_project(fake)
+    p["rect_state"], p["rect_phase"], p["rect_n"] = "RUNNING", "generate", 0
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "start_rectification")) == 1 and len(calls(fake, "commit_rectification")) == 1
+    assert "camera 0 simple_radial" in job["Steps"][3]["Message"]
+
+
+def test_auto_rectification_once_started_takes_completed_as_done(ws):
+    runner, fake = failed_rectification(ws, "generate")
+    amc_project(fake)["rect_state"] = "COMPLETED"
+    job = runner.resume()
+    assert job["State"] == "completed" and job["Steps"][3]["State"] == "done"
+    assert len(calls(fake, "start_rectification")) == 1 and len(calls(fake, "commit_rectification")) == 1
+
+
+def test_auto_rectification_times_out_with_the_log_tail(ws):
+    fake = FakeAmc(rect_running_polls=10 ** 9)
+    rect = {"mode": "auto", "api": {"poll_seconds": 10, "timeout_seconds": 30}}
+    runner, _ = make_runner(ws, {**AUTO, "rectification": rect}, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed"
+    message = job["Steps"][3]["Message"]
+    assert "still RUNNING after 30 s while estimating distortion" in message and "no grid lines found" in message
+    assert 3 <= len(rect_states(fake)) <= 6
+
+
+def test_each_rectification_phase_has_its_own_timeout(ws):
+    fake = FakeAmc(rect_running_polls=2)
+    rect = {"mode": "auto", "api": {"poll_seconds": 10, "timeout_seconds": 25}}   # 3 reads fit in each phase
+    runner, _ = make_runner(ws, {**AUTO, "rectification": rect}, fake=fake)
+    assert runner.start(spec())["State"] == "completed"
+
+
+def test_rectification_parameters_follow_amcs_ui():
+    params = automation_mod._rectification_params
+    est = {"model": "radial", "k1": -0.2, "k2": 0.05}
+    assert params({"committed": {"model": "simple_radial", "k1": 0.1, "k2": 0.2}, "auto_estimate": est}) == (
+        {"model": "simple_radial", "k1": 0.1, "k2": 0.2}, True)
+    assert params({"committed": None, "auto_estimate": est}) == ({"model": "radial", "k1": -0.2, "k2": 0.05}, True)
+    assert params({"committed": None, "auto_estimate": {"model": "fisheye", "k1": 0.3}}) == (
+        {"model": "simple_divisional", "k1": 0.3, "k2": 0}, True)
+    assert params({"committed": None, "auto_estimate": None}) == (
+        {"model": "simple_divisional", "k1": 0, "k2": 0}, False)
+
+
+def test_a_camera_without_an_estimate_is_committed_flat_and_named(ws):
+    fake = FakeAmc()
+    fake.rect_cameras = [
+        {"camera_id": 0, "committed": None, "auto_estimate": {"model": "radial", "k1": -0.1, "k2": 0.02}},
+        {"camera_id": 1, "committed": None, "auto_estimate": None},
+    ]
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "completed"
+    assert calls(fake, "commit_rectification")[0]["body"]["cameras"]["1"] == {
+        "model": "simple_divisional", "k1": 0, "k2": 0}
+    assert "camera 1 simple_divisional (k1 0, k2 0, no estimate)" in job["Steps"][3]["Message"]
+
+
+def test_linear_mode_stages_the_videos_unchanged(ws):
+    runner, fake = make_runner(ws, {**AUTO, "rectification": {"mode": "linear"}})
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+    assert calls(fake, "stage_linear_media") == [{"pid": INSTALLER_AMC_ID}]
+    assert calls(fake, "start_rectification") == [] and calls(fake, "commit_rectification") == []
+    assert job["Steps"][3]["Message"] == "videos staged as already linear"
+    assert job_file(runner)["rectification_phase"] == "linear"
+
+
+def test_linear_mode_error_fails_with_the_log_tail(ws):
+    fake = FakeAmc(rect_fail="linear")
+    runner, _ = make_runner(ws, {**AUTO, "rectification": {"mode": "linear"}}, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and "no grid lines found" in job["Steps"][3]["Message"]
+
+
+def test_cancel_while_rectification_polls(ws):
+    fake = FakeAmc(rect_running_polls=10 ** 9)
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    runner._sleep = lambda s: runner.cancel()
+    job = runner.start(spec())
+    assert job["State"] == "cancelled", job
+    assert job["Steps"][3]["State"] == "pending"
+    assert calls(fake, "commit_rectification") == [] and calls(fake, "calibrate") == []
+
+
+def test_rectification_waits_while_step_2_waits(ws):
+    runner, fake = make_runner(ws, AUTO)
+    job = runner.start(spec(floorplan=False))        # step 2 waits for the layout; the videos are in AMC
+    assert job["State"] == "waiting_for_user"
+    rect = job["Steps"][3]
+    assert rect["State"] == "waiting" and rect["Message"] == "Rectification runs once the videos are in AMC"
+    assert rect["NeedsUser"] is False and len(job["UserActions"]) == 1
+    assert calls(fake, "start_rectification") == [] and calls(fake, "rectification_state") == []
+
+
+def test_rectification_waits_while_amc_has_no_videos(ws):
+    runner, fake = make_runner(ws, {**AUTO, "videos": {"enabled": False}})
+    job = runner.start(spec())
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][1]["State"] == "done"
+    assert job["Steps"][3]["State"] == "waiting" and job["Steps"][3]["NeedsUser"] is False
+    assert job["UserActions"] == []
+    assert calls(fake, "start_rectification") == []
+
+
+def test_skip_and_ui_modes_never_call_the_rectification_api(ws):
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    assert runner.start(spec())["Steps"][3]["State"] == "skipped"
+    runner, fake2 = make_runner(ws, {**FULLY_AUTOMATED, "rectification": {"mode": "ui"}})
+    job = runner.start(spec())
+    assert job["Steps"][3]["State"] == "waiting"
+    assert runner.resume()["Steps"][3]["Message"].startswith("finished in AMC")
+    for f in (fake, fake2):
+        assert not [n for n, _ in f.calls if "rectification" in n or n == "stage_linear_media"]
+
+
+def paused_web_rectified_run(ws, web):
+    """A web_project run that rectified automatically, then paused for Manual Alignment."""
+    rect = {"mode": "auto", "api": {"poll_seconds": 10, "timeout_seconds": 30}}
+    runner = web_runner(ws, web, {**WEB, "rectification": rect})
+    job = runner.start(spec())
+    assert job["State"] == "waiting_for_user" and job["Steps"][3]["State"] == "done", job
+    assert job_file(runner)["amc_changed"] is True
+    return runner
+
+
+def test_cancel_undo_waits_for_a_running_rectification_before_deleting(ws, web):
+    _, _, fake = web
+    runner = paused_web_rectified_run(ws, web)
+    p = fake.projects[WEB_AMC_ID]
+    p["rect_state"], p["rect_phase"], p["rect_n"] = "RUNNING", "estimate", 0
+    fake.rect_running_polls = 2
+    before = len(fake.calls)
+    assert runner.cancel()["State"] == "cancelled"
+    after = [(n, kw) for n, kw in fake.calls[before:] if n in ("rectification_state", "delete_project")]
+    assert [n for n, _ in after] == ["rectification_state"] * 3 + ["delete_project"]
+    assert [kw["state"] for _, kw in after[:3]] == ["RUNNING", "RUNNING", "READY_FOR_REVIEW"]
+
+
+def test_cancel_undo_deletes_after_the_rectification_timeout(ws, web):
+    _, _, fake = web
+    runner = paused_web_rectified_run(ws, web)
+    p = fake.projects[WEB_AMC_ID]
+    p["rect_state"], p["rect_phase"], p["rect_n"] = "RUNNING", "estimate", 0
+    fake.rect_running_polls = 10 ** 9
+    before = len(fake.calls)
+    assert runner.cancel()["State"] == "cancelled"
+    names = [n for n, _ in fake.calls[before:]]
+    assert 3 <= names.count("rectification_state") <= 6
+    assert names.count("delete_project") == 1 and names.index("delete_project") > names.index("rectification_state")

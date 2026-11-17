@@ -152,6 +152,44 @@ class AmcApi:
             return f"(could not fetch the calibration log: HTTP {r.status_code})"
         return "\n".join(r.text.splitlines()[-tail_lines:])
 
+    def rectification_state(self, project_id: str) -> str:
+        r = self._check(self._http.get(self._url(f"rectification/{project_id}"), timeout=self.timeout),
+                        "rectification state")
+        state = self._json(r, "rectification state").get("rectification_state")
+        if not isinstance(state, str) or not state:
+            raise AmcApiError("rectification state reply has no rectification_state")
+        return state.upper()
+
+    def start_rectification(self, project_id: str) -> None:
+        self._check(self._http.post(self._url(f"rectification/{project_id}"), timeout=self.timeout),
+                    "start rectification")
+
+    def rectification_cameras(self, project_id: str) -> list[dict]:
+        r = self._check(self._http.get(self._url(f"rectification/{project_id}/cameras"), timeout=self.timeout),
+                        "rectification cameras")
+        cameras = self._json(r, "rectification cameras").get("cameras")
+        if not isinstance(cameras, list):
+            raise AmcApiError("rectification cameras reply has no cameras list")
+        return [c for c in cameras if isinstance(c, dict)]
+
+    def commit_rectification(self, project_id: str, cameras: dict[str, dict]) -> None:
+        """cameras: {camera_id: {"model", "k1", "k2"}}; AMC then generates the rectified videos."""
+        self._check(self._http.post(self._url(f"rectification/{project_id}/manual"), json={"cameras": cameras},
+                                    timeout=self.timeout), "commit rectification")
+
+    def stage_linear_media(self, project_id: str) -> None:
+        self._check(self._http.post(self._url(f"linear_media/{project_id}"), timeout=self.timeout),
+                    "stage linear media")
+
+    def rectification_log(self, project_id: str, tail_lines: int = 10) -> str:
+        try:
+            r = self._http.get(self._url(f"rectification/{project_id}/log"), timeout=self.timeout)
+        except httpx.HTTPError as e:
+            return f"(could not fetch the rectification log: {e})"
+        if r.status_code >= 400:
+            return f"(could not fetch the rectification log: HTTP {r.status_code})"
+        return "\n".join(r.text.splitlines()[-tail_lines:])
+
     def evaluation_statistics(self, project_id: str) -> dict | None:
         r = self._http.get(self._url(f"result/{project_id}/evaluation_statistics"), timeout=self.timeout)
         if r.status_code != 200:

@@ -15,9 +15,10 @@
 #   3. AMC's own defaults.
 #
 # AMC's REST API is documented in NVIDIA's amc-run-video-calibration skill
-# (github.com/NVIDIA/DeepStream, skills/amc-run-video-calibration). Endpoints
-# marked UNVERIFIED below are not in that documentation; check them against the
-# running AMC with:
+# (github.com/NVIDIA/DeepStream, skills/amc-run-video-calibration). The
+# rectification endpoints used by rectification.mode auto and linear are not in
+# that documentation; they come from AMC 3.3.0's own API description, which
+# you can read from the running AMC with:
 #   cd <install_dir>/amc_control && venv/bin/python3 -m mv3dt_amc_control openapi > amc-openapi.yaml
 
 amc:
@@ -109,13 +110,27 @@ parameters:
 
 # AMC step 4: Rectification (new in AMC 3.3.0)
 rectification:
+  # auto: AMC estimates each camera's distortion (POST /v1/rectification/{id}),
+  #   and the estimate is committed the way AMC's UI "Generate Rectified
+  #   Videos" button does (POST /v1/rectification/{id}/manual), then the run
+  #   waits for COMPLETED. It waits until step 2 is done and AMC has the
+  #   videos. A run always starts its own rectification (an earlier COMPLETED
+  #   may be from replaced footage); on Continue it picks up where its own
+  #   rectification is. ERROR or a timeout fails the step with the end of
+  #   AMC's rectification log, and Continue after ERROR starts over.
+  # linear: the footage is already rectified; stage it unchanged
+  #   (POST /v1/linear_media/{id}) and wait for COMPLETED.
+  # Cancelling a web_project run waits while a rectification is RUNNING (up to
+  # api.timeout_seconds), since AMC cannot stop one, then deletes the project.
   # ui: pause with the manual step so the user runs it in AMC's UI.
-  # api: run it with the requests below.
+  # api: run it with the generic requests below.
   # skip: the project is already rectified.
-  mode: ui
-  # UNVERIFIED. NVIDIA's README documents rectification only through the UI.
-  # Fill these in from AMC's /openapi.yaml before switching mode to api.
-  # {project_id} is replaced with the AMC project id.
+  mode: auto
+  # auto and linear use only poll_seconds and timeout_seconds from here
+  # (timeout_seconds applies to each wait: the estimate and the generation
+  # each get their own). start and status are for mode api
+  # only: fill them in from AMC's /openapi.yaml. {project_id} is replaced with
+  # the AMC project id.
   api:
     start:
       method: POST

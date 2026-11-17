@@ -98,7 +98,7 @@ class RectificationApi(_Strict):
 
 
 class RectificationSection(_Strict):
-    mode: Literal["ui", "api", "skip"] = "ui"
+    mode: Literal["auto", "linear", "ui", "api", "skip"] = "auto"
     api: RectificationApi = RectificationApi()
 
 
