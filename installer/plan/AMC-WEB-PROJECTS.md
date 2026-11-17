@@ -309,10 +309,9 @@ Settled exclusions:
 
 Open decisions:
 
-1. **Recording footage from the web app (flagged).** Footage reaches
-   `<folder>/footage/` by copy or through AMC's upload. Recording needs the
-   camera credentials in the root-owned `secrets/` and a new sudo-ruled
-   command; it needs its own spec.
+1. **Recording footage from the web app — RESOLVED** by
+   [`AMC-FOOTAGE-RECORDING.md`](AMC-FOOTAGE-RECORDING.md): an automated run
+   can record into `<folder>/footage/` through one fixed sudo command.
 2. **Feeding a web project's calibration into DeepStream (flagged).** Step 4
    ingests only `installer.conf`'s `AMC_PROJECT_ID`
    ([`STEP-4` section 7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration));
