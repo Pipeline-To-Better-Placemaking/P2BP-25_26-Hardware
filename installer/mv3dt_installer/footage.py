@@ -39,7 +39,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -99,6 +99,9 @@ class RecordResult:
     recorded: list  # list[Path]: final clip paths
     failed: list  # list[Camera]: cameras whose clip did not complete
     cancelled: bool
+    # One redacted reason per `failed` camera, in the same order
+    # (AMC-FOOTAGE-RECORDING section 5); the text of its warning line.
+    errors: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +350,24 @@ def record(
     running: dict = {}  # index -> proc
     outcome: dict = {}  # index -> True (clip complete) / False (failed)
     errfiles: dict = {}  # index -> temporary stderr file
+    reasons: dict = {}  # index -> redacted reason the camera failed
+
+    def fail(i: int, reason: str) -> None:
+        camera = cameras[i]
+        outcome[i] = False
+        reasons[i] = reason
+        log.warn(f"Camera {camera.id} ({camera.ip}): {reason}")
+
+    def result(cancelled: bool) -> RecordResult:
+        failed = [i for i in range(len(cameras)) if not outcome.get(i)]
+        return RecordResult(
+            project_dir=project,
+            recorded=[project / clip_name(c) for i, c in enumerate(cameras) if outcome.get(i)],
+            failed=[cameras[i] for i in failed],
+            cancelled=cancelled,
+            errors=[reasons.get(i, "cancelled" if cancelled else "failed") for i in failed],
+        )
+
     try:
         # §4 step 2: spawn every child before waiting on any.
         for i, camera in enumerate(cameras):
@@ -364,8 +385,7 @@ def record(
                 )
             except OSError as exc:
                 detail = _redact(exc.strerror or str(exc), password)
-                log.warn(f"Camera {camera.id} ({camera.ip}): could not start ffmpeg: {detail}")
-                outcome[i] = False
+                fail(i, f"could not start ffmpeg: {detail}")
 
         start = clock()
         while running:
@@ -382,11 +402,7 @@ def record(
                     _stop(proc)
                     del running[i]
                     _unlink(part)
-                    outcome[i] = False
-                    log.warn(
-                        f"Camera {camera.id} ({camera.ip}): ffmpeg exceeded "
-                        f"{process_timeout} s and was stopped."
-                    )
+                    fail(i, f"ffmpeg exceeded {process_timeout} s and was stopped.")
                     continue
                 del running[i]
                 if rc == 0 and part.is_file() and part.stat().st_size > 0:
@@ -394,13 +410,9 @@ def record(
                     outcome[i] = True
                     continue
                 _unlink(part)
-                outcome[i] = False
                 reason = f"ffmpeg exited {rc}" if rc != 0 else "ffmpeg produced an empty file"
                 tail = _stderr_tail(errfiles[i], password)
-                log.warn(
-                    f"Camera {camera.id} ({camera.ip}): {reason}"
-                    + (f": {tail}" if tail else ".")
-                )
+                fail(i, reason + (f": {tail}" if tail else "."))
             if running:
                 sleep(_POLL_INTERVAL_S)
     except KeyboardInterrupt:
@@ -409,20 +421,14 @@ def record(
         for camera in cameras:
             _unlink(_part_path(project, camera))
         log.warn("Calibration footage recording cancelled; no marker written.")
-        return RecordResult(
-            project_dir=project,
-            recorded=[project / clip_name(c) for i, c in enumerate(cameras) if outcome.get(i)],
-            failed=[c for i, c in enumerate(cameras) if not outcome.get(i)],
-            cancelled=True,
-        )
+        return result(cancelled=True)
     finally:
         for stream in errfiles.values():
             stream.close()
 
     on_progress(1.0)
-    recorded = [project / clip_name(c) for i, c in enumerate(cameras) if outcome.get(i)]
-    failed = [c for i, c in enumerate(cameras) if not outcome.get(i)]
-    if not failed:
+    final = result(cancelled=False)
+    if not final.failed:
         # §4 step 5: marker only on full success.
         state.write_json_atomic(
             project / MARKER_NAME,
@@ -435,8 +441,8 @@ def record(
                 ],
             },
         )
-        log.info(f"Recorded {len(recorded)} calibration clip(s) in {project}.")
-    return RecordResult(project_dir=project, recorded=recorded, failed=failed, cancelled=False)
+        log.info(f"Recorded {len(final.recorded)} calibration clip(s) in {project}.")
+    return final
 
 
 # ---------------------------------------------------------------------------

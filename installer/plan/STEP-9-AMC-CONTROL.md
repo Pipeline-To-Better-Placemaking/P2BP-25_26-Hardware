@@ -118,13 +118,19 @@ project id
 
 ## 5. The sudo rule
 
-**LOCKED.** `mv3dt-installer amc` requires root; the service does not run as
-root. `/etc/sudoers.d/mv3dt-amc-control` (mode 440) allows the service user
-exactly two command lines and nothing else:
+**LOCKED.** `mv3dt-installer amc` and `mv3dt-installer record-footage`
+require root; the service does not run as root.
+`/etc/sudoers.d/mv3dt-amc-control` (mode 440) allows the service user
+exactly three command lines and nothing else:
 
 ```
-<user> ALL=(root) NOPASSWD: <install_dir>/bin/mv3dt-installer amc --keep-up --no-open --non-interactive --host-ip <tailscale IPv4>, <install_dir>/bin/mv3dt-installer amc --down
+<user> ALL=(root) NOPASSWD: <install_dir>/bin/mv3dt-installer amc --keep-up --no-open --non-interactive --host-ip <tailscale IPv4>, <install_dir>/bin/mv3dt-installer amc --down, <install_dir>/bin/mv3dt-installer record-footage --pending
 ```
+
+`record-footage --pending` validates the request file the service wrote,
+drops root privileges to the service user and records every camera into the
+web project's `footage/` directory
+([`AMC-FOOTAGE-RECORDING` section 5](AMC-FOOTAGE-RECORDING.md#5-the-record-footage-command)).
 
 The rule names the root-owned installer binary that Step 3 stages, not
 Step 3's `bin/amc` wrapper. The wrapper is only
@@ -144,8 +150,9 @@ sudo ignores), checked with `visudo -cf`, then renamed into place. A user
 name or install path that cannot be expressed safely in sudoers fails
 preflight. When the Tailscale address changes, `pending_update()` re-runs the
 step and rewrites the rule and the unit. A rule on disk that differs from the
-one this release renders (for example the earlier rule naming `bin/amc`) is
-an update too, and is replaced the same way.
+one this release renders (for example the earlier rule naming `bin/amc`, or
+one without the `record-footage` line) is an update too, and is replaced the
+same way.
 
 Note: `--host-ip` applies to that launch only; it does not change `HOST_IP`
 in `installer.conf`

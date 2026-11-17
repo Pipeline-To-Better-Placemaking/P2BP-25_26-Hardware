@@ -57,7 +57,7 @@ def launched(monkeypatch, tmp_path):
 
 
 def _allowed_commands(install_dir):
-    """The two command lines in the sudoers rule Step 9 renders."""
+    """The command lines in the sudoers rule Step 9 renders."""
     rule = s9.render_sudoers(_Ctx(install_dir), TS_IP)
     line = next(l for l in rule.splitlines() if l and not l.startswith("#"))
     _, _, commands = line.partition("NOPASSWD: ")
@@ -67,7 +67,7 @@ def _allowed_commands(install_dir):
 def test_start_runs_the_allowed_start_command_under_sudo(launched):
     ctl, calls, install_dir = launched
     ctl.start()
-    start, _stop = _allowed_commands(install_dir)
+    start, _stop, _record = _allowed_commands(install_dir)
     assert calls == [["sudo", "-n", *start]]
     assert start[:2] == [str(install_dir / "bin" / "mv3dt-installer"), "amc"]
 
@@ -75,7 +75,7 @@ def test_start_runs_the_allowed_start_command_under_sudo(launched):
 def test_stop_runs_the_allowed_stop_command_under_sudo(launched):
     ctl, calls, install_dir = launched
     ctl.stop()
-    _start, stop = _allowed_commands(install_dir)
+    _start, stop, _record = _allowed_commands(install_dir)
     assert calls == [["sudo", "-n", *stop]]
     assert stop == [str(install_dir / "bin" / "mv3dt-installer"), "amc", "--down"]
 
