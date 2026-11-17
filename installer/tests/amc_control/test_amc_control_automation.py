@@ -763,3 +763,56 @@ def test_runner_builds_its_store_from_the_environment(ws, monkeypatch):
     monkeypatch.setenv("AMC_PROJECTS_DIR", str(ws[0] / "elsewhere"))
     runner = CalibrationRunner(FakeController(ws[1]))
     assert runner.store.root == ws[0] / "elsewhere"
+
+
+ORDERED = {**WEB, "videos": {"order": ["b.mp4", "a.mp4"]}}
+
+
+def test_web_project_empty_footage_with_videos_order_waits(ws, web):
+    _, folder, fake = web
+    for f in (folder / "footage").iterdir():
+        f.unlink()
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web, ORDERED)
+    job = runner.start(spec())
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][1]["State"] == "waiting"
+    assert str(folder / "footage") in job["UserActions"][0]
+
+    fake.projects[WEB_AMC_ID]["videos"] = [("cam_00.mp4", 5)]   # uploaded in AMC's UI
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert job["Steps"][1]["Message"].startswith("finished in AMC")
+    assert calls(fake, "upload_video_files") == []
+
+
+def test_web_project_partial_footage_with_videos_order_still_fails(ws, web):
+    _, folder, _ = web
+    (folder / "footage" / "b.mp4").unlink()
+    job = web_runner(ws, web, ORDERED).start(spec())
+    assert job["State"] == "failed" and "b.mp4" in job["Steps"][1]["Message"]
+
+
+def test_web_project_layout_only_wait_does_not_upload_videos_twice(ws, web):
+    _, _, fake = web
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web)
+    job = runner.start(spec(floorplan=False))
+    assert job["State"] == "waiting_for_user"
+    assert job["UserActions"][0].startswith("Upload layout.png")
+    assert len(calls(fake, "upload_video_files")) == 1
+
+    fake.projects[WEB_AMC_ID]["layout"] = PNG              # the user adds the layout in AMC
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "upload_video_files")) == 1
+
+
+def test_web_project_videos_uploaded_flag_survives_a_restart(ws, web):
+    _, _, fake = web
+    amc_saved_alignment(ws)
+    web_runner(ws, web).start(spec(floorplan=False))
+    runner2 = web_runner(ws, web)
+    fake.projects[WEB_AMC_ID]["layout"] = PNG
+    assert runner2.resume()["State"] == "completed"
+    assert len(calls(fake, "upload_video_files")) == 1
