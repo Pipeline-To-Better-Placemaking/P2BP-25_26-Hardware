@@ -2,7 +2,7 @@
 
 Status: step spec, **implemented and unit-tested, never run on the
 workstation** (dated evidence in
-[`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-10-20)).
+[`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-11-16)).
 It specifies the `step9_amc_control` module and the bundled
 `mv3dt_amc_control` service package it installs. It builds on the contracts in
 [`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md) and follows

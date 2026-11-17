@@ -3,13 +3,13 @@
 Status: standing record and handoff artifact, not a spec. It states what is
 built, what is not, and what a new contributor has to know before touching
 the tree. Every contract it mentions is **defined elsewhere** — in
-[`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md), the seven
+[`00-FRAMEWORK-AND-BOOTSTRAP.md`](00-FRAMEWORK-AND-BOOTSTRAP.md), the nine
 `STEP-*` docs, or [`08-PROGRESS-AND-OBSERVABILITY.md`](08-PROGRESS-AND-OBSERVABILITY.md)
 — and is linked rather than restated. When this doc and a spec disagree, the
 spec wins and this doc is stale.
 
 This document exists because the repo has reached a state that is easy to
-misread: **all seven steps and the progress subsystem are implemented, and
+misread: **all nine steps and the progress subsystem are implemented, and
 the apt and download adapters are wired, but failure evidence is not yet
 connected across the step modules.** A reader who finds `report.py` can
 reasonably conclude the diagnostic work is done. It is not.
@@ -19,7 +19,7 @@ Current release: **v0.4.25**. Current version string:
 `installer/mv3dt_installer/__init__.py` `__version__ = "0.4.25"`.
 The release is published with a checksum-verified binary.
 
-### Current workstation state (last verified 2026-10-20)
+### Current workstation state (last verified 2026-11-16)
 
 **REQUIRED — read this as dated evidence, not standing fact.** Every row
 names the date it was last confirmed on the workstation. A row older than the
@@ -32,17 +32,22 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | Cameras in use | 2 of the 8 fleet cameras: `169.254.14.217` (`d0:3b:f4:02:44:84`) and `169.254.50.89` (`d0:3b:f4:02:44:87`) | 2026-10-20 | `ip neigh show dev enp8s0`; operator |
 | Camera main stream (`Streaming/Channels/101`) | H.264 Main, 1920x1080, 22 fps, plus a G.711 µ-law (`pcm_mulaw`) audio track | 2026-10-20 | `ffmpeg` probe of `169.254.50.89`; operator, for the fleet |
 | PoE interface | `enp8s0` up at `169.254.3.134/16` (link-local) via `Wired connection 1` | 2026-10-20 | `ip -br addr`, `nmcli` |
-| Location and AMC project | `LOCATION_ID=Kevin-House`; AMC project `Living-Room` (`20261019_151133_2885`). `Valencia-West` is no longer used | 2026-10-20 | `installer.conf`; `GET /v1/get_project_info` |
+| Location and AMC project | `LOCATION_ID=Kevin-House`; `AMC_PROJECT_ID=20261023_091449_9720`. This replaced the `Living-Room` project `20261019_151133_2885` recorded on 2026-10-20; the new project's name and state were not re-checked | 2026-11-16 | `installer.conf` |
 | Calibration | **First successful calibration**: `Living-Room` is `COMPLETED` from two simultaneous 10-minute clips (1920x1080, recorded outside the installer and uploaded in the AMC UI). Step 4 ingested it as `Living-Room@20261020T170847Z`, installed the four DeepStream configs, deleted the footage folder, and enabled `mv3dt-ingest-living-room.timer` | 2026-10-20 | Step 4 transcript; AMC API |
-| Installer version on the workstation | 0.4.15 (`v0.4.15`, commit `5f9585d`) | 2026-10-20 | `./mv3dt-installer --version` |
-| Step completion | Steps 1–5 complete on v0.4.15: Step 4 converted AMC's `camInfo` into `camera_models/camInfo_00.yml` and `camInfo_01.yml` and listed both in the tracker config. Step 6 failed: the pipeline unit's `WorkingDirectory` pointed at a per-slug folder that does not exist (`200/CHDIR`), and the polkit check ran on the operator's TTY, where a password prompt let both negative probes succeed. With a hand drop-in setting `WorkingDirectory=/opt/mv3dt/deepstream`, `mv3dt-pipeline@living-room` ran as `p2bp-admin` at 22 FPS on both sources and published ~300-byte protobuf frames. v0.4.16 fixes both | 2026-10-20 | v0.4.15 transcript; `journalctl -u mv3dt-pipeline@living-room` |
+| Installer version on the workstation | 0.4.25 (`v0.4.25`, commit `0d4347a`), installed over v0.4.24 without a reset; `/opt/mv3dt/bin/mv3dt-installer` refreshed | 2026-11-16 | `mv3dt-installer --version`; v0.4.25 run |
+| Step completion | Steps 1–6, 8 and 9 `COMPLETE`; Step 7 `SKIPPED` (gate off) | 2026-11-16 | `mv3dt-installer --status` |
+| Gates | `MV3DT_REMOTE_SUPERVISION=local`, `MV3DT_WEBAPP_INTEGRATION=off`, `MV3DT_TRACKING_HISTORY=on`, `MV3DT_AMC_CONTROL=on`, `MV3DT_VIEWER_STREAM=on`, `MV3DT_AUTO_INGEST=off` | 2026-11-16 | `installer.conf` |
+| Supervised services | `mv3dt-agent`, `mv3dt-pipeline@living-room`, `mv3dt-watchdog@living-room`, `mv3dt-tracking` and `mv3dt-amc-control` all `active (running)`; no `mv3dt-*` timer is loaded | 2026-11-16 | `systemctl list-units 'mv3dt*'`; `systemctl list-timers 'mv3dt*'` |
 | Pipeline | With the v0.4.12 changes applied by hand to the installed configs: MQTT sink connects, ReID engine builds, PeopleNet detects, both cameras run at 22 FPS under `deepstream-test5-app`, which builds one message per tracked person. JSON messages observed on `mv3dt/Kevin-House/sv3d` (2D only). Single-view 3D then ran by hand with NVIDIA's reference 3D tracker config: per-frame protobuf messages carry each person's world foot position and 3D box (e.g. x 77.36, y -40.86, height 1.7). v0.4.15 encodes that setup. World units are AMC's, verified live on 2026-10-25 as metres: positions fall inside the 7.41 x 5.02 m floor plan at 100 px per metre ([`STEP-8` section 5](STEP-8-TRACKING-HISTORY.md#5-decoding-nvframe)). Multi-camera MV3DT fusion is not configured (see section 5) | 2026-10-20 | live runs; `deepstream-test5-app` log; world units only: live check on 2026-10-25 against the floor plan |
 | AMC UI and API ports, AMC checkout path | `5000`, `8000`, `/home/p2bp-admin/auto-magic-calib`; `HOST_IP=192.168.4.106` (home network, baked into the AMC UI at container start) | 2026-10-20 | `docker ps`; `installer.conf`; `compose/.env` |
-| Automatic re-ingest | `mv3dt-ingest-living-room.timer` fires every 60 s, but every `ingest` run stopped at "configuration incomplete: CAM_USER, CAM_PASSWORD": subcommands never loaded `secrets/camera.env` (broken since v0.4.7 moved the credentials there; fixed in v0.4.13). It then failed earlier still, on "Could not resolve a non-root invoking user": the root service had no `SUDO_USER`, so the timer had never ingested anything. v0.4.14 sets `Environment=SUDO_USER=<invoking user>` in the unit | 2026-10-20 | `mv3dt-installer ingest` run by hand |
+| Automatic re-ingest | Off: `MV3DT_AUTO_INGEST=off` and no ingest timer is loaded. The 2026-10-20 timer failures, fixed in v0.4.13 and v0.4.14, are in this file's git history | 2026-11-16 | `installer.conf`; `systemctl list-timers` |
 | AMC network exposure | UI `5000` and API `8000` listen on all interfaces with no authentication; anyone on the same network can create, run, or delete projects | 2026-10-20 | `ss -tlnp` |
 | Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
-| Step 9 AMC control | Implemented and unit-tested (PR #67; sudo rule fix in PR #69); **never run on the workstation**. `MV3DT_AMC_CONTROL` is `off` there ([`STEP-9`](STEP-9-AMC-CONTROL.md)) | 2026-11-16 | operator check of `installer.conf` |
-| Step 9 prerequisites on the workstation | Installer v0.4.24 (no release yet contains Step 9); `MV3DT_TRACKING_HISTORY=on`; Tailscale IPv4 `100.95.170.92`; tailnet HTTPS `8443` serves tracking and `8444` is free; `/opt/mv3dt/bin/` and `bin/mv3dt-installer` are owned by root, `bin/amc` by `p2bp-admin`, which is why the sudo rule names the binary ([`STEP-9` section 5](STEP-9-AMC-CONTROL.md#5-the-sudo-rule)) | 2026-11-16 | operator check on the workstation |
+| Step 9 AMC control | Installed on v0.4.25 with `--amc-control on`; all five phases passed. `mv3dt-amc-control` runs as `p2bp-admin` on `127.0.0.1:8091`, published at `https://p2bp-admin-workstation.tailafa4a7.ts.net:8444`. `/health` returns 200 locally and over the tailnet with `ticket_configured: true`; `/amc/status` returns 401 without a ticket and 200 (`State: ready`) with a scope `amc` ticket signed by the shared secret. **AMC start and stop through the sudo rule have not been exercised** ([`STEP-9`](STEP-9-AMC-CONTROL.md)) | 2026-11-16 | installer transcript; `curl`; `journalctl -u mv3dt-amc-control` |
+| Step 9 sudo rule | `/etc/sudoers.d/mv3dt-amc-control` passes `visudo -c` and allows only `/opt/mv3dt/bin/mv3dt-installer amc --keep-up --no-open --non-interactive --host-ip 100.95.170.92` and `... amc --down`; `/opt/mv3dt/bin/` and the binary are `root:root 755` ([`STEP-9` section 5](STEP-9-AMC-CONTROL.md#5-the-sudo-rule)) | 2026-11-16 | `sudo -n -l`; `stat` |
+| Step 9 automation settings | `layout.allowed_hosts` in `/opt/mv3dt/amc_control/amc_automation.yaml` is `[uegnaokrlmfsfthwhicl.supabase.co]`, the production `SUPABASE_URL` host; `check-config` passes and the service was restarted. No floor plan has been fetched yet | 2026-11-16 | `amc_automation.yaml`; `check-config` |
+| Tailnet HTTPS | `8443` serves tracking (`/health` 200), `8444` serves AMC control; Tailscale IPv4 `100.95.170.92` | 2026-11-16 | `curl` over the tailnet |
+| Web app AMC wiring | Web PR #34 (merge `852ebe6`) adds the ticket and calibration-spec routes. The Vercel deployment has `WORKSTATION_AMC_URL=https://p2bp-admin-workstation.tailafa4a7.ts.net:8444` beside the existing `WORKSTATION_TICKET_SECRET`. A ticket issued by the deployed app has **not yet been used** against the workstation | 2026-11-16 | `P2BP-25_26-Web` `main`; operator |
 
 > **Swapping cameras invalidates the inventory.** Link-local IPs change with
 > the hardware, so after connecting a different camera, refresh with
@@ -62,6 +67,7 @@ the encode, not a downscale.
 | v0.4.8 | Step 3's AMC readiness wait bounded at 1800 s, ending early if `auto-magic-calib-ms` stops, with its latest log line shown every 10 s (PR #84) |
 | v0.4.9 | Discovery sweeps only carrier-up interfaces holding an address in `CAMERA_SCAN_CIDR`, never `--localnet` (PR #85); Step 4 polls quietly (PR #86); Step 4 records calibration footage for an `INIT` project and deletes it after ingest (PRs #87, #88) |
 | v0.4.10 | Footage re-encoded to 1920x1080 H.264 `yuv420p` instead of stream-copied (PR #29); the `/release` command (PR #30) |
+| v0.4.25 | Step 9 AMC control service, gated by `MV3DT_AMC_CONTROL` (PR #67), with its sudo rule naming the root-owned installer binary (PR #69) |
 
 Step 4's ingest path ran on the workstation on 2026-10-20; its footage
 recorder (v0.4.9, v0.4.10) has not.
@@ -89,14 +95,11 @@ operator work; do not claim software automation has completed them.
 
 To resume on the workstation:
 
-1. **Install v0.4.12 without resetting state**
-   ([`installer/README.md` §3](../README.md#3-download-verify-run)).
-2. **Re-run Step 4 and Step 5** with `--reset-step 4`, then `--reset-step 5`,
-   then a normal `--verbose` run. Step 4 re-renders the pipeline configs from
-   the corrected templates and downloads the ReID model; Step 5 regenerates
-   the wrappers. The run also refreshes `<install_dir>/bin/mv3dt-installer`.
-3. **Start the pipeline and watch the broker** for messages on
-   `mv3dt/Kevin-House/sv3d`, then record the result in the table above.
+1. **Exercise AMC start and stop from the web app** after its next deploy,
+   which runs the sudo rule for the first time, then record the result in
+   the table above.
+2. **Run a calibration-spec automation** to confirm the floor plan download
+   passes `layout.allowed_hosts`.
 
 Do not use `--reset-state`, purge NVIDIA packages, or delete AMC data. Treat
 any failure as evidence to diagnose from the full transcript before changing
@@ -131,18 +134,18 @@ the binary and attaches it plus a `.sha256` to the release. The version in
 | Area | State | Where it lives |
 |---|---|---|
 | Framework (state machine, config, privilege, reboot, logging) | Implemented | `mv3dt_installer/*.py` |
-| Steps 1-7 lifecycle (`preflight`/`run`/`verify`/`report`) | Implemented | `mv3dt_installer/steps/step*.py` |
+| Steps 1-9 lifecycle (`preflight`/`run`/`verify`/`report`) | Implemented | `mv3dt_installer/steps/step*.py` |
 | Progress renderer, bars, spinner, window | Implemented | `mv3dt_installer/progress.py` |
 | Streaming command output through `run_root` | Implemented and wired | `app.py`, `shellout.py` |
-| Step and phase banner | Implemented and wired | `app.py`, all seven steps |
+| Step and phase banner | Implemented and wired | `app.py`, all nine steps |
 | Download byte adapter (`follow_download`) | Implemented and wired | `progress.py`, `progress_exec.py`, Steps 1-2 |
 | apt percentage adapter (`follow_apt`) | Implemented and wired | `progress.py`, `progress_exec.py`, Steps 1-2 |
 | Desktop-safe NVIDIA driver handoff | Implemented and wired | Step 1, `assets/systemd/mv3dt-driver-handoff.*` |
 | Authenticated NGC Catalog API download for PeopleNet | Implemented and wired | Step 2 |
 | Failure context block, refusal evidence | Implemented, **call sites not retrofitted** | `report.py` |
 | Docker pull progress | Not started, open decision | — |
-| Step 8 tracking history (recorder + read-only tailnet API) | Specified, **not implemented, not run on the workstation** | [`STEP-8`](STEP-8-TRACKING-HISTORY.md) |
-| Step 9 AMC control service (start, stop and automate AMC from the web app) | Implemented and unit-tested, **not run on the workstation**; gate `off` there | [`STEP-9`](STEP-9-AMC-CONTROL.md) |
+| Step 8 tracking history (recorder + read-only tailnet API) | Implemented; `COMPLETE` and running on the workstation | [`STEP-8`](STEP-8-TRACKING-HISTORY.md) |
+| Step 9 AMC control service (start, stop and automate AMC from the web app) | Implemented; installed and health-checked on the workstation, **AMC start and stop not yet exercised** | [`STEP-9`](STEP-9-AMC-CONTROL.md) |
 | Live baseline and edit protection (managed files, tuned templates, fusion/dewarper/viewer render, AMC 3.3.0, watchdog) | Specified, **not implemented, not run on the workstation** | [`LIVE-BASELINE-AND-EDIT-PROTECTION`](LIVE-BASELINE-AND-EDIT-PROTECTION.md) |
 | Tracking fusion and cleaning (fused people, `cleaning.json`, learned offsets, zone suggestions, upgrade fixes) | Specified, **not implemented, not run on the workstation** | [`TRACKING-FUSION-AND-CLEANING`](TRACKING-FUSION-AND-CLEANING.md) |
 
@@ -179,9 +182,9 @@ Treat **any second failure** as a regression you introduced.
 
 ## 3. What has been developed
 
-### 3.1 The seven steps
+### 3.1 The nine steps
 
-All seven step modules implement the lifecycle contract in
+All nine step modules implement the lifecycle contract in
 [`00` §12](00-FRAMEWORK-AND-BOOTSTRAP.md#12-step-module-interface-the-contract-for-steps-15)
 and register into `STEP_REGISTRY` at import.
 
@@ -194,11 +197,13 @@ and register into `STEP_REGISTRY` at import.
 | 5 | `step5_per_project_exes.py` | [`STEP-5`](STEP-5-PER-PROJECT-EXES.md) |
 | 6 | `step6_remote_supervision.py` | [`STEP-6`](STEP-6-REMOTE-SUPERVISION.md) |
 | 7 | `step7_webapp_integration.py` | [`STEP-7`](STEP-7-WEBAPP-INTEGRATION.md) |
+| 8 | `step8_tracking_history.py` | [`STEP-8`](STEP-8-TRACKING-HISTORY.md) |
+| 9 | `step9_amc_control.py` | [`STEP-9`](STEP-9-AMC-CONTROL.md) |
 
 Line and test counts were removed from this table because they drift on each
 release; use the current tree and test suite for exact counts.
 
-Steps 6 and 7 are **gated off by default**
+Steps 6 through 9 are **gated off by default**
 ([`00` §3.4](00-FRAMEWORK-AND-BOOTSTRAP.md#34-opt-in-step-gates)) and
 complete immediately when their gate is `off`.
 
@@ -342,7 +347,7 @@ calibration result:
 The first successful calibration on the live workstation happened on
 2026-10-20 (`Living-Room`), and Step 4 ingested it; only its `verify()`
 failed, on a false alarm since fixed
-([Current workstation state](#current-workstation-state-last-verified-2026-10-20)).
+([Current workstation state](#current-workstation-state-last-verified-2026-11-16)).
 Step 4 passed on v0.4.11, and the pipeline ran by hand with the v0.4.12
 fixes. The next acceptance milestone is **observed MQTT track messages from
 the installer-rendered pipeline on v0.4.12**, then MV3DT fusion. Footage for that calibration was
@@ -384,8 +389,8 @@ the camera and browser-backed run.
 
 The immediate priority is the live acceptance path, in this order:
 
-1. Install v0.4.12, re-run Steps 4 and 5, and confirm track messages reach
-   Mosquitto on `mv3dt/Kevin-House/sv3d` with people in view.
+1. Confirm track messages reach Mosquitto on `mv3dt/Kevin-House/sv3d` with
+   people in view, now that `mv3dt-pipeline@living-room` runs under Step 6.
 2. **Configure MV3DT fusion.** The tracker template's `MV3DT:` keys
    (`mqttBrokerIP`, `mqttBrokerPort`) are not DeepStream settings; MV3DT
    peers communicate through a `Communicator` section
@@ -489,9 +494,11 @@ The arm64 test counts were confirmed by running the suite on 2026-10-20.
 The operator's 2026-09-25 v0.4.7 and v0.4.8 fresh-install runs are the latest
 workstation **transcripts**; no v0.4.9 or v0.4.10 transcript has been
 supplied. The camera, network, and project facts dated 2026-10-20 in
-[Current workstation state](#current-workstation-state-last-verified-2026-10-20)
+[Current workstation state](#current-workstation-state-last-verified-2026-11-16)
 come from live probes, a Step 4 transcript, AMC's API, and the operator's
-report that day.
+report that day. The facts dated 2026-11-16 come from an SSH session on
+the workstation that day: the v0.4.25 install, `--status`, `installer.conf`,
+`systemctl`, and `curl` against both tailnet services.
 
 - [apt `APT::Status-Fd`](https://manpages.debian.org/bookworm/apt/apt.conf.5.en.html)
   — **backs the apt integration described in [section 3.3](#33-the-progress-and-observability-subsystem)**:
