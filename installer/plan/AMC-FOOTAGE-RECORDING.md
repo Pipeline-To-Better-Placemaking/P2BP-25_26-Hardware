@@ -10,10 +10,17 @@ of [`AMC-WEB-PROJECTS` section 12](AMC-WEB-PROJECTS.md#12-out-of-scope--open-dec
 Today an automated run uploads whatever is in `<folder>/footage/` and waits
 for the user when that is empty. This spec lets the user **record new
 footage from every camera as part of starting a run**, straight into the
-project's folder. The AMC control service runs as the invoking user and
-cannot read the root-only camera credentials, so recording goes through
-**one new fixed sudo command** that validates a request file and records
-with root privileges dropped.
+project's folder. The AMC control service runs as the invoking user, and
+the camera credentials are root-only, so recording goes through **one new
+fixed sudo command** that validates a request file, reads the credentials
+and records with root privileges dropped.
+
+> **Accepted consequence (flagged):** `ffmpeg` runs as the service user with
+> the RTSP URL, password included, in its argv, readable through
+> `/proc/<pid>/cmdline` while it records. The service user is the operator
+> account, which entered that password at install and already runs the same
+> argv in Step 4, so this exposes nothing new to it; other local accounts
+> see it only where `/proc` is not mounted with `hidepid`.
 
 ---
 
@@ -81,7 +88,7 @@ Written by the service, atomically (temp file, `fsync`, `os.replace`), mode
 |---|---|
 | `schema_version` | exactly the integer `1` |
 | `folder` | matches [`AMC-WEB-PROJECTS` section 3](AMC-WEB-PROJECTS.md#3-folder-names-locked) |
-| `seconds` | integer, 30 to 1800 inclusive |
+| `seconds` | integer (not a boolean), 30 to 1800 inclusive |
 | `requested_at` | integer Unix seconds, at most 300 seconds old |
 
 The service deletes the file after the command exits; the root command never
@@ -92,14 +99,21 @@ root.
 
 ## 5. The `record-footage` command
 
-`mv3dt-installer record-footage --pending`, registered like the other
-subcommands, root required. In order:
+`mv3dt-installer record-footage --pending`. **REQUIRED — registered with
+`requires_root=False`**, like `watchdog`, so the framework's root startup
+(transcript log under `/var/lib/mv3dt-installer/logs`, `installer.conf` and
+`state.json` writes) never runs; the handler checks `os.geteuid() == 0`
+itself (else exit `2`), loads `installer.conf` read-only, and logs only to
+stderr. It is imported from `steps/step9_amc_control.py` so the frozen
+binary registers it. In order:
 
 1. **Who**: the service user is `SUDO_USER`; it must exist, not be root,
-   and own `<install_dir>/amc_projects` (else exit `2`).
-2. **Read the request** with `O_NOFOLLOW`: a regular file owned by that user,
-   at most 4 KiB, valid against [section 4](#4-the-request-file-required)
-   (else exit `2`).
+   and own `<install_dir>/amc_projects` (else exit `2`). The projects root is
+   always that default path; `AMC_PROJECTS_DIR` is not read under sudo.
+2. **Read the request** with `os.open(path, O_RDONLY | O_NOFOLLOW |
+   O_NONBLOCK)`, then check with `fstat` on the open descriptor: a regular
+   file owned by the user; read at most 4097 bytes and refuse more than 4096
+   (else exit `2`); validate against [section 4](#4-the-request-file-required).
 3. **Check the folder**: `<install_dir>/amc_projects/<folder>` and its
    `footage/` are directories, not symlinks, owned by the user, and the folder
    holds a regular `project.json` (else exit `2`).
@@ -111,41 +125,71 @@ subcommands, root required. In order:
    on the folder's filesystem (exit `1` when short).
 5. **Drop privileges, irrevocably**: `initgroups`, `setgid`, `setuid` to the
    user, then confirm `os.setuid(0)` fails. Everything after runs as the user.
-6. **Replace old footage**: move every `*.mp4` and `.mv3dt-footage.json` in
-   `footage/` into `footage/previous/`, emptying that directory first, so
-   one earlier recording is kept.
+6. **Set old footage aside**: move every `*.mp4` and `.mv3dt-footage.json` in
+   `footage/` into `footage/previous/`, emptying that directory first.
 7. **Record** with `footage.record(cameras, user=..., password=...,
    project_dir=<folder>/footage, project_name=<folder>, seconds=...)` and no
-   `user_prefix`; `SIGTERM` and `SIGINT` both cancel it (every `.part` file
-   removed, as in [`STEP-4-CALIBRATION-FOOTAGE` section 4](STEP-4-CALIBRATION-FOOTAGE.md#4-recording)).
+   `user_prefix`.
+8. **Restore on failure**: unless every camera succeeded, delete the clips
+   this run wrote and move `previous/` back into `footage/`, so a failed or
+   cancelled recording leaves the folder exactly as it was.
 
-**Output contract (REQUIRED)**, on stdout, one JSON object per line:
+**Cancel (REQUIRED).** The service cannot signal the root-owned `sudo`
+process, so cancellation goes through stdin: after the privilege drop a
+thread reads stdin, and a line `cancel` or end of file interrupts the
+recording (`_thread.interrupt_main()`, the `KeyboardInterrupt` path
+`footage.record` already handles, which stops every `ffmpeg` and removes
+every `.part` file). `SIGTERM` and `SIGINT` take the same path. Nothing may
+`SIGKILL` the command: that would orphan the `ffmpeg` children.
+
+**Per-camera errors.** `footage.record` keeps each failed camera's reason
+(the redacted `ffmpeg` stderr tail it already logs) on its result, so the
+command can report it; Step 4's use is unchanged.
+
+**Output contract (REQUIRED)**, on stdout, one JSON object per line, each
+flushed as written:
 
 | Line | When |
 |---|---|
 | `{"progress": 0.42}` | about once per second while recording |
-| `{"ok": true, "cancelled": false, "files": ["c1-left.mp4"], "failed": [], "seconds": 300}` | last line, always |
+| `{"ok": true, "cancelled": false, "reason": "", "files": ["c1-left.mp4"], "failed": [], "seconds": 300}` | last line, always, every field present |
 
-`failed` entries are `{"id", "ip", "error"}` with the password redacted.
-Exit codes: `0` recorded, `1` some camera failed or no room, `2` invalid
-request or setup, `3` cancelled. Diagnostics go to stderr.
+| Exit | `ok` | `cancelled` | `reason` | `failed` |
+|---|---|---|---|---|
+| `0` recorded | `true` | `false` | `""` | `[]` |
+| `1` camera failed or no room | `false` | `false` | what failed | `[{"id", "ip", "error"}]`, password redacted |
+| `2` invalid request or setup | `false` | `false` | which check failed | `[]` |
+| `3` cancelled | `false` | `true` | `"cancelled"` | `[]` |
+
+Diagnostics go to stderr. No final line means the command never ran, for
+example sudo refused it.
 
 ---
 
 ## 6. Service changes
 
 - **Start body**: `AutomationStart` gains optional `Record: {"Seconds": int}`
-  (30 to 1800; otherwise `400`). Absent keeps today's behaviour.
-- **Step 2 with `Record`** in `web_project` mode: write the request, run the
-  command (through `sudo -n` unless `AMC_USE_SUDO=0`, as the controller
-  does), set the step message from progress lines ("recording 2:10 of 5:00;
+  (30 to 1800; otherwise `400`). Absent keeps today's behaviour. `Record`
+  outside `web_project` mode is `400`.
+- **Step 2 with `Record`**: write the request, run the command (through
+  `sudo -n` unless `AMC_USE_SUDO=0`, as the controller does) with stdin a
+  pipe, set the step message from progress lines ("recording 2:10 of 5:00;
   keep people walking through every camera's view"), then delete the request
-  file. Exit `0` continues to the existing upload; any other exit fails the
-  step with the last line's reason and per-camera errors. `Record` outside
-  `web_project` mode is `400`.
-- **Cancel** during recording sends `SIGTERM` to the child and waits for it.
-- **Resume**: the job records `footage_recorded` (persisted), so Continue
-  never records again; a new recording needs a new run.
+  file. Exit `0` continues to the existing upload. Any other exit fails the
+  step with the final line's `reason` and per-camera errors; with no final
+  line, the message says the workstation refused or could not run the
+  recording command and shows the last stderr lines (re-running the installer
+  fixes a missing sudo line).
+- **Recorded clips** are uploaded in file-name order and `videos.order` is
+  ignored for them, since it names copied footage.
+- **Cancel** during recording writes `cancel` and closes the child's stdin,
+  then waits up to 60 seconds; the run ends cancelled.
+- **Timeout**: the service cancels the same way if the command runs longer
+  than `seconds + 180`, and fails the step if it still has not exited 60
+  seconds later. It never sends `SIGKILL`.
+- **Resume**: the job records `footage_recorded` (persisted). Continue never
+  records; after a failed recording step 2 stays failed and the user starts a
+  new run, so a partial set is never uploaded.
 - **Busy**: recording happens inside a run, so the existing one-AMC-user rule
   ([`AMC-WEB-PROJECTS` section 5](AMC-WEB-PROJECTS.md#5-provisioning))
   already keeps provisioning out.
@@ -185,10 +229,10 @@ request or setup, `3` cancelled. Diagnostics go to stderr.
 
 | Unit | Branch | Files touched | Depends on | Wave |
 |---|---|---|---|---|
-| F0 This spec | `feat/installer-footage-recording-plan` | this doc | none | 1 |
-| F1 Root command and sudo line | `feat/installer-record-footage-command` | `mv3dt_installer/record_footage.py`, `steps/step9_amc_control.py`, `tests/test_record_footage.py`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | F0 | 2 |
+| F0 This spec | `feat/installer-footage-recording-plan` | this doc, `AMC-WEB-PROJECTS.md` section 12 | none | 1 |
+| F1 Root command and sudo line | `feat/installer-record-footage-command` | `mv3dt_installer/record_footage.py`, `mv3dt_installer/footage.py`, `steps/step9_amc_control.py`, `tests/test_record_footage.py`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | F0 | 2 |
 | F2 Recording from step 2 | `feat/installer-amc-run-recording` | `mv3dt_amc_control/automation.py`, `models.py`, `api.py`, `tests/amc_control/test_amc_control_automation.py` | F0 | 2 |
-| F3 Record option on the Calibration page | `feat/calibration-record-footage` | `calibration/amcApi.ts`, `calibration/Calibration.tsx` | none | 2 |
+| F3 Record option on the Calibration page | `feat/calibration-record-footage` | `calibration/amcApi.ts`, `calibration/Calibration.tsx` | none | 1 |
 
 Paths: `mv3dt_installer/` and `steps/` are under `installer/`;
 `mv3dt_amc_control/` under `installer/mv3dt_installer/assets/amc_control/`;
@@ -196,8 +240,10 @@ Paths: `mv3dt_installer/` and `steps/` are under `installer/`;
 under `BetterPlacemaking.CLIENT.REACT/src/pages/projects/`.
 
 Serialization points: none inside the waves. F1 and F2 meet only at the
-request file and output contract (sections 4 and 5), and F3 meets F2 only
-at the start body (section 6), so all three build in parallel. F1 must ship
+request file, cancel channel and output contract (sections 4 and 5), and F3
+meets F2 only at the start body (section 6), so all three build in parallel;
+F3 is wave 1 because it lives in the other repository and needs nothing from
+F0's branch. F1 must ship
 in the same release as F2: without the sudo line, a run with `Record` fails
 at step 2 with sudo's refusal.
 
