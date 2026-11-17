@@ -107,6 +107,8 @@ class Job:
     amc_project_from_installer: bool = False
     # The web project's workstation folder in mode web_project, else "".
     folder: str = ""
+    # True once step 2 uploaded this run's videos, so Continue never sends them twice.
+    videos_uploaded: bool = False
     steps: list[dict] = field(default_factory=list)
     result: dict = field(default_factory=dict)
     started_at: int = field(default_factory=_now)
@@ -525,6 +527,8 @@ class CalibrationRunner:
     def _videos(self, cfg: AutomationConfig) -> list[tuple[str, Path]]:
         folder = self._footage_dir(cfg)
         found = {p.name: p for p in sorted(folder.glob(cfg.videos.pattern)) if p.is_file()}
+        if not found and self._job.folder:
+            return []  # web_project: the step waits for the user instead
         if cfg.videos.order:
             missing = [n for n in cfg.videos.order if n not in found]
             if missing:
@@ -533,8 +537,6 @@ class CalibrationRunner:
         else:
             paths = list(found.values())
         if not paths:
-            if self._job.folder:
-                return []  # web_project: the step waits for the user instead
             raise StepFailed(f"no footage matching {cfg.videos.pattern} in {folder}; record it with installer step 4")
         return [(f"cam_{i:02d}.mp4", p) for i, p in enumerate(paths)]
 
@@ -560,19 +562,33 @@ class CalibrationRunner:
         finally:
             client.close()
 
+    def _upload_videos(self, api: AmcApi, pid: str, videos: list[tuple[str, Path]]) -> str:
+        self._set_step("video_configuration", "running", f"uploading {len(videos)} videos")
+        api.upload_videos(pid, videos)
+        self._job.videos_uploaded = True
+        self._save()
+        return "uploaded " + ", ".join(f"{p.name} as {n}" for n, p in videos)
+
     def _video_configuration(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
-        web = bool(self._job.folder)
-        if resumed and not (web and cfg.videos.enabled and self._videos(cfg)):
-            # Done in AMC's UI, or (web_project) footage copied into the folder since the pause.
+        job = self._job
+        web = bool(job.folder)
+        pid = job.amc_project_id
+        if resumed:
+            # web_project: footage copied into the folder during the pause is uploaded now,
+            # unless this run already uploaded videos. Everything else was done in AMC's UI.
+            if web and cfg.videos.enabled and not job.videos_uploaded:
+                videos = self._videos(cfg)
+                if videos:
+                    note = self._upload_videos(api, pid, videos)
+                    return Outcome("done", f"{note}; the rest finished in AMC", done=note)
             return self._finished_in_amc("video_configuration")
-        pid = self._job.amc_project_id
         notes, todo = [], []
-        if cfg.videos.enabled:
+        if cfg.videos.enabled and job.videos_uploaded:  # a failed step 2 being retried
+            notes.append("videos already uploaded by this run")
+        elif cfg.videos.enabled:
             videos = self._videos(cfg)
             if videos:
-                self._set_step("video_configuration", "running", f"uploading {len(videos)} videos")
-                api.upload_videos(pid, videos)
-                notes.append("uploaded " + ", ".join(f"{p.name} as {n}" for n, p in videos))
+                notes.append(self._upload_videos(api, pid, videos))
             else:  # web_project only; the other modes fail in _videos
                 todo.append(f"Copy the footage ({cfg.videos.pattern}) into {self._footage_dir(cfg)} on the "
                             "workstation, or upload it in AMC's Video Configuration step, then press Continue")
@@ -583,9 +599,8 @@ class CalibrationRunner:
         else:
             png = self._layout_png(cfg)
             if png is None:
-                if not resumed:
-                    todo.append("Upload layout.png in AMC's Video Configuration step (this project has no "
-                                "floor plan in the web app)")
+                todo.append("Upload layout.png in AMC's Video Configuration step (this project has no "
+                            "floor plan in the web app)")
             else:
                 if web:
                     saved = self._folder() / "floorplan" / "layout.png"
