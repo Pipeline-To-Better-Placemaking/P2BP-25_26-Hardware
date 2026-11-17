@@ -4,6 +4,7 @@ Run from installer/: `python3 -m pytest tests/amc_control -v`
 """
 import io
 import json
+import sys
 import time
 
 import pytest
@@ -816,3 +817,333 @@ def test_web_project_videos_uploaded_flag_survives_a_restart(ws, web):
     fake.projects[WEB_AMC_ID]["layout"] = PNG
     assert runner2.resume()["State"] == "completed"
     assert len(calls(fake, "upload_video_files")) == 1
+
+
+# ---------------------------------------------------------------- web_project cancel undoes the run
+# installer/plan/AMC-PROJECT-LIFECYCLE.md section 5.
+CANCELLING = "Cancelling: undoing this run"
+NEW_AMC_ID = "20260001"   # the fake AMC's first create_project id
+
+# Stands in for `record-footage --pending` (AMC-FOOTAGE-RECORDING.md section 5): sets the
+# old clips and manifest aside in previous/, then records a.mp4 (the same name as an old
+# clip) and c.mp4 with a new manifest.
+UNDO_RECORDER = r'''
+import json, os, sys
+footage = sys.argv[1]
+prev = os.path.join(footage, "previous")
+os.makedirs(prev, exist_ok=True)
+for name in os.listdir(footage):
+    if name.endswith(".mp4") or name == ".mv3dt-footage.json":
+        os.replace(os.path.join(footage, name), os.path.join(prev, name))
+for name in ("a.mp4", "c.mp4", ".mv3dt-footage.json"):
+    with open(os.path.join(footage, name), "wb") as fh:
+        fh.write(b"recorded")
+print(json.dumps({"ok": True, "cancelled": False, "reason": "", "files": ["a.mp4", "c.mp4"],
+                  "failed": [], "seconds": 60}), flush=True)
+'''
+
+
+def recording_runner(ws, web, overrides=WEB):
+    _, folder, _ = web
+    script = ws[0] / "undo_recorder.py"
+    script.write_text(UNDO_RECORDER)
+    runner = web_runner(ws, web, overrides)
+    runner._record_argv = lambda: [sys.executable, str(script), str(folder / "footage")]
+    return runner
+
+
+def paused_recorded_run(ws, web):
+    """A web_project run that recorded footage, uploaded it and paused for the layout."""
+    _, folder, fake = web
+    (folder / "footage" / ".mv3dt-footage.json").write_bytes(b"old manifest")
+    runner = recording_runner(ws, web)
+    job = runner.start(spec(floorplan=False), record_seconds=60)
+    assert job["State"] == "waiting_for_user", job
+    assert calls(fake, "upload_video_files")
+    return runner
+
+
+def job_file(runner):
+    return json.loads(runner.state_path.read_text())
+
+
+def assert_old_footage_back(folder):
+    footage = folder / "footage"
+    assert sorted(p.name for p in footage.iterdir()) == [".mv3dt-footage.json", "a.mp4", "b.mp4", "notes.txt"]
+    assert (footage / "a.mp4").read_bytes() == b"video"      # the old clip, not the recorded one
+    assert (footage / ".mv3dt-footage.json").read_bytes() == b"old manifest"
+
+
+def test_cancel_of_a_paused_run_resets_amc_and_restores_footage(ws, web):
+    store, folder, fake = web
+    runner = paused_recorded_run(ws, web)
+    saved = job_file(runner)
+    assert saved["amc_changed"] is True and saved["recorded_files"] == ["a.mp4", "c.mp4"]
+    (folder / "floorplan" / "layout.png").write_bytes(PNG)
+    (folder / "alignment" / "alignment_data.json").write_text("[]")
+    (folder / "calibration" / "20260101T000000Z").mkdir()
+
+    job = runner.cancel()
+    assert job["State"] == "cancelled", job
+    assert "AMC project was reset to empty" in job["Message"] and NEW_AMC_ID in job["Message"]
+    assert "earlier footage moved back" in job["Message"]
+    # AMC: the run's project stopped, deleted, replaced by an empty one named after the folder.
+    assert calls(fake, "stop_calibration") == [{"pid": WEB_AMC_ID}]
+    assert calls(fake, "delete_project") == [{"pid": WEB_AMC_ID}]
+    assert calls(fake, "create_project") == [{"name": "living-room"}]
+    assert WEB_AMC_ID not in fake.projects and fake.projects[NEW_AMC_ID]["state"] == "INIT"
+    b = store.get_by_folder("living-room")
+    assert b.amc_project_id == NEW_AMC_ID and b.amc_project_name == "living-room" and b.state == STATE_READY
+    assert b.calib_runs == 0
+    # Footage: the recorded clips gone, the earlier ones back, previous/ removed.
+    assert_old_footage_back(folder)
+    # Kept: project inputs, earlier results, the run record.
+    assert (folder / "floorplan" / "layout.png").exists()
+    assert (folder / "alignment" / "alignment_data.json").exists()
+    assert (folder / "calibration" / "20260101T000000Z").is_dir()
+    record = json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())
+    assert record["State"] == "cancelled" and record["Message"] == job["Message"]
+    saved = job_file(runner)
+    assert saved["cancelling"] is False and saved["reset_amc_project_id"] == NEW_AMC_ID
+    assert saved["undone"] == ["amc_deleted", "amc_created", "amc_bound", "footage_cleared", "footage_restored"]
+    # A new run uses the new AMC project.
+    assert runner.start(spec(floorplan=False))["AmcProjectId"] == NEW_AMC_ID
+
+
+def test_cancel_of_a_running_run_undoes_it_on_the_run_thread(ws, web):
+    store, folder, fake = web
+    amc_saved_alignment(ws)
+    fake.running_polls = 10 ** 9            # AMC calibrates until the run is cancelled
+    runner = web_runner(ws, web)
+    runner._threaded = True
+    runner.start(spec())
+    deadline = time.time() + 20
+    while not calls(fake, "calibrate"):
+        assert time.time() < deadline
+        time.sleep(0.02)
+
+    job = runner.cancel()
+    assert job["State"] == "running" and job["Message"] == CANCELLING
+    assert runner.cancel()["Message"] == CANCELLING          # a second cancel changes nothing
+    with pytest.raises(automation_mod.NothingToResume):
+        runner.resume()
+    runner.join(20)
+    job = runner.status()
+    assert job["State"] == "cancelled", job
+    assert calls(fake, "stop_calibration") == [{"pid": WEB_AMC_ID}]
+    assert len(calls(fake, "create_project")) == 1
+    assert store.get_by_folder("living-room").amc_project_id == NEW_AMC_ID
+    assert job["Steps"][5]["State"] == "pending"
+    assert json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())["State"] == "cancelled"
+
+
+def test_cancel_before_amc_was_changed_leaves_amc_alone(ws, web):
+    store, folder, fake = web
+    for f in (folder / "footage").iterdir():
+        f.unlink()
+    runner = web_runner(ws, web, {**WEB, "parameters": {"enabled": False}})
+    job = runner.start(spec(floorplan=False))            # nothing to upload: the run only waits
+    assert job["State"] == "waiting_for_user"
+    assert job_file(runner)["amc_changed"] is False
+    job = runner.cancel()
+    assert job["State"] == "cancelled" and job["Message"] == "Cancelled. Nothing needed undoing."
+    assert calls(fake, "delete_project") == [] and calls(fake, "stop_calibration") == []
+    assert store.get_by_folder("living-room").amc_project_id == WEB_AMC_ID
+
+
+def test_cancel_removes_this_runs_results_only(ws, web, monkeypatch):
+    store, folder, fake = web
+    amc_saved_alignment(ws)
+    fake.with_gt = True
+    (folder / "calibration" / "20260101T000000Z").mkdir()
+
+    def broken(*a, **kw):
+        raise automation_mod.AmcApiError("result download failed")
+
+    monkeypatch.setattr(automation_mod.AmcApi, "mv3dt_result", broken)
+    runner = web_runner(ws, web)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and job["Steps"][6]["State"] == "failed"
+    stamp = job_file(runner)["calibration_dir"]
+    assert (folder / "calibration" / stamp / "evaluation_statistics.json").exists()
+
+    job = runner.cancel()
+    assert job["State"] == "cancelled", job
+    assert "calibration results were removed" in job["Message"]
+    assert [p.name for p in (folder / "calibration").iterdir()] == ["20260101T000000Z"]
+    assert "results_removed" in job_file(runner)["undone"]
+    assert json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())["State"] == "cancelled"
+    assert not (folder / "calibration" / stamp).exists()   # the run record did not recreate it
+
+
+def test_retried_results_step_reuses_its_folder(ws, web, monkeypatch):
+    _, folder, _ = web
+    amc_saved_alignment(ws)
+    real = automation_mod.AmcApi.mv3dt_result
+
+    def broken(*a, **kw):
+        raise automation_mod.AmcApiError("down")
+
+    monkeypatch.setattr(automation_mod.AmcApi, "mv3dt_result", broken)
+    runner = web_runner(ws, web)
+    assert runner.start(spec())["State"] == "failed"
+    stamp = job_file(runner)["calibration_dir"]
+    monkeypatch.setattr(automation_mod.AmcApi, "mv3dt_result", real)
+    time.sleep(1.1)                                      # a new attempt would get a new stamp
+    assert runner.resume()["State"] == "completed"
+    assert [p.name for p in (folder / "calibration").iterdir()] == [stamp]
+
+
+def test_create_failure_after_delete_leaves_a_failed_binding_without_an_amc_project(ws, web, monkeypatch):
+    store, folder, fake = web
+    runner = paused_recorded_run(ws, web)
+
+    def refused(*a, **kw):
+        raise automation_mod.AmcApiError("create_project failed: disk full")
+
+    monkeypatch.setattr(automation_mod.AmcApi, "create_project", refused)
+    job = runner.cancel()
+    assert job["State"] == "cancelled"
+    assert job["Message"].startswith("Cancelled, but the AMC project could not be reset: ")
+    assert "disk full" in job["Message"] and "earlier footage moved back" in job["Message"]
+    b = store.get_by_folder("living-room")
+    assert b.state == STATE_FAILED and b.amc_project_id is None and "disk full" in b.error
+    assert WEB_AMC_ID not in fake.projects
+    assert_old_footage_back(folder)
+
+
+def test_amc_not_ready_leaves_the_amc_project_as_it_is(ws, web):
+    store, folder, fake = web
+    runner = paused_recorded_run(ws, web)
+    fake.ready = False
+    write_config(ws[0], {**WEB, "amc": {"ready_timeout_seconds": 0}})
+    job = runner.cancel()
+    assert job["State"] == "cancelled"
+    assert "the AMC project could not be reset: AMC did not become ready within 0 s" in job["Message"]
+    assert runner.controller.started == 1
+    assert calls(fake, "delete_project") == [] and calls(fake, "create_project") == []
+    b = store.get_by_folder("living-room")
+    assert b.amc_project_id == WEB_AMC_ID and b.state == STATE_READY
+    assert_old_footage_back(folder)                      # the rest is still undone
+
+
+def test_delete_failure_leaves_the_amc_project_as_it_is(ws, web):
+    store, _, fake = web
+    runner = paused_recorded_run(ws, web)
+    fake.delete_status = 500
+    job = runner.cancel()
+    assert "could not delete AMC project" in job["Message"]
+    assert calls(fake, "create_project") == []
+    assert store.get_by_folder("living-room").amc_project_id == WEB_AMC_ID
+    assert "amc_deleted" not in job_file(runner)["undone"]
+
+
+def test_amc_404_on_delete_counts_as_deleted(ws, web):
+    store, _, fake = web
+    runner = paused_recorded_run(ws, web)
+    del fake.projects[WEB_AMC_ID]
+    assert runner.cancel()["State"] == "cancelled"
+    assert store.get_by_folder("living-room").amc_project_id == NEW_AMC_ID
+
+
+def cut_off(runner, undone, **fields):
+    """Rewrite the job file as if the service died during the undo after `undone`."""
+    state = job_file(runner)
+    state.update(state="running", message=CANCELLING, cancelling=True, undone=list(undone), **fields)
+    runner.state_path.write_text(json.dumps(state))
+
+
+def test_restart_after_amc_deleted_creates_one_project(ws, web):
+    store, folder, fake = web
+    runner = paused_recorded_run(ws, web)
+    del fake.projects[WEB_AMC_ID]
+    cut_off(runner, ["amc_deleted"])
+    fake.calls.clear()
+
+    job = web_runner(ws, web).status()                   # the restarted service carries on
+    assert job["State"] == "cancelled", job
+    assert calls(fake, "stop_calibration") == [] and calls(fake, "delete_project") == []
+    assert calls(fake, "create_project") == [{"name": "living-room"}]
+    assert store.get_by_folder("living-room").amc_project_id == NEW_AMC_ID
+    assert_old_footage_back(folder)
+
+
+def test_restart_after_amc_created_reuses_the_saved_project(ws, web):
+    store, folder, fake = web
+    runner = paused_recorded_run(ws, web)
+    del fake.projects[WEB_AMC_ID]
+    fake.add_project("20269999", "living-room")
+    cut_off(runner, ["amc_deleted", "amc_created"], reset_amc_project_id="20269999")
+    fake.calls.clear()
+
+    job = web_runner(ws, web).status()
+    assert job["State"] == "cancelled", job
+    assert fake.calls == []                              # AMC is not touched at all
+    assert store.get_by_folder("living-room").amc_project_id == "20269999"
+    assert "20269999" in job["Message"]
+    assert_old_footage_back(folder)
+
+
+def test_restart_after_footage_cleared_never_deletes_the_older_footage(ws, web):
+    store, folder, fake = web
+    runner = paused_recorded_run(ws, web)
+    footage = folder / "footage"
+    # The undo got as far as deleting the recorded clips and moving a.mp4 back.
+    for name in ("a.mp4", "c.mp4", ".mv3dt-footage.json"):
+        (footage / name).unlink()
+    (footage / "previous" / "a.mp4").rename(footage / "a.mp4")
+    del fake.projects[WEB_AMC_ID]
+    fake.add_project(NEW_AMC_ID, "living-room")
+    store.update("living-room", amc_project_id=NEW_AMC_ID)
+    cut_off(runner, ["amc_deleted", "amc_created", "amc_bound", "footage_cleared"],
+            reset_amc_project_id=NEW_AMC_ID)
+    fake.calls.clear()
+
+    job = web_runner(ws, web).status()
+    assert job["State"] == "cancelled", job
+    assert fake.calls == []
+    assert_old_footage_back(folder)                      # a.mp4 (a recorded clip's name) kept
+    assert job_file(runner)["undone"][-1] == "footage_restored"
+
+
+def test_a_cancelling_job_cannot_be_continued(ws, web, monkeypatch):
+    runner = paused_recorded_run(ws, web)
+    cut_off(runner, [])
+    runner2 = web_runner(ws, web)
+    started = []
+    monkeypatch.setattr(runner2, "_start_undo", started.append)   # the undo is still running
+    assert runner2.status()["State"] == "running" and runner2.status()["Message"] == CANCELLING
+    assert len(started) == 1
+    with pytest.raises(automation_mod.NothingToResume):
+        runner2.resume()
+    with pytest.raises(automation_mod.Busy):
+        runner2.start(spec())
+    assert runner2.uses_amc()
+
+
+def test_job_file_without_the_cancel_fields_still_loads(ws, web):
+    _, _, fake = web
+    runner = web_runner(ws, web)
+    job = runner.start(spec(floorplan=False))
+    state = job_file(runner)
+    for key in ("amc_changed", "recorded_files", "calibration_dir", "cancelling", "undone",
+                "reset_amc_project_id"):
+        del state[key]
+    runner.state_path.write_text(json.dumps(state))
+    runner2 = web_runner(ws, web)
+    assert runner2.status()["JobId"] == job["JobId"]
+    assert runner2._job.undone == [] and runner2._job.cancelling is False
+    assert runner2.cancel()["State"] == "cancelled"
+    assert calls(fake, "delete_project") == []           # amc_changed defaults to false
+
+
+def test_other_modes_keep_the_plain_cancel(ws):
+    tmp_path, _ = ws
+    (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")
+    runner, fake = make_runner(ws, {"layout": {"allowed_hosts": ["abc.supabase.co"]}})
+    assert runner.start(spec())["State"] == "waiting_for_user"
+    job = runner.cancel()
+    assert job["State"] == "cancelled" and job["Message"] == "Cancelled."
+    assert calls(fake, "delete_project") == [] and calls(fake, "stop_calibration") == []
+    saved = job_file(runner)
+    assert saved["amc_changed"] is False and saved["undone"] == []
