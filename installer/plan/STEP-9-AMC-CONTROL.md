@@ -18,6 +18,11 @@ alignment. **Step 9 installs the service that does this on the workstation.**
 AMC is not streamed or proxied: the service only controls it, and the user's
 browser loads AMC's own UI directly.
 
+> **Extended by [`AMC-WEB-PROJECTS.md`](AMC-WEB-PROJECTS.md):** one AMC
+> project and workstation folder per web app project, created from the web
+> app and locked for every later run. Where the two differ, that spec wins
+> once implemented.
+
 ---
 
 ## 1. Module identity and scope
