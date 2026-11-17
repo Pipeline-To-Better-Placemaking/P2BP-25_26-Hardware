@@ -283,10 +283,10 @@ The binding on the wire is `project.json` without `schema_version`, plus
 |---|---|---|---|---|
 | P0 This spec | `feat/installer-amc-web-projects-plan` | this doc, a pointer in `STEP-9-AMC-CONTROL.md` | none | 1 |
 | W1 Folder column | `feat/workstation-folder-column` | `src/db/schema/core.ts`, `supabase/migrations/`, project service, `project.routes.ts`, their tests | none | 1 |
-| H1 Project store | `feat/installer-amc-project-store` | `mv3dt_amc_control/projects.py`, `cli.py`, `tests/amc_control/test_amc_control_projects.py` | P0 | 2 |
-| H2 Ticket scopes and any project | `feat/installer-amc-ticket-scopes` | `mv3dt_amc_control/auth.py`, `settings.py`, `calibration_spec.py`, `api.py` (ticket dependency only), `tests/amc_control/test_amc_control_api.py` | P0 | 2 |
+| H1 Project store | `feat/installer-amc-project-store` | `mv3dt_amc_control/projects.py`, `tests/amc_control/test_amc_control_projects.py` | P0 | 2 |
+| H2 Ticket scopes and any project | `feat/installer-amc-ticket-scopes` | `mv3dt_amc_control/auth.py`, `settings.py`, `cli.py` (required settings only), `calibration_spec.py`, `api.py` (ticket dependency only), `tests/amc_control/test_amc_control_api.py` | P0 | 2 |
 | W2 Provision route and spec folder | `feat/workstation-provision-route` | `workstation.routes.ts`, `calibrationSpecService.ts`, ticket service, their tests | W1 | 2 |
-| H3 Provisioning and file routes | `feat/installer-amc-provisioning` | `mv3dt_amc_control/provisioning.py`, `api.py`, `models.py`, `tests/amc_control/test_amc_control_provisioning.py` | H1, H2 | 3 |
+| H3 Provisioning and file routes | `feat/installer-amc-provisioning` | `mv3dt_amc_control/provisioning.py`, `api.py`, `models.py`, `cli.py` (the `projects` command), `tests/amc_control/test_amc_control_provisioning.py` | H1, H2 | 3 |
 | H4 Locked automation | `feat/installer-amc-locked-runs` | `mv3dt_amc_control/automation.py`, `automation_config.py`, `amc_automation.example.yaml`, `tests/amc_control/test_amc_control_automation.py` | H1, H2 | 3 |
 | W3 Folder at creation and client API | `feat/project-workstation-folder-ui` | `ProjectForm.tsx`, `ProjectsList.tsx`, `projectTypes.ts`, `calibration/amcApi.ts` | W2 | 3 |
 | H5 Step 9 projects root | `feat/installer-step9-projects-root` | `steps/step9_amc_control.py`, `assets/systemd/mv3dt-amc-control.service.in`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | H4 | 4 |
@@ -297,8 +297,9 @@ Hardware paths are relative to `installer/mv3dt_installer/` (tests to
 `BetterPlacemaking.CLIENT.REACT/src/pages/projects/`. W units live in
 `P2BP-25_26-Web` and stack only on each other.
 
-Serialization points: `api.py` is touched by H2 (the dependency signature)
-and H3 (the routes), so H3 waits for H2. H3 and H4 both read H1's store but
+Serialization points: `api.py` and `cli.py` are touched by H2 (the ticket
+dependency, the required settings) and H3 (the routes, the `projects`
+command), so H3 waits for H2. H3 and H4 both read H1's store but
 touch disjoint files. H5 seeds `project.mode: web_project`, a value only H4's
 settings schema accepts, so H5 stacks on H4 and merges after it; H5 also
 edits `STEP-9-AMC-CONTROL.md` after P0's pointer. W3 owns every `amcApi.ts`
