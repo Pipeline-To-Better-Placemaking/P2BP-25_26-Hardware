@@ -1,6 +1,7 @@
 """Runs AMC 3.3.0's seven-step workflow, pausing only where a person is needed.
 
-    1 Project Setup        automated: reuse the installer's AMC project or create one
+    1 Project Setup        automated: reuse the installer's AMC project, create one, or use
+                           the web project's bound AMC project (mode web_project)
     2 Video Configuration  automated: installer footage as cam_00.mp4..., floor plan as layout.png
     3 Parameters           automated: settings file, scale from the floor plan, focal lengths
     4 Rectification        automated when configured (mode api), otherwise done in the UI
@@ -12,11 +13,17 @@ Every step that needs a person is marked "waiting". Steps 1-5 all run first,
 so everything that can be uploaded is uploaded; the run then pauses before
 step 6 until the user presses Continue. Progress is saved to disk after every
 change, so a run can be continued after the service restarts.
+
+In project.mode web_project a run is locked to the web project's workstation
+folder and its AMC project (installer/plan/AMC-WEB-PROJECTS.md section 6):
+footage comes from <folder>/footage/, results go to <folder>/calibration/,
+and every finished run leaves <folder>/runs/<job id>.json.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -31,6 +38,7 @@ from .controller import _read_conf
 from .amc_api import AmcApi, AmcApiError, default_base_url
 from .automation_config import AutomationConfig, ConfigError, load_config
 from .calibration_spec import CalibrationSpec, SpecError, download_floorplan_png
+from .projects import STATE_READY, ProjectNotFound, ProjectStore, default_projects_root
 
 STEPS: list[tuple[str, int, str]] = [
     ("project_setup", 1, "Project Setup"),
@@ -45,10 +53,16 @@ STEPS: list[tuple[str, int, str]] = [
 GATED = {"execute", "results"}
 ACTIVE = {"running"}
 RESUMABLE = {"waiting_for_user", "failed", "interrupted"}
+TERMINAL = {"completed", "failed", "cancelled"}
+WEB_PROJECT = "web_project"
 
 
 class Busy(RuntimeError):
     pass
+
+
+class NotProvisioned(Busy):
+    """The web project has no ready workstation folder (a 409 like Busy)."""
 
 
 class NothingToResume(RuntimeError):
@@ -91,6 +105,8 @@ class Job:
     amc_project_id: str = ""
     amc_project_name: str = ""
     amc_project_from_installer: bool = False
+    # The web project's workstation folder in mode web_project, else "".
+    folder: str = ""
     steps: list[dict] = field(default_factory=list)
     result: dict = field(default_factory=dict)
     started_at: int = field(default_factory=_now)
@@ -158,8 +174,10 @@ class CalibrationRunner:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
         threaded: bool = True,
+        store: ProjectStore | None = None,
     ):
         self.controller = controller
+        self.store = store if store is not None else ProjectStore(default_projects_root())
         self._load_config = config_loader
         self._http_factory = http_client_factory
         self._download_factory = download_client_factory
@@ -225,13 +243,22 @@ class CalibrationRunner:
             return bool(self._job and self._job.state in ACTIVE | {"waiting_for_user"})
 
     def start(self, spec: CalibrationSpec) -> dict:
-        self.config()  # fail before creating a job if the config is broken
+        cfg = self.config()  # fail before creating a job if the config is broken
         with self._lock:
             self._load_once()
             if self._job and self._job.state in ACTIVE:
                 raise Busy("a calibration run is already in progress")
             if self._job and self._job.state == "waiting_for_user":
                 raise Busy("a calibration run is waiting for its manual steps; continue or cancel it first")
+            folder = ""
+            if cfg.project.mode == WEB_PROJECT:
+                binding = self.store.get_by_pid(spec.project_id)
+                if binding is None or binding.state != STATE_READY:
+                    raise NotProvisioned("set this project up on the workstation first")
+                if spec.folder is not None and spec.folder != binding.folder:
+                    raise SpecError(f"calibration spec folder {spec.folder!r} does not match this "
+                                    f"project's workstation folder {binding.folder!r}")
+                folder = binding.folder
             fp = spec.floorplan
             self._job = Job(
                 job_id=uuid.uuid4().hex[:12],
@@ -241,6 +268,7 @@ class CalibrationRunner:
                 floorplan=asdict(fp) if fp else None,
                 steps=_new_steps(),
                 message="Starting",
+                folder=folder,
             )
             self._save()
             self._launch()
@@ -292,7 +320,48 @@ class CalibrationRunner:
         with self._lock:
             if self._job:
                 self._job.state, self._job.message = state, message
+                if self._job.folder and state in TERMINAL:
+                    self._close_web_project_run()
                 self._save()
+
+    def _folder(self) -> Path:
+        return self.store.folder_path(self._job.folder)
+
+    def _close_web_project_run(self) -> None:
+        """Copy the alignment back, count the run and leave runs/<job id>.json.
+
+        Best effort: the run's outcome is already decided, so a problem here is
+        added to the job's message rather than changing its state.
+        """
+        job = self._job
+        problems = []
+        if job.state == "completed":
+            saved = self._amc_saved_alignment()
+            if saved is not None:
+                try:
+                    dest = self._folder() / "alignment" / "alignment_data.json"
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(saved, dest)
+                except OSError as e:
+                    problems.append(f"could not copy the alignment into the folder: {e}")
+            try:
+                current = self.store.get_by_folder(job.folder)
+                if current is None:
+                    raise ProjectNotFound(f"no project bound to folder {job.folder!r}")
+                self.store.update(job.folder, last_run_at=_now(), calib_runs=current.calib_runs + 1)
+            except (ProjectNotFound, OSError, ValueError) as e:
+                problems.append(f"could not update the project record: {e}")
+        if problems:
+            job.message = "; ".join([job.message, *problems])
+        try:
+            runs = self._folder() / "runs"
+            runs.mkdir(parents=True, exist_ok=True)
+            job.updated_at = _now()
+            tmp = runs / f".{job.job_id}.json.tmp"
+            tmp.write_text(json.dumps(job.public(), indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, runs / f"{job.job_id}.json")
+        except OSError:
+            pass  # the service's state file still holds the run
 
     def _set_step(self, key: str, state: str, message: str = "", done: str | None = None,
                   needs_user: bool = False) -> None:
@@ -410,7 +479,20 @@ class CalibrationRunner:
         job = self._job
         conf = self._conf()
         note = ""
-        if cfg.project.mode == "reuse_installer_project" and conf.get("AMC_PROJECT_ID"):
+        if job.folder:
+            binding = self.store.get_by_folder(job.folder)
+            if binding is None or binding.state != STATE_READY or not binding.amc_project_id \
+                    or binding.project_id != job.project_id:
+                raise StepFailed(f"workstation folder {job.folder} is no longer set up for this project; "
+                                 "set it up on the workstation again")
+            pid, name = binding.amc_project_id, binding.amc_project_name or job.folder
+            try:
+                api.get_project_info(pid)
+            except AmcApiError as e:
+                raise StepFailed(f"the AMC project {pid} for workstation folder {job.folder} is not in AMC "
+                                 f"({e}); it is never recreated automatically") from e
+            note = f"using workstation folder {job.folder}'s AMC project"
+        elif cfg.project.mode == "reuse_installer_project" and conf.get("AMC_PROJECT_ID"):
             pid = conf["AMC_PROJECT_ID"]
             api.get_project_info(pid)  # must exist
             name = conf.get("PROJECT_NAME", "")
@@ -431,6 +513,8 @@ class CalibrationRunner:
 
     # ---- step 2 ---------------------------------------------------------------
     def _footage_dir(self, cfg: AutomationConfig) -> Path:
+        if self._job.folder:
+            return self._folder() / "footage"
         if cfg.videos.source != "installer":
             return cfg.resolve(cfg.videos.source)
         conf = self._conf()
@@ -449,6 +533,8 @@ class CalibrationRunner:
         else:
             paths = list(found.values())
         if not paths:
+            if self._job.folder:
+                return []  # web_project: the step waits for the user instead
             raise StepFailed(f"no footage matching {cfg.videos.pattern} in {folder}; record it with installer step 4")
         return [(f"cam_{i:02d}.mp4", p) for i, p in enumerate(paths)]
 
@@ -462,6 +548,10 @@ class CalibrationRunner:
             return data
         fp = self._job.floorplan
         if not fp:
+            if self._job.folder:  # the floor plan saved when the folder was set up
+                saved = self._folder() / "floorplan" / "layout.png"
+                if saved.is_file():
+                    return saved.read_bytes()
             return None
         from .calibration_spec import Floorplan
         client = self._download_factory()
@@ -471,26 +561,40 @@ class CalibrationRunner:
             client.close()
 
     def _video_configuration(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
-        if resumed:
+        web = bool(self._job.folder)
+        if resumed and not (web and cfg.videos.enabled and self._videos(cfg)):
+            # Done in AMC's UI, or (web_project) footage copied into the folder since the pause.
             return self._finished_in_amc("video_configuration")
         pid = self._job.amc_project_id
-        notes = []
+        notes, todo = [], []
         if cfg.videos.enabled:
             videos = self._videos(cfg)
-            self._set_step("video_configuration", "running", f"uploading {len(videos)} videos")
-            api.upload_videos(pid, videos)
-            notes.append("uploaded " + ", ".join(f"{p.name} as {n}" for n, p in videos))
+            if videos:
+                self._set_step("video_configuration", "running", f"uploading {len(videos)} videos")
+                api.upload_videos(pid, videos)
+                notes.append("uploaded " + ", ".join(f"{p.name} as {n}" for n, p in videos))
+            else:  # web_project only; the other modes fail in _videos
+                todo.append(f"Copy the footage ({cfg.videos.pattern}) into {self._footage_dir(cfg)} on the "
+                            "workstation, or upload it in AMC's Video Configuration step, then press Continue")
         else:
             notes.append("video upload is off in the config")
         if not cfg.layout.enabled:
             notes.append("layout upload is off in the config")
-            return Outcome("done", "; ".join(notes))
-        png = self._layout_png(cfg)
-        if png is None:
-            return Outcome("waiting", "Upload layout.png in AMC's Video Configuration step (this project has no "
-                                      "floor plan in the web app)", done="; ".join(notes))
-        api.upload_layout(pid, png)
-        notes.append("uploaded the floor plan as layout.png")
+        else:
+            png = self._layout_png(cfg)
+            if png is None:
+                if not resumed:
+                    todo.append("Upload layout.png in AMC's Video Configuration step (this project has no "
+                                "floor plan in the web app)")
+            else:
+                if web:
+                    saved = self._folder() / "floorplan" / "layout.png"
+                    saved.parent.mkdir(parents=True, exist_ok=True)
+                    saved.write_bytes(png)
+                api.upload_layout(pid, png)
+                notes.append("uploaded the floor plan as layout.png")
+        if todo:
+            return Outcome("waiting", "; ".join(todo), done="; ".join(notes))
         return Outcome("done", "; ".join(notes))
 
     # ---- step 3 ---------------------------------------------------------------
@@ -584,18 +688,27 @@ class CalibrationRunner:
         if not f:
             return None
         if f == "auto":
-            if not self._job.amc_project_from_installer:
-                return None
-            root = self._conf().get("AMC_ROOT")
-            if not root:
-                return None
-            p = (Path(os.path.expanduser(root)) / "projects" / f"project_{self._job.amc_project_id}"
-                 / "manual_adjustment" / "alignment_data.json")
-            return p if p.is_file() else None
+            if self._job.folder:
+                own = self._folder() / "alignment" / "alignment_data.json"
+                if own.is_file():
+                    return own
+            return self._amc_saved_alignment()
         p = cfg.resolve(f)
         if not p.is_file():
             raise StepFailed(f"alignment.file {p} does not exist")
         return p
+
+    def _amc_saved_alignment(self) -> Path | None:
+        """The alignment_data.json AMC saved for this run's AMC project, if any."""
+        job = self._job
+        if not (job.amc_project_from_installer or job.folder) or not job.amc_project_id:
+            return None
+        root = self._conf().get("AMC_ROOT")
+        if not root:
+            return None
+        p = (Path(os.path.expanduser(root)) / "projects" / f"project_{job.amc_project_id}"
+             / "manual_adjustment" / "alignment_data.json")
+        return p if p.is_file() else None
 
     def _manual_alignment(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
         path = self._alignment_file(cfg)
@@ -644,7 +757,18 @@ class CalibrationRunner:
         if stats:
             job.result["EvaluationStatistics"] = stats
             notes.append("evaluation statistics saved")
-        if cfg.results.download_dir:
+        if job.folder:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            out_dir = self._folder() / "calibration" / stamp
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if stats:
+                (out_dir / "evaluation_statistics.json").write_text(json.dumps(stats, indent=2) + "\n",
+                                                                    encoding="utf-8")
+            out = out_dir / f"{job.amc_project_id}-{cfg.results.result_type}.zip"
+            out.write_bytes(api.mv3dt_result(job.amc_project_id, cfg.results.result_type))
+            job.result["ResultFile"] = str(out)
+            notes.append(f"result saved to {out_dir}")
+        elif cfg.results.download_dir:
             folder = cfg.resolve(cfg.results.download_dir)
             folder.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

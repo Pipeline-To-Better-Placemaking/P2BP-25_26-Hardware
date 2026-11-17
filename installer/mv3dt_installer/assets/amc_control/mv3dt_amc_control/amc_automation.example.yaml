@@ -39,6 +39,16 @@ project:
   #   result automatically, so this is the normal choice.
   # create_new: create a fresh AMC project for every run. The installer does
   #   not ingest these on its own; use results.download_dir to collect them.
+  # web_project: lock every run to the calling web project's workstation
+  #   folder (<AMC_PROJECTS_DIR>/<folder>/) and the AMC project made when that
+  #   folder was set up. A project that is not set up is refused, and a deleted
+  #   AMC project fails the run instead of being recreated. Footage comes from
+  #   <folder>/footage/ (videos.pattern and videos.order still apply, videos.source
+  #   does not); the floor plan is kept as <folder>/floorplan/layout.png;
+  #   alignment.file auto prefers <folder>/alignment/alignment_data.json;
+  #   results always go to <folder>/calibration/<UTC time>/ (results.download_dir
+  #   is not used); every finished run is recorded in <folder>/runs/<job id>.json.
+  #   name_template is not used.
   mode: reuse_installer_project
   # Name used when a project is created. Placeholders: {title} (project title
   # from the database), {project_id} (web app project id), {date} (YYYYMMDD).

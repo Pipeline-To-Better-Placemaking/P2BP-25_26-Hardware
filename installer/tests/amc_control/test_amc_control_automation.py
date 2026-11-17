@@ -23,6 +23,7 @@ from mv3dt_amc_control.api import create_app  # noqa: E402
 from mv3dt_amc_control.automation import CalibrationRunner  # noqa: E402
 from mv3dt_amc_control.automation_config import ConfigError, load_config  # noqa: E402
 from mv3dt_amc_control.calibration_spec import SPEC_SCOPE, SpecError, verify_spec  # noqa: E402
+from mv3dt_amc_control.projects import STATE_FAILED, STATE_READY, ProjectStore  # noqa: E402
 from mv3dt_amc_control.settings import Settings  # noqa: E402
 
 TICKET_SECRET = "ticket-secret-ticket-secret-ticket-secret"
@@ -31,8 +32,10 @@ FLOORPLAN_URL = "https://abc.supabase.co/storage/v1/object/sign/media/fp/new.png
 
 
 def make_spec(pid="proj-1", floorplan=True, px_per_m=100.0, url=FLOORPLAN_URL, scope=SPEC_SCOPE,
-              secret=TICKET_SECRET, exp_delta=900):
+              secret=TICKET_SECRET, exp_delta=900, folder=None):
     spec = {"title": "Living Room", "floorplan": None}
+    if folder is not None:
+        spec["folder"] = folder
     if floorplan:
         spec["floorplan"] = {"id": "fp-1", "url": url, "contentType": "image/png", "width": 741, "height": 502,
                              "pxPerM": px_per_m}
@@ -104,7 +107,7 @@ FULLY_AUTOMATED = {
 }
 
 
-def make_runner(ws, overrides, fake=None, floorplan_bytes=PNG, download_status=200):
+def make_runner(ws, overrides, fake=None, floorplan_bytes=PNG, download_status=200, store=None):
     tmp_path, install = ws
     fake = fake or FakeAmc()
     if "20261019_151133_2885" not in fake.projects:
@@ -125,6 +128,7 @@ def make_runner(ws, overrides, fake=None, floorplan_bytes=PNG, download_status=2
         download_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(serve_floorplan)),
         sleep=lambda s: None,
         threaded=False,
+        store=store if store is not None else ProjectStore(tmp_path / "amc_projects"),
     )
     runner.downloads = downloads
     return runner, fake
@@ -491,3 +495,271 @@ def test_an_unexpected_error_fails_the_run_instead_of_leaving_it_stuck(ws, monke
     assert not runner.is_active()
     monkeypatch.undo()
     assert runner.start(spec())["State"] == "completed"   # a new run is allowed
+
+
+# ---------------------------------------------------------------- project.mode web_project
+WEB_AMC_ID = "20261117_101500_1234"
+WEB = {**FULLY_AUTOMATED, "project": {"mode": "web_project"}}
+
+
+@pytest.fixture
+def web(ws):
+    """A ready binding for proj-1 in folder living-room, with footage in its folder."""
+    tmp_path, _ = ws
+    store = ProjectStore(tmp_path / "amc_projects")
+    store.create("proj-1", "living-room", "Living Room")
+    store.update("living-room", amc_project_id=WEB_AMC_ID, amc_project_name="living-room", state=STATE_READY)
+    folder = store.folder_path("living-room")
+    for name in ("b.mp4", "a.mp4", "notes.txt"):
+        (folder / "footage" / name).write_bytes(b"video")
+    fake = FakeAmc()
+    fake.add_project(WEB_AMC_ID, "living-room")
+    return store, folder, fake
+
+
+def amc_saved_alignment(ws, amc_id=WEB_AMC_ID):
+    path = ws[0] / "auto-magic-calib" / "projects" / f"project_{amc_id}" / "manual_adjustment" / "alignment_data.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([[[9, 9], [9, 9], [9, 9]]]))
+    return path
+
+
+def web_runner(ws, web, overrides=WEB, **kw):
+    store, _, fake = web
+    return make_runner(ws, overrides, fake=fake, store=store, **kw)[0]
+
+
+def test_web_project_mode_is_accepted_and_the_base_default_is_unchanged(ws):
+    assert load_config(write_config(ws[0], {"project": {"mode": "web_project"}})).project.mode == "web_project"
+    assert load_config().project.mode == "reuse_installer_project"
+
+
+def test_web_project_run_uses_the_bound_amc_project_and_folder(ws, web):
+    store, folder, fake = web
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web)
+    job = runner.start(spec(folder="living-room"))
+
+    assert job["State"] == "completed", job
+    assert job["AmcProjectId"] == WEB_AMC_ID and job["AmcProjectName"] == "living-room"
+    assert calls(fake, "create_project") == []
+    assert "living-room" in job["Steps"][0]["Message"]
+    # Step 2: footage from <folder>/footage/ with videos.pattern, floor plan kept in the folder.
+    assert calls(fake, "upload_video_files") == [{"names": ["cam_00.mp4", "cam_01.mp4"]}]
+    assert "a.mp4 as cam_00.mp4" in job["Steps"][1]["Message"]
+    assert (folder / "floorplan" / "layout.png").read_bytes() == PNG
+    assert fake.projects[WEB_AMC_ID]["layout"] == PNG
+
+
+def test_web_project_follows_videos_order(ws, web):
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web, {**WEB, "videos": {"order": ["b.mp4", "a.mp4"]}})
+    job = runner.start(spec())
+    assert job["State"] == "completed"
+    assert "b.mp4 as cam_00.mp4" in job["Steps"][1]["Message"]
+
+
+@pytest.mark.parametrize("bind", [False, True])
+def test_web_project_not_set_up_is_refused(ws, web, bind):
+    store, _, _ = web
+    runner = web_runner(ws, web)
+    if bind:
+        store.update("living-room", state=STATE_FAILED, error="boom")
+        pid = "proj-1"
+    else:
+        pid = "proj-9"
+    with pytest.raises(automation_mod.NotProvisioned, match="set this project up on the workstation first"):
+        runner.start(spec(pid=pid))
+    assert issubclass(automation_mod.NotProvisioned, automation_mod.Busy)
+    assert runner.status() is None
+
+
+def test_web_project_spec_folder_must_match_the_binding(ws, web):
+    runner = web_runner(ws, web)
+    with pytest.raises(SpecError, match="other-room"):
+        runner.start(spec(folder="other-room"))
+    assert runner.status() is None
+
+
+def test_web_project_routes_map_not_set_up_to_409_and_wrong_folder_to_400(ws, web):
+    store, _, _ = web
+    client = make_client(web_runner(ws, web))
+    assert client.post("/amc/automation/start",
+                       json={"Spec": make_spec(folder="other-room")}).status_code == 400
+    store.update("living-room", state=STATE_FAILED)
+    r = client.post("/amc/automation/start", json={"Spec": make_spec()})
+    assert r.status_code == 409 and "set this project up" in r.json()["detail"]
+
+
+def test_web_project_deleted_amc_project_fails_naming_the_folder(ws, web):
+    store, folder, fake = web
+    del fake.projects[WEB_AMC_ID]
+    runner = web_runner(ws, web)
+    job = runner.start(spec())
+    assert job["State"] == "failed"
+    assert "living-room" in job["Steps"][0]["Message"]
+    assert calls(fake, "create_project") == []
+    assert json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())["State"] == "failed"
+    assert store.get_by_folder("living-room").calib_runs == 0
+
+
+def test_web_project_already_calibrating_is_refused(ws, web):
+    _, _, fake = web
+    fake.projects[WEB_AMC_ID]["state"] = "RUNNING"
+    fake.running_polls = 100
+    job = web_runner(ws, web).start(spec())
+    assert job["State"] == "failed" and "already calibrating" in job["Steps"][0]["Message"]
+
+
+def test_web_project_without_footage_waits_with_a_todo_then_uploads_it(ws, web):
+    store, folder, fake = web
+    for f in (folder / "footage").iterdir():
+        f.unlink()
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web)
+    job = runner.start(spec())
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][1]["State"] == "waiting"
+    todo = job["UserActions"][0]
+    assert str(folder / "footage") in todo and "AMC" in todo
+    assert calls(fake, "upload_video_files") == []
+    assert calls(fake, "upload_layout")            # the floor plan still went up
+    assert calls(fake, "calibrate") == []
+
+    (folder / "footage" / "cam.mp4").write_bytes(b"video")  # the user copies footage in
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert calls(fake, "upload_video_files") == [{"names": ["cam_00.mp4"]}]
+
+
+def test_web_project_footage_uploaded_in_amc_counts_on_continue(ws, web):
+    _, folder, fake = web
+    for f in (folder / "footage").iterdir():
+        f.unlink()
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web)
+    assert runner.start(spec())["State"] == "waiting_for_user"
+    fake.projects[WEB_AMC_ID]["videos"] = [("cam_00.mp4", 5)]   # uploaded in AMC's UI
+    job = runner.resume()
+    assert job["State"] == "completed"
+    assert job["Steps"][1]["Message"].startswith("finished in AMC")
+
+
+def test_web_project_uses_the_floor_plan_saved_at_setup(ws, web):
+    _, folder, fake = web
+    (folder / "floorplan" / "layout.png").write_bytes(PNG + b"saved")
+    job = web_runner(ws, web).start(spec(floorplan=False))
+    assert job["Steps"][1]["State"] == "done"
+    assert fake.projects[WEB_AMC_ID]["layout"] == PNG + b"saved"
+
+
+def test_web_project_prefers_the_folders_alignment(ws, web):
+    _, folder, fake = web
+    amc_saved_alignment(ws)
+    (folder / "alignment" / "alignment_data.json").write_text(json.dumps([[[1, 1], [2, 2], [3, 3]]]))
+    job = web_runner(ws, web).start(spec())
+    assert job["State"] == "completed"
+    assert str(folder / "alignment" / "alignment_data.json") in job["Steps"][4]["Message"]
+    assert fake.projects[WEB_AMC_ID]["alignment"] == [[[1, 1], [2, 2], [3, 3]]]
+
+
+def test_web_project_falls_back_to_amcs_saved_alignment(ws, web):
+    _, _, fake = web
+    saved = amc_saved_alignment(ws)
+    job = web_runner(ws, web).start(spec())
+    assert job["State"] == "completed"
+    assert str(saved) in job["Steps"][4]["Message"]
+    assert fake.projects[WEB_AMC_ID]["alignment"] == [[[9, 9], [9, 9], [9, 9]]]
+
+
+def test_web_project_without_any_alignment_waits_for_the_manual_step(ws, web):
+    job = web_runner(ws, web).start(spec())
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][4]["State"] == "waiting"
+
+
+def test_web_project_results_and_records_go_into_the_folder(ws, web):
+    store, folder, fake = web
+    fake.with_gt = True
+    saved = amc_saved_alignment(ws)
+    runner = web_runner(ws, web, {**WEB, "results": {"download_dir": ""}})
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+
+    # Step 7: one UTC-stamped directory with the statistics and the result ZIP.
+    (run_dir,) = list((folder / "calibration").iterdir())
+    assert len(run_dir.name) == 16 and run_dir.name.endswith("Z")
+    assert json.loads((run_dir / "evaluation_statistics.json").read_text())["Average L2 distance(m)"] == 0.4
+    (zip_file,) = list(run_dir.glob("*.zip"))
+    assert job["Result"]["ResultFile"] == str(zip_file)
+    assert not (ws[0] / "results").exists()
+    # End of run: the record, the counters and the alignment copied back.
+    record = json.loads((folder / "runs" / f"{job['JobId']}.json").read_text())
+    assert record["State"] == "completed" and record["JobId"] == job["JobId"]
+    b = store.get_by_folder("living-room")
+    assert b.calib_runs == 1 and b.last_run_at is not None
+    assert (folder / "alignment" / "alignment_data.json").read_text() == saved.read_text()
+
+    time.sleep(1.1)  # a distinct UTC stamp for the second run
+    runner.start(spec())
+    assert store.get_by_folder("living-room").calib_runs == 2
+    assert len(list((folder / "runs").glob("*.json"))) == 2
+    assert len(list((folder / "calibration").iterdir())) == 2
+
+
+def test_web_project_results_ignore_download_dir(ws, web):
+    _, folder, _ = web
+    amc_saved_alignment(ws)
+    job = web_runner(ws, web).start(spec())     # WEB keeps results.download_dir: results
+    assert job["Result"]["ResultFile"].startswith(str(folder / "calibration"))
+    assert not (ws[0] / "results").exists()
+
+
+def test_web_project_failed_and_cancelled_runs_are_recorded(ws, web):
+    store, folder, fake = web
+    amc_saved_alignment(ws)
+    fake.fail_calibration = True
+    runner = web_runner(ws, web)
+    failed = runner.start(spec())
+    assert failed["State"] == "failed"
+    assert json.loads((folder / "runs" / f"{failed['JobId']}.json").read_text())["State"] == "failed"
+    assert runner.cancel()["State"] == "cancelled"
+    assert json.loads((folder / "runs" / f"{failed['JobId']}.json").read_text())["State"] == "cancelled"
+    b = store.get_by_folder("living-room")
+    assert b.calib_runs == 0 and b.last_run_at is None
+    assert not (folder / "alignment" / "alignment_data.json").exists()
+
+
+def test_web_project_run_survives_a_restart(ws, web):
+    store, folder, fake = web
+    for f in (folder / "footage").iterdir():
+        f.unlink()
+    first = web_runner(ws, web).start(spec())
+    assert first["State"] == "waiting_for_user"
+
+    # A new runner (the service restarted) whose config no longer says web_project still
+    # finishes the run in the folder it started in.
+    (folder / "footage" / "cam.mp4").write_bytes(b"video")
+    amc_saved_alignment(ws)
+    runner2 = make_runner(ws, FULLY_AUTOMATED, fake=fake, store=store)[0]
+    assert runner2.status()["JobId"] == first["JobId"]
+    job = runner2.resume()
+    assert job["State"] == "completed", job
+    assert job["AmcProjectId"] == WEB_AMC_ID
+    assert job["Result"]["ResultFile"].startswith(str(folder / "calibration"))
+    assert (folder / "runs" / f"{first['JobId']}.json").exists()
+    assert store.get_by_folder("living-room").calib_runs == 1
+
+
+def test_other_modes_write_nothing_into_project_folders(ws, web):
+    store, folder, _ = web
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, store=store)
+    assert runner.start(spec())["State"] == "completed"
+    assert list((folder / "runs").iterdir()) == []
+    assert list((folder / "calibration").iterdir()) == []
+
+
+def test_runner_builds_its_store_from_the_environment(ws, monkeypatch):
+    monkeypatch.setenv("AMC_PROJECTS_DIR", str(ws[0] / "elsewhere"))
+    runner = CalibrationRunner(FakeController(ws[1]))
+    assert runner.store.root == ws[0] / "elsewhere"
