@@ -138,6 +138,17 @@ that directory invisible to lookups, never an exception.
 "Ready for calibration" means the AMC project exists and the folder is laid
 out; footage and the AMC workflow come later ([section 6](#6-locking-calibration-to-the-project)).
 
+**REQUIRED — one AMC user at a time.** While a provisioning job runs, a
+second `POST /projects`, `POST /amc/stop` and `POST /amc/automation/start`
+for any project are refused with `409`; while an automated run is active or
+waiting, `POST /projects` is refused (step 3). H3 owns this: the provisioner
+exposes `busy()` and the API routes check it before calling the runner or
+the controller.
+
+**REQUIRED — restart recovery.** When the service starts, every binding still
+in `provisioning` becomes `failed` with `Error` "interrupted by a service
+restart; set it up again", so step 2's retry path applies.
+
 ---
 
 ## 6. Locking calibration to the project
@@ -151,12 +162,15 @@ keep their meaning for workstations that still set them.
 |---|---|
 | 1 Project Setup | look up the binding for the spec's `pid`; none or not `ready` is `409` "set this project up on the workstation first". `get_project_info(AmcProjectId)` must succeed, or the run fails naming the folder: a deleted AMC project is **never** silently recreated |
 | 2 Video Configuration | videos from `<folder>/footage/` (with `videos.pattern` and `videos.order`); none is a `waiting` step telling the user to copy footage there or upload it in AMC's UI. The floor plan is copied to `floorplan/layout.png` before upload |
-| 5 Manual Alignment | `alignment.file: auto` means `<folder>/alignment/alignment_data.json` |
+| 5 Manual Alignment | `alignment.file: auto` uses `<folder>/alignment/alignment_data.json` when it exists, otherwise AMC's own saved copy as today |
 | 7 Results | the result ZIP and statistics always go to `<folder>/calibration/<UTC>/` |
-| end of run | `runs/<job id>.json` written; `LastRunAt` and `CalibRuns` updated on success |
+| end of run | `runs/<job id>.json` written; on success `LastRunAt` and `CalibRuns` updated and AMC's saved alignment file, if any, copied to `<folder>/alignment/alignment_data.json` |
 
 A spec whose `folder` differs from the binding's is `400`. AMC stays one shared
-instance: the existing one-run-at-a-time rule is unchanged.
+instance: the existing one-run-at-a-time rule is unchanged. The runner builds
+its own `ProjectStore` from `projects.default_projects_root()` (which reads
+`AMC_PROJECTS_DIR`) unless one is passed to its constructor, so H4 needs no
+change to `api.py` or `settings.py`.
 
 ---
 
@@ -186,13 +200,26 @@ project is always the ticket's `pid`, never a request field.
 | Route | Ticket scope | Body | Response |
 |---|---|---|---|
 | `POST /projects` | `amc-provision` | `{"Spec": "<jwt>"}` | `202` or `200` binding; `400`, `409` |
-| `GET /projects/current` | `amc` | none | binding, or `404` when the project has no folder |
+| `GET /projects/current` | `amc` or `amc-provision` | none | binding, or `404` when the project has no folder |
 | `GET /projects/current/files` | `amc` | none | `[{"Path": "footage/cam_00.mp4", "Size": 123, "ModifiedAt": 1794879242}]` |
 | `GET /projects/current/files/{path}` | `amc` | none | the file, `application/octet-stream` with `Content-Disposition: attachment` |
 
 The binding on the wire is `project.json` without `schema_version`, plus
-`"Path"`, the folder's absolute path on the workstation. Errors keep FastAPI's
-`{"detail": "..."}`. CORS and Private Network Access handling are STEP-9's
+`"Path"`, the folder's absolute path on the workstation. A `failed` binding is
+returned as such (`State`, `Error`); runs for it are `409`. Errors keep
+FastAPI's `{"detail": "..."}`.
+
+- **Listing**: recursive, regular files only, sorted by `Path`; directories,
+  symlinks and the top-level `project.json` are left out. Every route other
+  than `GET /projects/current` answers `404` for a project with no folder.
+- **`{path}`**: a listing's `Path` with each segment percent-encoded and `/`
+  kept literal. A missing, unsafe or excluded path is `404`.
+- **Large files**: the download route also accepts the ticket as
+  `?ticket=<amc ticket>`, so the browser can follow a plain link and stream
+  multi-GB footage to disk instead of buffering it. **LOCKED trade-off:** the
+  ticket then appears in the service's access log; it expires within
+  `WORKSTATION_AMC_TICKET_MINUTES` and the journal is readable only by
+  administrators. CORS and Private Network Access handling are STEP-9's
 ([`STEP-9` section 7](STEP-9-AMC-CONTROL.md#7-api-and-ticket-contract)).
 
 ---
@@ -206,8 +233,17 @@ The binding on the wire is `project.json` without `schema_version`, plus
   permission first. `serve` stops requiring the project id; tracking is
   unchanged.
 - **Scopes**: `amc` (STEP-9's routes and the read routes above) and the new
-  `amc-provision` (only `POST /projects`). Each route accepts exactly one
-  scope; a wrong scope is `403`.
+  `amc-provision` (`POST /projects`). Each route accepts exactly the scopes
+  listed in [section 8](#8-workstation-api-contract-required): one, except
+  `GET /projects/current`, which takes either so the creating page can watch
+  provisioning finish. A wrong scope is `403`.
+- **Accepted limitation (flagged)**: without the pin, any user with
+  `Project.Vision.Read` on any project can start and stop the one shared AMC,
+  and once it is up, AMC's own unauthenticated UI shows every AMC project
+  ([`STEP-9` section 10](STEP-9-AMC-CONTROL.md#10-not-verified-on-the-workstation)).
+  The mitigations here are the busy rules in [section 5](#5-provisioning) and
+  STEP-9's refusal of `/amc/stop` during a run; per-project isolation inside
+  AMC is not possible.
 - **Spec**: the `amc-calibration-spec` claim `spec` gains `folder`
   (string or `null`). Provisioning requires it; runs check it against the
   binding when present.
@@ -220,7 +256,7 @@ The binding on the wire is `project.json` without `schema_version`, plus
 |---|---|
 | Projects root | create `<install_dir>/amc_projects`, owned by the service user, mode 750; never delete it on upgrade |
 | Link | create `~<service user>/mv3dt-projects` pointing at it only if nothing exists at that path |
-| Unit | add `Environment=AMC_PROJECTS_DIR=<install_dir>/amc_projects`; `pending_update()` already re-runs on a unit change |
+| Unit | `service_environment()` adds `AMC_PROJECTS_DIR=<install_dir>/amc_projects` to the rendered unit; `pending_update()` already re-runs on a unit change |
 | Seeded settings | new `amc_automation.yaml` files set `project.mode: web_project`; an existing file is never rewritten, so a workstation seeded with `create_new` is switched by hand |
 | `report` | prints the projects root and the link |
 
@@ -251,8 +287,9 @@ The binding on the wire is `project.json` without `schema_version`, plus
 - `ProjectsList.tsx`: after a create that set a folder, call provisioning and
   report the result; a failure leaves the project created.
 - `calibration/amcApi.ts`: `provisionProject`, `getWorkstationProject`,
-  `listProjectFiles`, `downloadProjectFile` (fetch with the bearer ticket,
-  then save the blob) and the automation calls `startAutomation`,
+  `listProjectFiles`, `projectFileUrl` (a download link carrying
+  `?ticket=`, [section 8](#8-workstation-api-contract-required)) and the
+  automation calls `startAutomation`,
   `getAutomation`, `continueAutomation`, `cancelAutomation`.
 - `calibration/Calibration.tsx`: replaces the local-only session with the
   workstation panel: binding state and a **Set up on workstation** retry;
@@ -263,17 +300,25 @@ The binding on the wire is `project.json` without `schema_version`, plus
 
 ## 12. Out of scope / open decisions
 
-- Recording footage from the web app. Footage reaches `<folder>/footage/` by
-  copy or through AMC's upload. Recording needs the camera credentials in the
-  root-owned `secrets/` and a new sudo-ruled command; flagged for a later spec.
-- Feeding a web project's calibration into the live DeepStream pipeline.
-  Step 4 ingests only `installer.conf`'s `AMC_PROJECT_ID`
-  ([`STEP-4` section 7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration));
-  results stay in the folder until that is designed.
+Settled exclusions:
+
 - Deleting a project in either place. Nothing removes a folder or AMC
   project; a web project deleted later leaves its folder for the operator.
 - Applying the migration to the production database
   (`npm run db:migrate`) is an operator action, done once the web PRs merge.
+
+Open decisions:
+
+1. **Recording footage from the web app (flagged).** Footage reaches
+   `<folder>/footage/` by copy or through AMC's upload. Recording needs the
+   camera credentials in the root-owned `secrets/` and a new sudo-ruled
+   command; it needs its own spec.
+2. **Feeding a web project's calibration into DeepStream (flagged).** Step 4
+   ingests only `installer.conf`'s `AMC_PROJECT_ID`
+   ([`STEP-4` section 7](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration));
+   results stay in the folder until that is designed.
+3. **Per-project access to the shared AMC (flagged).** See the accepted
+   limitation in [section 9](#9-tickets-and-specs).
 
 ---
 
@@ -289,11 +334,13 @@ The binding on the wire is `project.json` without `schema_version`, plus
 | H3 Provisioning and file routes | `feat/installer-amc-provisioning` | `mv3dt_amc_control/provisioning.py`, `api.py`, `models.py`, `cli.py` (the `projects` command), `tests/amc_control/test_amc_control_provisioning.py` | H1, H2 | 3 |
 | H4 Locked automation | `feat/installer-amc-locked-runs` | `mv3dt_amc_control/automation.py`, `automation_config.py`, `amc_automation.example.yaml`, `tests/amc_control/test_amc_control_automation.py` | H1, H2 | 3 |
 | W3 Folder at creation and client API | `feat/project-workstation-folder-ui` | `ProjectForm.tsx`, `ProjectsList.tsx`, `projectTypes.ts`, `calibration/amcApi.ts` | W2 | 3 |
-| H5 Step 9 projects root | `feat/installer-step9-projects-root` | `steps/step9_amc_control.py`, `assets/systemd/mv3dt-amc-control.service.in`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | H4 | 4 |
+| H5 Step 9 projects root | `feat/installer-step9-projects-root` | `steps/step9_amc_control.py`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | H4 | 4 |
 | W4 Calibration page | `feat/calibration-workstation-panel` | `calibration/Calibration.tsx` | W3 | 4 |
 
-Hardware paths are relative to `installer/mv3dt_installer/` (tests to
-`installer/`); web paths to `BetterPlacemaking.SERVER.EXPRESS/` or
+Hardware paths: `mv3dt_amc_control/...` is under
+`installer/mv3dt_installer/assets/amc_control/`, `steps/` and `assets/` under
+`installer/mv3dt_installer/`, `tests/` under `installer/`, and the two docs
+under `installer/plan/`. Web paths are relative to `BetterPlacemaking.SERVER.EXPRESS/` or
 `BetterPlacemaking.CLIENT.REACT/src/pages/projects/`. W units live in
 `P2BP-25_26-Web` and stack only on each other.
 
@@ -330,3 +377,5 @@ Repo files referenced:
   which stays single-project.
 - `installer/mv3dt_installer/assets/amc_control/mv3dt_amc_control/` — the
   service package H1 to H4 change.
+- `installer/mv3dt_installer/steps/step9_amc_control.py` — the step H5
+  changes.
