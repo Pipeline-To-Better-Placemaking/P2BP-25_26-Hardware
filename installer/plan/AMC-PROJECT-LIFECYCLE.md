@@ -127,7 +127,7 @@ Checked on 2026-11-17 against the pinned UI image and Docker Compose
 | Ticket scope | `amc-delete`, same audience, issuer and `pid` claim as the other workstation tickets ([`AMC-WEB-PROJECTS` section 9](AMC-WEB-PROJECTS.md#9-tickets-and-specs)) |
 | Web route | `POST /api/workstation/project/:projectId/delete-ticket`, permission `Project.Delete`, 5-minute ticket; `200 {Ticket, ExpiresAt, WorkstationUrl}`, `503` when workstation control is not configured, `404` for an unknown project |
 | Workstation route | `DELETE /projects/current`, `amc-delete` scope only |
-| CORS | the service's `allow_methods` gains `DELETE` |
+| CORS | the service's `allow_methods` gains `DELETE`, and `expose_headers` gains `Retry-After` so the browser can read it |
 
 Workstation responses:
 
