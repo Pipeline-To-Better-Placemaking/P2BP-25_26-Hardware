@@ -351,7 +351,7 @@ def test_run_installs_everything(tmp_path):
     assert ctx.reported == [("installed", s9.UNIT_NAME, s9.bundled_version(ctx))]
 
 
-def test_sudo_rule_allows_exactly_the_two_amc_commands(tmp_path):
+def test_sudo_rule_allows_exactly_the_three_commands(tmp_path):
     ctx = Context(tmp_path)
     s9.Step9AmcControl().run(ctx)
 
@@ -361,7 +361,7 @@ def test_sudo_rule_allows_exactly_the_two_amc_commands(tmp_path):
     rules = [line for line in path.read_text().splitlines() if line and not line.startswith("#")]
     assert rules == [
         f"operator ALL=(root) NOPASSWD: {binary} amc --keep-up --no-open --non-interactive "
-        f"--host-ip {TS_IP}, {binary} amc --down"
+        f"--host-ip {TS_IP}, {binary} amc --down, {binary} record-footage --pending"
     ]
     assert "ALL=(ALL)" not in path.read_text() and "NOPASSWD: ALL" not in path.read_text()
     # never the user-owned wrapper
@@ -666,6 +666,36 @@ def test_a_rule_naming_the_old_wrapper_is_an_update(tmp_path):
     assert f"{ctx.install_dir}/bin/mv3dt-installer amc --down" in rule
     assert str(amc) not in rule
     assert step.pending_update(ctx) is None
+
+
+def test_a_two_command_rule_without_record_footage_is_an_update(tmp_path):
+    """Releases before AMC-FOOTAGE-RECORDING allowed only start and stop."""
+    ctx = Context(tmp_path)
+    step = s9.Step9AmcControl()
+    step.run(ctx)
+    binary = ctx.install_dir / "bin" / "mv3dt-installer"
+    old = (
+        f"operator ALL=(root) NOPASSWD: {binary} amc --keep-up --no-open --non-interactive "
+        f"--host-ip {TS_IP}, {binary} amc --down\n"
+    )
+    _sudoers(tmp_path).chmod(0o640)
+    _sudoers(tmp_path).write_text(old)
+    _sudoers(tmp_path).chmod(0o440)
+
+    assert s9.SUDOERS_NAME in step.pending_update(ctx)
+    ctx.update_pending = "rule changed"
+    assert step.run(ctx).status is StepStatus.COMPLETE
+    assert f"{binary} record-footage --pending\n" in _sudoers(tmp_path).read_text()
+    assert step.pending_update(ctx) is None
+
+
+def test_record_footage_is_registered_without_the_root_startup():
+    from mv3dt_installer import app, record_footage
+
+    registration = app.SUBCOMMAND_REGISTRY["record-footage"]
+    assert registration.handler is record_footage.handle_record_footage_subcommand
+    assert registration.requires_root is False  # the handler checks root itself
+    assert s9.RECORD_FOOTAGE_ARGS == ("record-footage", "--pending")
 
 
 def test_status_without_a_user_checks_only_the_package(tmp_path):

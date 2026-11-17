@@ -420,6 +420,48 @@ def test_password_never_in_logs_or_result(tmp_path, captured_logs):
     assert PASSWORD not in repr(result)
 
 
+def test_each_failed_camera_keeps_its_redacted_reason(tmp_path):
+    """AMC-FOOTAGE-RECORDING section 5: `errors` lines up with `failed`."""
+    h = Harness({
+        CAM1.ip: _exits(1001, rc=1, stderr=f"rtsp://{USER}:{PASSWORD}@x:554/y: 401 Unauthorized\n"),
+        CAM2.ip: _exits(1300, rc=0, size=0),
+    })
+    result = h.record([CAM1, CAM2], tmp_path / "proj")
+
+    assert result.failed == [CAM1, CAM2]
+    assert result.errors == [
+        f"ffmpeg exited 1: rtsp://{USER}:<redacted>@x:554/y: 401 Unauthorized",
+        "ffmpeg produced an empty file.",
+    ]
+
+
+def test_spawn_and_timeout_reasons_are_kept(tmp_path):
+    h = Harness({CAM2.ip: _exits(None)})
+    real_spawn = h.spawn
+
+    def spawn(argv, **kw):
+        if CAM1.ip in " ".join(argv):
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_spawn(argv, **kw)
+
+    h.spawn = spawn
+    result = h.record([CAM1, CAM2], tmp_path / "proj", seconds=5)
+    assert result.errors == [
+        "could not start ffmpeg: No such file or directory",
+        "ffmpeg exceeded 65 s and was stopped.",
+    ]
+
+
+def test_success_has_no_errors_and_cancel_names_the_unfinished(tmp_path):
+    ok = Harness({CAM1.ip: _exits(1300)}).record([CAM1], tmp_path / "a")
+    assert ok.failed == [] and ok.errors == []
+
+    h = Harness({CAM1.ip: _exits(1001), CAM2.ip: _exits(1300)}, interrupt_at=1005)
+    cancelled = h.record([CAM1, CAM2], tmp_path / "b")
+    assert cancelled.cancelled and cancelled.failed == [CAM2]
+    assert cancelled.errors == ["cancelled"]
+
+
 # ---------------------------------------------------------------------------
 # §3 condition 2 -- is_complete
 # ---------------------------------------------------------------------------
