@@ -903,8 +903,8 @@ def compose_up(ctx: "Context", compose_dir: pathlib.Path) -> None:
 
 def compose_recreate_ui(ctx: "Context", compose_dir: pathlib.Path) -> None:
     """Recreate only the UI container, so a running stack picks up a
-    changed UI nginx override (a bind-mounted file's content is not part of
-    the Compose config hash)."""
+    changed `.env` or UI nginx override (a bind-mounted file's content is
+    not part of the Compose config hash)."""
     _run_compose(ctx, compose_dir, "up", "-d", "--force-recreate", "--no-deps", _UI_SERVICE)
 
 
@@ -1850,9 +1850,10 @@ def launch_amc(
             if not skip_pull:
                 compose_pull(ctx, compose_dir)
             compose_up(ctx, compose_dir)
-        elif override_changed:
+        elif env_changed or override_changed:
             # A reused stack skips `up`, and `up -d` would not recreate a
-            # container whose bind-mounted file only changed content.
+            # container whose bind-mounted file only changed content. `.env`
+            # counts too: a changed HOST_IP changes the UI's API_URL.
             compose_recreate_ui(ctx, compose_dir)
 
         api_url = f"http://localhost:{cfg.ms_port}/v1/ready"

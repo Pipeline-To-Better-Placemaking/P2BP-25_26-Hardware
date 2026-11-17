@@ -1948,8 +1948,10 @@ def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
     assert not any(call[:3] == ("docker", "compose", "up") for call in runner.calls)
 
 
-@pytest.mark.parametrize("name", ["mv3dt-ui-nginx.conf", "compose.override.yml"])
-def test_changed_ui_override_recreates_the_ui_on_a_running_stack(
+@pytest.mark.parametrize(
+    "name", [".env", "mv3dt-ui-nginx.conf", "compose.override.yml"]
+)
+def test_changed_compose_config_recreates_the_ui_on_a_running_stack(
     tmp_path, monkeypatch, name
 ):
     runner = _running_stack_runner(
@@ -1980,10 +1982,6 @@ def test_changed_ui_override_recreates_the_ui_on_a_running_stack(
     _launch()
     assert recreated == [1]
     (amc_root / "compose" / name).write_text("stale\n")
-    _launch()
-    assert recreated == [1, 1]
-    # A changed `.env` alone does not trigger it.
-    (amc_root / "compose" / ".env").write_text("stale\n")
     _launch()
     assert recreated == [1, 1]
 
