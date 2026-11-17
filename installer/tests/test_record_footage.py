@@ -540,6 +540,128 @@ def test_a_cancel_during_restore_finishes_the_restore_then_exits_3(env, capsys, 
     assert snapshot(env.footage) == before
 
 
+def _sigterm():
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def test_a_cancel_inside_the_finally_before_defer_still_restores(env, capsys, monkeypatch):
+    """The first raise lands after steps 6 and 7 ended, before the cancel is
+    deferred: it is caught, the restore runs, and the run ends cancelled."""
+    before = seed_old_footage(env)
+    env.spawner.rcs = {"169.254.1.2": 1}
+    real_defer = rf._Cancel.defer
+    fired = []
+
+    def defer(self):
+        fired.append(True)
+        _sigterm()
+        real_defer(self)
+
+    monkeypatch.setattr(rf._Cancel, "defer", defer)
+    code, lines, _err = run(env, capsys)
+
+    assert fired and code == rf.EXIT_CANCELLED
+    assert final(lines)["reason"] == "cancelled"
+    assert snapshot(env.footage) == before
+
+
+def test_a_cancel_inside_the_except_branch_still_restores(env, capsys, monkeypatch):
+    before = seed_old_footage(env)
+
+    class Interrupting(OSError):
+        @property
+        def strerror(self):
+            _sigterm()  # the handler raises inside the except body
+            return "disk on fire"
+
+    def record(cameras, *, project_dir, **kw):
+        (pathlib.Path(project_dir) / "c1-left.mp4").write_text("half")
+        raise Interrupting()
+
+    monkeypatch.setattr(rf, "_RECORD", record)
+    code, lines, _err = run(env, capsys)
+
+    assert code == rf.EXIT_CANCELLED and final(lines)["cancelled"] is True
+    assert snapshot(env.footage) == before
+
+
+def test_a_cancel_just_before_the_restore_cannot_interrupt_it(env, capsys, monkeypatch):
+    before = seed_old_footage(env)
+    env.spawner.rcs = {"169.254.1.2": 1}
+    real_restore = rf._Footage.restore
+
+    def restore(self):
+        _sigterm()  # deferred: only noted
+        os.kill(os.getpid(), signal.SIGINT)
+        real_restore(self)
+
+    monkeypatch.setattr(rf._Footage, "restore", restore)
+    code, lines, _err = run(env, capsys)
+
+    assert code == rf.EXIT_CANCELLED
+    assert [line for line in lines if "progress" not in line] == [final(lines)]
+    assert snapshot(env.footage) == before
+
+
+def test_a_cancel_after_a_full_recording_is_ignored(env, capsys, monkeypatch):
+    real_defer = rf._Cancel.defer
+
+    def defer(self):
+        _sigterm()
+        real_defer(self)
+
+    monkeypatch.setattr(rf._Cancel, "defer", defer)
+    code, lines, _err = run(env, capsys)
+
+    assert code == rf.EXIT_OK and final(lines)["files"] == ["c1-left.mp4", "c2-right.mp4"]
+
+
+def test_a_cancel_while_a_refusal_is_handled_still_prints_one_line(env, capsys, monkeypatch):
+    env.sudo_user = None  # refused at step 1
+    real_close = rf._Cancel.close
+    calls = []
+
+    def close(self):
+        if not calls:
+            calls.append(True)
+            _sigterm()
+        return real_close(self)
+
+    monkeypatch.setattr(rf._Cancel, "close", close)
+    code, lines, _err = run(env, capsys)
+
+    assert calls and code == rf.EXIT_CANCELLED
+    assert lines == [final(lines)]
+
+
+def test_free_space_is_measured_on_a_no_follow_descriptor(env, monkeypatch):
+    seen = []
+    real_open = os.open
+
+    def spy(path, flags, *args):
+        seen.append((path, flags))
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(rf, "_OPEN", spy)
+    monkeypatch.setattr(rf, "_FSTATVFS", lambda fd: SimpleNamespace(f_bavail=3, f_frsize=1 << 30))
+    ok, free, needed = rf._has_room(env.footage, 2)
+
+    assert (ok, free, needed) == (True, 3 << 30, 2 << 30)
+    (path, flags), = seen
+    assert path == str(env.footage)
+    assert flags & os.O_NOFOLLOW and flags & os.O_DIRECTORY
+    assert rf._has_room(env.footage, 4)[0] is False
+
+
+def test_free_space_never_follows_a_swapped_symlink(env, tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "swapped"
+    link.symlink_to(target)
+    with pytest.raises(rf._Refused):
+        rf._has_room(link, 1)
+
+
 def test_no_room_is_exit_1_with_free_and_needed_bytes(env, capsys, monkeypatch):
     monkeypatch.setattr(rf, "_HAS_ROOM", lambda root, n: (False, 1 << 30, n << 30))
     last = assert_refused(env, capsys, "not enough free space", code=rf.EXIT_FAILED)

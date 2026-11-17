@@ -158,7 +158,31 @@ def _stdin_lines() -> Iterable[str]:
 _READ_STDIN: Callable[[], Iterable[str]] = _stdin_lines
 _REPLACE: Callable[[Any, Any], None] = os.replace
 _LOAD_CREDENTIALS: Callable[..., Any] = camera_credentials.load_credentials
-_HAS_ROOM: Callable[..., tuple] = footage_mod.has_room
+_FSTATVFS: Callable[[int], Any] = os.fstatvfs
+
+
+def _has_room(footage: pathlib.Path, camera_count: int) -> tuple:
+    """Step 4's free-space check, `(ok, free, needed)` as `footage.has_room`.
+
+    Measured with `fstatvfs` on a descriptor opened with `O_NOFOLLOW` and
+    `O_DIRECTORY`, so root never follows a symlink swapped in at the
+    already-checked footage directory.
+    """
+    needed = camera_count * footage_mod.MIN_FREE_BYTES_PER_CAMERA
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        fd = _OPEN(str(footage), flags)
+    except OSError as exc:
+        raise _Refused(f"cannot open {footage}: {exc.strerror or exc}") from None
+    try:
+        st = _FSTATVFS(fd)
+    finally:
+        os.close(fd)
+    free = st.f_bavail * st.f_frsize
+    return free >= needed, free, needed
+
+
+_HAS_ROOM: Callable[..., tuple] = _has_room
 _RECORD: Callable[..., Any] = footage_mod.record
 
 
@@ -380,32 +404,49 @@ class _Cancel:
     """Turns SIGTERM, SIGINT and the stdin channel into one
     `KeyboardInterrupt`, the path `footage.record` takes for Ctrl-C.
 
-    It is raised once only, and never after `close()`, so a second cancel
-    cannot interrupt the restore the first one started, nor the final line.
-    `_thread.interrupt_main()` runs the SIGINT handler in the main thread,
-    which is this object, so the stdin thread raises through it too.
+    Three modes. Until `defer()` a cancel raises, at most once in the whole
+    run, so it can stop the set-aside or the recording. After `defer()` it
+    never raises and is only noted (`requested`), so nothing can interrupt
+    the restore, and the run still ends cancelled. After `close()` it is
+    ignored. `_thread.interrupt_main()` runs the SIGINT handler in the main
+    thread, which is this object, so the stdin thread goes through it too.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.raised = False
+        self.deferred = False
+        self.requested = False
         self.closed = False
 
     def __call__(self, signum: int, frame: Any) -> None:
         with self._lock:
             if self.raised or self.closed:
                 return
+            if self.deferred:
+                self.requested = True
+                return
             self.raised = True
         raise KeyboardInterrupt
 
-    def close(self) -> None:
+    def defer(self) -> None:
+        with self._lock:
+            self.deferred = True
+
+    def close(self) -> bool:
+        """Ignore every later cancel. Returns whether one was noted while
+        deferred."""
         with self._lock:
             self.closed = True
+            return self.requested
 
     def request(self) -> None:
         """From the stdin thread."""
         with self._lock:
             if self.raised or self.closed:
+                return
+            if self.deferred:
+                self.requested = True
                 return
         _INTERRUPT_MAIN()
 
@@ -437,8 +478,9 @@ class _Footage:
 
     Only files this command moved go back, and this run's clips are deleted
     only once set-aside finished (so every `*.mp4` left in `footage/` is new).
-    Both operations are idempotent, so a restore an interrupt cut short is
-    simply run again.
+    Each change is noted before it is made, so a set-aside a cancel cut short
+    is still undone exactly. The restore itself runs with the cancel deferred
+    (`_record_steps`), so nothing interrupts it.
     """
 
     def __init__(self, footage: pathlib.Path) -> None:
@@ -494,18 +536,50 @@ class _Footage:
             self.created_previous = False
 
 
-def _restore_through_cancel(state: _Footage) -> tuple:
-    """Run the restore to the end even if the one cancel lands inside it.
-    Returns `(cancelled, error)`."""
-    cancelled = False
-    while True:
+def _set_aside_and_record(
+    state: _Footage,
+    outcome: dict,
+    cameras: list,
+    *,
+    creds: Any,
+    folder: str,
+    seconds: int,
+    cancel: _Cancel,
+) -> None:
+    """Steps 6 and 7. Fills `outcome["result"]` or `outcome["refused"]`; a
+    cancel propagates as `KeyboardInterrupt`."""
+    try:
         try:
-            state.restore()
-            return cancelled, None
-        except KeyboardInterrupt:
-            cancelled = True
+            state.set_aside()
         except OSError as exc:
-            return cancelled, f"could not restore the earlier footage: {exc.strerror or exc}"
+            raise _Refused(
+                f"could not move old footage into {PREVIOUS_DIRNAME}/: {exc.strerror or exc}"
+            ) from None
+        state.recording_started = True
+        log.info(
+            f"{SUBCOMMAND}: recording {seconds} s from {len(cameras)} camera(s) "
+            f"into {state.footage}"
+        )
+        result = _RECORD(
+            cameras,
+            user=creds.username,
+            password=creds.password,
+            project_dir=state.footage,
+            project_name=folder,
+            seconds=seconds,
+            on_progress=lambda fraction: _emit({"progress": round(float(fraction), 3)}),
+        )
+        outcome["result"] = result
+        if not result.cancelled and not result.failed:
+            # Recorded: a later cancel no longer undoes anything. A cancel
+            # that lands before this line is caught and restores.
+            cancel.close()
+    except _Refused as exc:
+        outcome["refused"] = exc
+    except OSError as exc:
+        outcome["refused"] = _Refused(f"could not record: {exc.strerror or exc}", EXIT_FAILED)
+    except Exception as exc:  # noqa: BLE001 - still restore, still one final line
+        outcome["refused"] = _Refused(f"unexpected error: {type(exc).__name__}", EXIT_FAILED)
 
 
 def _record_steps(
@@ -517,51 +591,41 @@ def _record_steps(
     seconds: int,
     cancel: _Cancel,
 ) -> int:
-    """Steps 6 to 8, with the cancel caught anywhere in them."""
+    """Steps 6 to 8.
+
+    A cancel raises at most once. The inner `finally` switches the cancel to
+    deferred, so once control leaves steps 6 and 7 by any path (including a
+    cancel raised inside an `except` body or inside that `finally` before
+    `defer()` runs, which the outer `except` catches) no cancel can raise
+    again: the restore below always runs to the end, and a cancel noted
+    during it still makes the run end cancelled.
+    """
     state = _Footage(footage)
-    result = None
+    outcome: dict = {"result": None, "refused": None}
     cancelled = False
-    refused: Optional[_Refused] = None
     try:
         try:
-            state.set_aside()
-        except OSError as exc:
-            raise _Refused(
-                f"could not move old footage into {PREVIOUS_DIRNAME}/: {exc.strerror or exc}"
-            ) from None
-        state.recording_started = True
-        log.info(
-            f"{SUBCOMMAND}: recording {seconds} s from {len(cameras)} camera(s) into {footage}"
-        )
-        result = _RECORD(
-            cameras,
-            user=creds.username,
-            password=creds.password,
-            project_dir=footage,
-            project_name=folder,
-            seconds=seconds,
-            on_progress=lambda fraction: _emit({"progress": round(float(fraction), 3)}),
-        )
-        cancelled = result.cancelled
-        if not cancelled and not result.failed:
-            # Recorded: from here a cancel no longer undoes anything. Closed
-            # inside the try so a cancel landing just before still restores.
-            cancel.close()
+            _set_aside_and_record(
+                state, outcome, cameras,
+                creds=creds, folder=folder, seconds=seconds, cancel=cancel,
+            )
+        finally:
+            cancel.defer()
     except KeyboardInterrupt:
         cancelled = True
-    except _Refused as exc:
-        refused = exc
-    except OSError as exc:
-        refused = _Refused(f"could not record: {exc.strerror or exc}", EXIT_FAILED)
-    except Exception as exc:  # noqa: BLE001 - still restore, still one final line
-        refused = _Refused(f"unexpected error: {type(exc).__name__}", EXIT_FAILED)
 
+    result = outcome["result"]
+    refused: Optional[_Refused] = outcome["refused"]
+    cancelled = cancelled or bool(result is not None and result.cancelled)
     success = not cancelled and refused is None and result is not None and not result.failed
     restore_error = None
     if not success:
-        restored_cancel, restore_error = _restore_through_cancel(state)
-        cancelled = cancelled or restored_cancel
-    cancel.close()
+        try:
+            state.restore()
+        except OSError as exc:
+            restore_error = f"could not restore the earlier footage: {exc.strerror or exc}"
+    if cancel.close() and not success:
+        cancelled = True
     if restore_error:
         log.error(f"{SUBCOMMAND}: {restore_error}")
 
@@ -634,16 +698,19 @@ def handle_record_footage_subcommand(argv: list, ctx: Any) -> int:
         previous[signum] = _SIGNAL(signum, cancel)
     run: dict = {"seconds": 0, "password": ""}
     try:
-        return _run(ctx, cancel, run)
+        try:
+            return _run(ctx, cancel, run)
+        finally:
+            # Before any `except` body below runs, so a cancel can never
+            # land inside one and skip the final line. One that lands here
+            # before `close()` is the only raise and is caught below.
+            cancel.close()
     except _Refused as exc:
-        cancel.close()
         return _finish(exc.code, reason=_redact(str(exc), run["password"]), seconds=run["seconds"])
     except KeyboardInterrupt:
-        # Before step 6: nothing was written yet.
-        cancel.close()
+        # Before step 6 (`_record_steps` handles its own): nothing written.
         return _finish(EXIT_CANCELLED, reason=_CANCELLED, seconds=run["seconds"])
     except Exception as exc:  # noqa: BLE001 - the final line is REQUIRED
-        cancel.close()
         return _finish(
             EXIT_FAILED,
             reason=f"unexpected error: {type(exc).__name__}",
