@@ -67,10 +67,16 @@ class FakeController:
         self.started = 0
         self.stopped = 0
         self.comes_up = True
-        self.error = ""  # the controller's last start error
+        # Like AmcController: start() clears the error and may set its own
+        # (start_error); a start process that already exited with an error is
+        # only recorded when status() looks (exited_error).
+        self.error = ""
+        self.start_error = ""
+        self.exited_error = ""
 
     def start(self):
         self.started += 1
+        self.error = self.start_error
         if self.comes_up:
             self.fake.ready = True
 
@@ -78,6 +84,8 @@ class FakeController:
         self.stopped += 1
 
     def status(self):
+        if self.exited_error:
+            self.error, self.exited_error = self.exited_error, ""
         return {"State": "ready" if self.fake.ready else "down", "UiUrl": "", "Error": self.error, "UpdatedAt": 0}
 
     def ports(self):
@@ -632,15 +640,66 @@ def test_delete_while_amc_is_down_starts_it_and_is_503_without_waiting(env):
     assert not (env.root / "living-room").exists()
 
 
-def test_delete_503_includes_the_controllers_last_start_error(env):
+@pytest.mark.parametrize("exited,at_start,shown", [
+    ("amc start exited 1: pull failed", "", "amc start exited 1: pull failed"),  # an earlier start's failure
+    ("", "Tailscale address unavailable", "Tailscale address unavailable"),       # this start's failure
+    ("amc start exited 1: pull failed", "Tailscale address unavailable", "Tailscale address unavailable"),
+])
+def test_delete_503_includes_the_controllers_last_start_error(env, exited, at_start, shown):
     c = env.client()
     provision(c)
     env.fake.ready = False
     env.controller.comes_up = False
-    env.controller.error = "Tailscale address unavailable"
+    env.controller.exited_error, env.controller.start_error = exited, at_start
     r = delete(c)
     assert r.status_code == 503 and r.headers["retry-after"] == "15"
-    assert "last start error: Tailscale address unavailable" in r.json()["detail"]
+    detail = r.json()["detail"]
+    assert detail.endswith(f"(last start error: {shown})")
+    assert detail.count("last start error") == 1
+
+
+def test_delete_503_keeps_a_failed_earlier_start_with_the_real_controller(env, monkeypatch, tmp_path):
+    """Against AmcController itself: start() clears its error, so it must be read first."""
+    from mv3dt_amc_control import controller as controller_mod
+    from mv3dt_amc_control.amc_api import AmcApi
+
+    monkeypatch.setenv("MV3DT_INSTALL_DIR", str(tmp_path / "mv3dt"))
+    monkeypatch.setenv("AMC_STATE_DIR", str(tmp_path / "amc-state"))
+    monkeypatch.setenv("AMC_PUBLIC_HOST", "100.64.0.7")
+
+    class Proc:
+        def __init__(self, rc):
+            self.rc = rc
+
+        def poll(self):
+            return self.rc
+
+    procs = [Proc(1), Proc(None)]  # the earlier start exits 1; the delete's start keeps running
+    launched = []
+
+    def popen(cmd, **kw):
+        launched.append(cmd)
+        return procs.pop(0)
+
+    monkeypatch.setattr(controller_mod.subprocess, "Popen", popen)
+    real = controller_mod.AmcController()
+    monkeypatch.setattr(real, "ready", lambda: False)
+    real.start()  # the earlier, failed start; nobody has looked at status() since
+    (tmp_path / "amc-state" / "amc_service.log").write_text("docker pull failed\n")
+
+    env.store.create("proj-1", "living-room", "Living Room")
+    env.store.update("living-room", amc_project_id="20260001", state="ready")
+    env.fake.ready = False
+    prov = Provisioner(env.store, real, config_loader=env.provisioner._load_config,
+                       api_factory=lambda cfg: AmcApi("http://amc/v1",
+                                                      client=TestClient(env.fake.app(), base_url="http://amc")))
+    with pytest.raises(ProvisionError) as exc:
+        prov.delete("proj-1")
+    assert exc.value.status == 503 and exc.value.retry_after == 15
+    assert "last start error: amc start exited 1" in exc.value.message
+    assert "docker pull failed" in exc.value.message
+    assert len(launched) == 2  # the delete asked AMC to start again
+    assert (env.root / "living-room").is_dir()
 
 
 def test_delete_503_exposes_retry_after_to_the_browser(env):
