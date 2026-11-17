@@ -278,7 +278,32 @@ def test_list_files(files_store):
     assert by_path["footage/cam_00.mp4"]["Size"] == 10
     assert by_path["notes.txt"]["ModifiedAt"] == NOW
     assert all(isinstance(e["ModifiedAt"], int) for e in entries)
-    assert set(entries[0]) == {"Path", "Size", "ModifiedAt"}
+    assert set(entries[0]) == {"Path", "Size", "ModifiedAt", "Downloadable"}
+    assert {e["Path"]: e["Downloadable"] for e in entries} == {
+        "calibration/20261117T101500Z/result.zip": True,
+        "footage/cam_00.mp4": False,
+        "footage/cam_01.mp4": False,
+        "notes.txt": True,
+    }
+
+
+# --- video rule (AMC-PROJECT-LIFECYCLE.md section 4) -------------------------
+
+@pytest.mark.parametrize("rel", [
+    "footage/x.txt", "footage/cam_00.mp4", "footage", "./footage/a/b.json", "calibration/a.MP4",
+    "calibration/../footage/x.txt", "footage//y.txt",
+    "a.mkv", "b.MOV", "c.avi", "d.ts", "e.h264", "f.H265", "runs/1/g.Mp4",
+])
+def test_is_video(rel):
+    assert P.is_video(rel)
+
+
+@pytest.mark.parametrize("rel", [
+    "notes.txt", "calibration/result.zip", "floorplan/layout.png", "runs/footage/x.txt", "mp4", "a.mp4.txt",
+    "footagex/a.txt", "a.tsx", "footage/../notes.txt",
+])
+def test_is_not_video(rel):
+    assert not P.is_video(rel)
 
 
 def test_list_files_keeps_nested_project_json(files_store):
@@ -418,3 +443,84 @@ def test_schema_version_must_be_exactly_int_1(store, version):
     good["schema_version"] = version
     (store.root / "lab" / "project.json").write_text(json.dumps(good))
     assert store.get_by_folder("lab") is None
+
+
+# --- removing a folder (AMC-PROJECT-LIFECYCLE.md section 3) ------------------
+
+def test_remove_renames_then_removes(store, monkeypatch):
+    store.create("p1", "lab", "Lab")
+    (store.root / "lab" / "footage" / "cam_00.mp4").write_bytes(b"v")
+    seen = []
+    real_rmtree = P.shutil.rmtree
+
+    def rmtree(path, *a, **kw):
+        seen.append(Path(path).name)
+        assert not (store.root / "lab").exists()  # the name is free before removal starts
+        real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr(P.shutil, "rmtree", rmtree)
+    assert store.remove("lab") is None
+    assert seen == [f".deleting-lab-{NOW}"]
+    assert list(store.root.iterdir()) == []
+    assert store.get_by_pid("p1") is None
+
+
+def test_remove_does_not_follow_symlinks(store, tmp_path):
+    store.create("p1", "lab", "Lab")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    os.symlink(outside, store.root / "lab" / "linked-dir")
+    os.symlink(outside / "keep.txt", store.root / "lab" / "linked-file")
+    assert store.remove("lab") is None
+    assert (outside / "keep.txt").read_text() == "keep"
+    assert list(store.root.iterdir()) == []
+
+
+def test_remove_error_is_a_leftover_not_an_exception(store, monkeypatch):
+    store.create("p1", "lab", "Lab")
+
+    def fail(path, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(P.shutil, "rmtree", fail)
+    leftover = store.remove("lab")
+    assert leftover == str(store.root / f".deleting-lab-{NOW}")
+    assert Path(leftover).is_dir()
+    # The leftover never reads as a project and the name is free again.
+    assert store.list() == [] and store.get_by_pid("p1") is None
+    assert store.create("p2", "lab", "Lab").project_id == "p2"
+
+
+def test_remove_twice_in_one_second_does_not_collide(store, monkeypatch):
+    def fail(path, *a, **kw):  # leave the leftover
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(P.shutil, "rmtree", fail)
+    store.create("p1", "lab", "Lab")
+    first = store.remove("lab")
+    store.create("p2", "lab", "Lab")
+    second = store.remove("lab")
+    assert first != second and Path(first).is_dir() and Path(second).is_dir()
+
+
+@pytest.mark.parametrize("folder", ["evil", "plain-file", "absent", ".hidden", "../lab"])
+def test_remove_refuses_non_plain_folder(evil_store, folder):
+    with pytest.raises(P.ProjectNotFound):
+        evil_store.remove(folder)
+    assert evil_store.get_by_folder("lab") is not None
+
+
+def test_dot_prefixed_entries_are_never_projects(store):
+    """A `.deleting-*` leftover holds a valid binding but is invisible."""
+    store.create("p1", "lab", "Lab")
+    good = store.get_by_folder("lab").to_json()
+    for name in (".deleting-lab-1794879242", ".lab"):
+        d = store.root / name
+        d.mkdir()
+        (d / "project.json").write_text(json.dumps({**good, "Folder": name, "ProjectId": "p9"}))
+    assert [b.folder for b in store.list()] == ["lab"]
+    assert store.get_by_pid("p9") is None
+    assert store.get_by_folder(".lab") is None
+    with pytest.raises(FileNotFoundError):
+        store.list_files(".lab")

@@ -79,3 +79,14 @@ class ProjectFile(BaseModel):
     Path: str = Field(description="Relative to the project folder, '/' separated")
     Size: int
     ModifiedAt: int
+    Downloadable: bool = Field(description="False for a video file, which stays on the workstation")
+
+
+class ProjectDeleted(BaseModel):
+    """What DELETE /projects/current removed (AMC-PROJECT-LIFECYCLE.md section 3)."""
+
+    Folder: str
+    AmcProjectId: str | None = Field(default=None, description="The binding's AMC project, if it had one")
+    AmcProjectDeleted: bool = Field(description="True when AMC deleted the project or no longer had it")
+    Leftover: str | None = Field(
+        default=None, description="The renamed folder that could not be fully removed; null when it is gone")

@@ -131,6 +131,18 @@ class AmcApi:
         self._check(self._http.post(self._url(f"calibrate/{project_id}"), json={"detector_type": detector_type},
                                     timeout=self.timeout), "calibrate")
 
+    def stop_calibration(self, project_id: str) -> None:
+        self._check(self._http.post(self._url(f"stop_calibration/{project_id}"), timeout=self.timeout),
+                    "stop_calibration")
+
+    def delete_project(self, project_id: str) -> bool:
+        """Delete the AMC project. False when AMC has no such project (its 404), which counts as deleted."""
+        r = self._http.delete(self._url(f"delete_project/{project_id}"), timeout=self.timeout)
+        if r.status_code == 404:
+            return False
+        self._check(r, "delete_project")
+        return True
+
     def calibration_log(self, project_id: str, tail_lines: int = 20) -> str:
         try:
             r = self._http.get(self._url(f"amc/calibrate/{project_id}/log"), timeout=self.timeout)

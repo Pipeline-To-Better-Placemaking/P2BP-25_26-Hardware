@@ -16,8 +16,10 @@ Routes (all but /health need a web app ticket for any web project; scope
     GET  /amc/automation/config   the automation settings in effect
     POST /projects                set up the ticket's project on the workstation (scope "amc-provision")
     GET  /projects/current        the ticket's project folder binding (scope "amc" or "amc-provision")
-    GET  /projects/current/files  list the folder
-    GET  /projects/current/files/{path}  download one file (ticket also accepted as ?ticket=)
+    DELETE /projects/current      delete the folder and its AMC project (scope "amc-delete" only)
+    GET  /projects/current/files  list the folder; video files are listed with Downloadable false
+    GET  /projects/current/files/{path}  download one file (ticket also accepted as ?ticket=);
+                                  403 for a video file (AMC-PROJECT-LIFECYCLE.md section 4)
 
 The project is always the ticket's `pid`. While a project is being set up,
 POST /projects, POST /amc/stop, POST /amc/automation/start and
@@ -38,15 +40,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
-from .auth import PROVISION_SCOPE, SCOPE, TicketError, ticket_dependency, verify_ticket
+from .auth import DELETE_SCOPE, PROVISION_SCOPE, SCOPE, TicketError, ticket_dependency, verify_ticket
 from .automation import Busy, CalibrationRunner, NothingToResume
 from .automation_config import ConfigError, load_config
 from .calibration_spec import SpecError, verify_spec
 from .controller import AmcController
-from .models import AmcStatus, AutomationJob, AutomationStart, ProjectBinding, ProjectFile, ProjectProvision
-from .projects import Binding, ProjectStore, default_projects_root
+from .models import (AmcStatus, AutomationJob, AutomationStart, ProjectBinding, ProjectDeleted, ProjectFile,
+                     ProjectProvision)
+from .projects import Binding, ProjectStore, default_projects_root, is_video
 from .provisioning import Provisioner, ProvisionError
 from .settings import Settings
+
+VIDEO_REFUSED = "Video files stay on the workstation"
 
 
 def create_app(
@@ -64,7 +69,7 @@ def create_app(
         runner = CalibrationRunner(controller, config_loader=lambda: load_config(override))
     if provisioner is None:
         store = store or ProjectStore(default_projects_root())
-        provisioner = Provisioner(store, controller, runner_busy=runner.uses_amc,
+        provisioner = Provisioner(store, controller, runner_busy=runner.uses_amc, runner_job=runner.status,
                                   config_loader=lambda: load_config(override))
     store = provisioner.store
     provisioner.recover()  # no setup job survives a restart
@@ -78,7 +83,9 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.allowed_origins),
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
+        # Not CORS-safelisted: the delete's 503 tells the browser when to retry.
+        expose_headers=["Retry-After"],
         allow_headers=["Authorization", "Content-Type"],
         allow_credentials=False,
         # Chrome's Private Network Access preflight: the web app is a public
@@ -100,6 +107,7 @@ def create_app(
 
     ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, SCOPE)
     provision_ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, PROVISION_SCOPE)
+    delete_ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, DELETE_SCOPE)
     any_ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, {SCOPE, PROVISION_SCOPE})
 
     def exclusive(fn):
@@ -218,6 +226,16 @@ def create_app(
     def projects_current(claims: dict = Depends(any_ticket)):
         return wire(project_of(claims))
 
+    @app.delete("/projects/current", response_model=ProjectDeleted)
+    def projects_delete(claims: dict = Depends(delete_ticket)):
+        try:
+            return provisioner.delete(claims["pid"])
+        except ProvisionError as exc:
+            headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+            raise HTTPException(exc.status, exc.message, headers=headers) from exc
+        except ConfigError as exc:
+            raise HTTPException(500, str(exc)) from exc
+
     @app.get("/projects/current/files", response_model=list[ProjectFile])
     def projects_files(claims: dict = Depends(ticket)):
         try:
@@ -240,11 +258,18 @@ def create_app(
             claims = verify_ticket(token, settings.ticket_secret, settings.ticket_issuer, SCOPE)
         except TicketError as exc:
             raise HTTPException(exc.status, exc.message) from None
+        # The video rule twice (AMC-PROJECT-LIFECYCLE.md section 4): on the
+        # requested path before any disk access, then on what it resolved to,
+        # so a link to a clip is refused as well.
+        if is_video(path):
+            raise HTTPException(403, VIDEO_REFUSED)
         binding = project_of(claims)
         try:
             target = store.resolve_file(binding.folder, path)
         except FileNotFoundError:
             raise HTTPException(404, "No such file in this project") from None
+        if is_video(target.relative_to(store.root.resolve() / binding.folder).as_posix()):
+            raise HTTPException(403, VIDEO_REFUSED)
         return FileResponse(target, media_type="application/octet-stream", filename=target.name)
 
     return app

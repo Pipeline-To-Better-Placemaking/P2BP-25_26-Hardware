@@ -5,10 +5,17 @@ Every web app project that has a workstation folder gets
 project id and, once provisioned, to an AMC project. The folder name is user
 input used verbatim as a directory and AMC project name, so it is checked
 against one fixed rule. Files are served from the folder only after the
-requested path is resolved (symlinks followed) and found inside it.
+requested path is resolved (symlinks followed) and found inside it. Video
+files are listed but never served: calibration footage stays on the
+workstation (`is_video`).
+
+Deleting a project renames its folder to a dot-prefixed name in one
+`rename(2)`, so the name is free at once and the leftover can never read as
+a project (the folder rule rejects a leading dot), then removes that tree.
 
 Pure stdlib, no web framework: the API and the automation both read this.
-See installer/plan/AMC-WEB-PROJECTS.md sections 3, 4 and 7.
+See installer/plan/AMC-WEB-PROJECTS.md sections 3, 4 and 7, and
+AMC-PROJECT-LIFECYCLE.md sections 3 and 4.
 
 Environment:
   AMC_PROJECTS_DIR   projects root, default <MV3DT_INSTALL_DIR>/amc_projects
@@ -17,8 +24,11 @@ Environment:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import posixpath
 import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -38,6 +48,12 @@ STATE_PROVISIONING = "provisioning"
 STATE_READY = "ready"
 STATE_FAILED = "failed"
 STATES = (STATE_PROVISIONING, STATE_READY, STATE_FAILED)
+
+FOOTAGE_DIR = "footage"
+VIDEO_SUFFIXES = frozenset((".mp4", ".mkv", ".mov", ".avi", ".ts", ".h264", ".h265"))
+DELETING_PREFIX = ".deleting-"
+
+log = logging.getLogger(__name__)
 
 
 class InvalidFolder(ValueError):
@@ -62,6 +78,16 @@ def validate_folder(name: str) -> str:
             f"invalid workstation folder {name!r}: 1 to {FOLDER_MAX} lowercase "
             "letters, digits and inner hyphens")
     return name
+
+
+def is_video(rel: str) -> bool:
+    """True for a path the service never serves: anything under footage/, or a
+    video suffix (case-insensitive). The path is normalized as a POSIX path
+    first and decided on the string alone, with no disk access."""
+    path = PurePosixPath(posixpath.normpath(rel or "."))
+    if path.parts and path.parts[0] == FOOTAGE_DIR:
+        return True
+    return path.suffix.lower() in VIDEO_SUFFIXES
 
 
 def suggest_folder(title: str) -> str:
@@ -298,6 +324,33 @@ class ProjectStore:
                 raise ProjectNotFound(f"no project bound to folder {folder!r}")
             return self.save(replace(current, **changes))
 
+    def remove(self, folder: str) -> str | None:
+        """Delete the folder and its binding. Returns the leftover path, or None when all is gone.
+
+        One rename moves `<root>/<folder>` to `<root>/.deleting-<folder>-<unix seconds>`,
+        then the renamed tree is removed without following symlinks. Once the
+        rename is done nothing raises: a removal error is logged and the renamed
+        path returned. ProjectNotFound unless the folder is a plain directory
+        under the root; an OSError from the rename itself propagates.
+        """
+        with self._lock:
+            if self._real_dir(folder) is None:
+                raise ProjectNotFound(f"no project folder {folder!r}")
+            stamp = self._now()
+            target = self.root / f"{DELETING_PREFIX}{folder}-{stamp}"
+            n = 1
+            while os.path.lexists(target):  # a leftover from an earlier delete this second
+                target = self.root / f"{DELETING_PREFIX}{folder}-{stamp}-{n}"
+                n += 1
+            os.rename(self.root / folder, target)
+        try:
+            # rmtree never follows a symlink inside the tree: it unlinks the link.
+            shutil.rmtree(target)
+        except Exception as exc:  # the binding is already gone, so never fail here
+            log.warning("could not fully remove %s: %s", target, exc)
+            return str(target) if os.path.lexists(target) else None
+        return None
+
     def list_files(self, folder: str) -> list[dict[str, Any]]:
         """FileNotFoundError unless the folder is a plain directory under the root."""
         base = self._real_dir(folder)
@@ -317,8 +370,9 @@ class ProjectStore:
                     continue
                 if not stat.S_ISREG(st.st_mode):
                     continue
-                out.append({"Path": p.relative_to(base).as_posix(),
-                            "Size": st.st_size, "ModifiedAt": int(st.st_mtime)})
+                rel = p.relative_to(base).as_posix()
+                out.append({"Path": rel, "Size": st.st_size, "ModifiedAt": int(st.st_mtime),
+                            "Downloadable": not is_video(rel)})
         out.sort(key=lambda e: e["Path"])
         return out
 
