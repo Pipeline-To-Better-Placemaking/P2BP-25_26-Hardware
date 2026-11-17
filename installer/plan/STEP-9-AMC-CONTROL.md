@@ -202,8 +202,9 @@ The automated workflow, against AMC 3.3.0's seven steps:
 | 7 Results | evaluation statistics; optional result ZIP; Step 4 ingests the installer's project |
 
 Steps 1 to 5 all run first; if any needs the user the run pauses once before
-step 6 with a to-do list and continues on request. A step left to the user counts as done only when AMC confirms it
-([`AMC-RECTIFICATION-AND-SCALE`](AMC-RECTIFICATION-AND-SCALE.md#5-checked-resume-required)).
+step 6 with a to-do list and continues on request. A step left to the user
+counts as done only when AMC confirms it
+([`AMC-RECTIFICATION-AND-SCALE` section 5](AMC-RECTIFICATION-AND-SCALE.md#5-checked-resume-required)).
 
 ---
 

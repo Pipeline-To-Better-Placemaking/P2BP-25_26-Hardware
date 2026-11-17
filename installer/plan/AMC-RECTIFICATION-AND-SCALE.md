@@ -67,28 +67,61 @@ then reaches `COMPLETED`.
 ## 3. Step 4: automatic rectification (LOCKED)
 
 `rectification.mode` gains `auto` and `linear`, and **`auto` becomes the
-default**. `ui`, `api` and `skip` keep their meaning.
+default**. `ui`, `api` and `skip` keep their meaning. `auto` and `linear`
+always run the flow below, also on Continue; they never take the
+"finished in AMC" shortcut.
 
-`auto`, after `amc_changed` is saved
-([`AMC-PROJECT-LIFECYCLE` section 5](AMC-PROJECT-LIFECYCLE.md#5-cancel-resets-the-run-locked)):
+### 3.1 Before starting
 
-1. **State**: `GET /v1/rectification/{id}`. `COMPLETED` is done at once.
-   `READY_FOR_REVIEW` goes to step 4. `RUNNING` goes to step 3.
-2. **Start**: `POST /v1/rectification/{id}`.
+- **Videos first**: when `get_project_info` reports `video_files_count` of 0
+  (step 2 is still waiting for footage), the step is `waiting` with
+  `needs_user=False`: "Rectification runs once the videos are in AMC". AMC's
+  own UI disables Start in that case.
+- **Configuration**: AMC's UI posts the configuration just before starting;
+  the run already posted it in step 3
+  ([section 4](#4-step-3-the-scale-locked)), so it posts nothing extra.
+
+### 3.2 The flow
+
+A saved job field, `rectification_started`, is set before the run's first
+`POST /v1/rectification/{id}`. Until it is set, the run never trusts AMC's
+state: an AMC project a `web_project` run reuses may be `COMPLETED` from
+footage this run has just replaced.
+
+1. **State**: `GET /v1/rectification/{id}`.
+   - Not yet `rectification_started`: wait (polling) while another
+     rectification is `RUNNING`, then go to item 2 whatever the state.
+   - Started: `RUNNING` goes to item 3 or 5 (whichever phase it was in,
+     saved as `rectification_phase`); `READY_FOR_REVIEW` goes to item 4;
+     `COMPLETED` is done; `NOT_STARTED` or `ERROR` goes to item 2, so
+     Continue after a failure starts over.
+2. **Start**: `_changing_amc()`, save `rectification_started` and
+   `rectification_phase: estimate`, then `POST /v1/rectification/{id}`.
 3. **Estimate**: poll every `rectification.api.poll_seconds` until the state
-   leaves `RUNNING`, within `rectification.api.timeout_seconds`. The step's
-   message shows the state.
-4. **Commit**: at `READY_FOR_REVIEW`, read the cameras and post `/manual`
-   with each camera's `committed ?? auto_estimate`, mapped as in
-   [section 2](#2-amcs-rectification-api).
-5. **Generate**: poll the same way until `COMPLETED`, which is done; the
-   message names each camera's model.
+   leaves `RUNNING`, within its own `rectification.api.timeout_seconds`. The
+   step message shows the state.
+4. **Commit**: read the cameras and post `/manual` with each camera's
+   `committed ?? auto_estimate`, mapped as in
+   [section 2](#2-amcs-rectification-api), after saving
+   `rectification_phase: generate`. A camera with no estimate is committed
+   with `k1 = k2 = 0`, as AMC's UI would, and the step message names it.
+5. **Generate**: poll the same way, with a fresh timeout, until
+   `COMPLETED`, which is done; the message names each camera's model.
 
-`ERROR` at any point, or a timeout, fails the step with the last 10 lines of
-`GET /v1/rectification/{id}/log`. Continue runs the step again from item 1.
+`ERROR`, or a timeout, fails the step with the last 10 lines of
+`GET /v1/rectification/{id}/log`. Cancel is honoured between polls, as in
+step 6.
 
-`linear` posts `/v1/linear_media/{id}` and polls until `COMPLETED`, for
-footage that is already rectified.
+`linear` uses the same field and polling: `POST /v1/linear_media/{id}`
+instead of items 2 to 4, then polls until `COMPLETED`.
+
+### 3.3 Cancel
+
+The cancel undo
+([`AMC-PROJECT-LIFECYCLE` section 5.2](AMC-PROJECT-LIFECYCLE.md#52-undo))
+has no call to stop a rectification. Before deleting the AMC project it
+polls `GET /v1/rectification/{id}` while the state is `RUNNING`, up to
+`rectification.api.timeout_seconds`, then deletes it either way.
 
 `AmcApi` gains `rectification_state`, `start_rectification`,
 `rectification_cameras`, `commit_rectification`, `stage_linear_media` and
@@ -102,42 +135,65 @@ AMC 3.3.0 keeps **one** current configuration, not one per project:
 `GET /v1/config` returns `{config_params}` with no project id, and no file
 under AMC's `projects/` holds `layout_px_per_m`. AMC's UI saves the scale by
 reading `GET /v1/config`, changing `layout_px_per_m`, and posting the whole
-object to `POST /v1/config/{id}`. The factory value from
+object to `POST /v1/config/{id}`. `ConfigParams` allows no extra keys, so a
+post is always a whole object. The factory value from
 `GET /v1/config/defaults` is `24.22`.
 
-The run therefore keeps the scale itself:
+### 4.1 Where the scale comes from
 
-1. **Known scale**: the first of: the web app's floor plan
-   (`parameters.scale.source: database`), `fixed_px_per_m` (`fixed`), or
-   the scale remembered for this project ([section 4.1](#41-remembered-scale)).
-   The run posts it the way AMC's UI does (current config with
-   `layout_px_per_m` replaced), with or without a `settings_file`, and
-   saves it on the job as `layout_px_per_m`.
-2. **No scale**: the step is `waiting`: "Set the floor plan scale in AMC's
-   Parameters step: measure two points on the floor plan, or enter its
-   pixels per metre, then Save and press Continue".
+`parameters.scale.source` picks the first source:
+
+| `source` | Scale |
+|---|---|
+| `database` | the web app's floor plan scale (`px_per_m`); otherwise, in `web_project` mode, the remembered scale ([section 4.3](#43-remembered-scale)) |
+| `fixed` | `fixed_px_per_m` |
+| `none` | none: the run neither posts nor asks for a scale, and step 6 does not re-post one (today's behaviour for operators who manage it themselves) |
+
+### 4.2 Posting and waiting
+
+Every config post is built in this order, each layer replacing the keys it
+names: `GET /v1/config`'s `config_params`, then `settings_file`, then
+`settings_overrides`, then `settings_key` (default `layout_px_per_m`) set to
+the scale when one is known. A config is posted even without a
+`settings_file`. The two existing "Enter X px/m on AMC's Parameters step"
+waits are removed: a known scale is always posted.
+
+1. **Known scale**: post it and save it on the job as `layout_px_per_m`.
+2. **No scale**: post the config with `settings_key` set to the factory
+   default, so a value left by another project cannot pass item 3, then wait:
+   "Set the floor plan scale in AMC's Parameters step: measure two points on
+   the floor plan, or enter its pixels per metre, then Save and press
+   Continue".
 3. **On Continue**: read `GET /v1/config`. A value that is positive and not
-   the factory default is saved on the job and remembered for the project;
-   otherwise the step stays `waiting` with the value AMC reported.
-4. **Before calibrating**: step 6 posts the job's `layout_px_per_m` to the
-   project again, because AMC's single configuration may have changed or
-   been reset since step 3.
+   the factory default is saved on the job and remembered
+   ([section 4.3](#43-remembered-scale)); otherwise the step stays `waiting`
+   with the value AMC reported.
+4. **Before calibrating**: when the job has a scale, step 6 reads
+   `GET /v1/config` first. A positive, non-default value different from the
+   job's is a correction made during the pause: it replaces the job's value
+   and is remembered. The run then posts the job's value, and only then calls
+   `verify_project` and `calibrate`.
 
 > **Accepted limit (flagged):** a floor plan whose true scale is exactly
 > `24.22` px/m cannot be confirmed from AMC; enter it as `24.2201`, or give
 > the floor plan that scale in the web app.
 
-`parameters.scale.source: none` keeps today's behaviour, for operators who
-manage the scale outside the run.
-
-### 4.1 Remembered scale
+### 4.3 Remembered scale
 
 The folder binding (`project.json`,
 [`AMC-WEB-PROJECTS` section 4](AMC-WEB-PROJECTS.md#4-workstation-folder-layout))
-gains `layout_px_per_m`, `null` by default and on older files. It is
-written when a value is confirmed in item 3, so later runs of the same
-project do not pause for it. The web app's floor plan scale, when present,
-still wins.
+gains two optional keys, `LayoutPxPerM` and `LayoutSha256`. They are written
+together when a scale is confirmed (items 3 and 4): the scale and the
+SHA-256 of the `floorplan/layout.png` this run uploaded. A remembered scale
+is used only when the run's layout has the same hash, so a new floor plan
+asks again.
+
+- **Schema**: `schema_version` stays 1. Both keys are read as optional
+  (`null` when absent), so older files still load.
+- **Wire**: they appear in the binding `GET /projects/current` returns; the
+  web app ignores keys it does not know, so it needs no change.
+- **Cancel**: the undo keeps the remembered scale, like the floor plan
+  itself: it describes the floor plan, not the run.
 
 ---
 
@@ -172,9 +228,13 @@ checked; the run pauses again with every unfinished step listed.
 
 - Reviewing the rectification previews; the auto estimate is committed as
   AMC's UI would commit it unchanged.
-- Setting the scale from the web app (a decision for later; the run already
-  takes the floor plan's scale when the web app has one).
 - Manual rectification through the API.
+
+Open decisions:
+
+1. **Setting the scale from the web app — RESOLVED** by the operator
+   (2026-11-17): the scale is set in AMC's Parameters step; the web app's
+   floor plan scale is still used when present.
 
 ---
 
@@ -183,15 +243,16 @@ checked; the run pauses again with every unfinished step listed.
 | Unit | Branch | Files touched | Depends on | Wave |
 |---|---|---|---|---|
 | R0 This spec | `feat/installer-amc-rectify-scale-plan` | this doc, `STEP-9-AMC-CONTROL.md` sections 6 and 10 | none | 1 |
-| R1 Automatic rectification | `feat/installer-amc-auto-rectification` | `mv3dt_amc_control/automation.py`, `automation_config.py`, `amc_api.py`, `amc_automation.example.yaml`, `tests/amc_control/test_amc_control_automation.py`, `tests/amc_control/amc_control_fake_api.py` | R0 | 2 |
-| R2 Scale step and checked resume | `feat/installer-amc-scale-and-resume-checks` | `mv3dt_amc_control/automation.py`, `projects.py`, `amc_api.py`, `tests/amc_control/test_amc_control_automation.py`, `tests/amc_control/test_amc_control_projects.py`, `tests/amc_control/amc_control_fake_api.py` | R1 | 3 |
+| R1 Automatic rectification | `feat/installer-amc-auto-rectification` | `mv3dt_amc_control/automation.py` (including its module docstring and the cancel undo's wait, section 3.3), `automation_config.py`, `amc_api.py`, `amc_automation.example.yaml`, `tests/amc_control/test_amc_control_automation.py`, `tests/amc_control/amc_control_fake_api.py` | R0 | 2 |
+| R2 Scale step and checked resume | `feat/installer-amc-scale-and-resume-checks` | `mv3dt_amc_control/automation.py` (including its module docstring), `automation_config.py`, `projects.py`, `amc_api.py`, `amc_automation.example.yaml`, `tests/amc_control/test_amc_control_automation.py`, `tests/amc_control/test_amc_control_projects.py`, `tests/amc_control/amc_control_fake_api.py` | R1 | 3 |
 
 Paths: `mv3dt_amc_control/` is under
 `installer/mv3dt_installer/assets/amc_control/`; `tests/` under `installer/`;
 the docs under `installer/plan/`.
 
-Serialization points: R1 and R2 both change `automation.py`, `amc_api.py`,
-the automation tests and the fake AMC, so R2 is stacked on R1 rather than
+Serialization points: R1 and R2 both change `automation.py`,
+`automation_config.py`, `amc_api.py`, `amc_automation.example.yaml`, the
+automation tests and the fake AMC, so R2 is stacked on R1 rather than
 built beside it. R2's resume check for step 4 reads the state call R1 adds.
 
 ---
