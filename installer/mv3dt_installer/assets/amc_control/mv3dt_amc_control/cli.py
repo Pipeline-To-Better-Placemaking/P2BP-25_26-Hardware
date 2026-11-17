@@ -13,7 +13,6 @@ def _serve(settings: Settings) -> int:
         name
         for name, value in (
             ("WORKSTATION_TICKET_SECRET", settings.ticket_secret),
-            ("TRACKING_PROJECT_ID", settings.project_id),
             ("ALLOWED_ORIGINS", ",".join(settings.allowed_origins)),
         )
         if not value

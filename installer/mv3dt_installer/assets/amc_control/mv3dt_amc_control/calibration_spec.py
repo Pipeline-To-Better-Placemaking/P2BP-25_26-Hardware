@@ -10,6 +10,7 @@ the hosts listed in the config.
 from __future__ import annotations
 
 import io
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -20,6 +21,8 @@ from .auth import AUDIENCE
 
 SPEC_SCOPE = "amc-calibration-spec"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+# The workstation folder name rule (AMC-WEB-PROJECTS.md section 3).
+FOLDER_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 
 
 class SpecError(ValueError):
@@ -42,6 +45,8 @@ class CalibrationSpec:
     title: str
     floorplan: Floorplan | None
     issued_to: str
+    # The project's workstation folder; None when the spec carries none.
+    folder: str | None = None
 
 
 def verify_spec(token: str, secret: str, ticket_pid: str, issuer: str | None = None) -> CalibrationSpec:
@@ -72,7 +77,19 @@ def verify_spec(token: str, secret: str, ticket_pid: str, issuer: str | None = N
             px_per_m=float(scale) if isinstance(scale, (int, float)) and scale > 0 else None,
         )
     title = str(spec.get("title") or "").strip() or claims["pid"]
-    return CalibrationSpec(project_id=claims["pid"], title=title, floorplan=floorplan, issued_to=claims["sub"])
+    return CalibrationSpec(project_id=claims["pid"], title=title, floorplan=floorplan, issued_to=claims["sub"],
+                           folder=_folder(spec.get("folder")))
+
+
+def _folder(value: object) -> str | None:
+    """The spec's optional `folder`: absent or null is None, anything else must be a valid name."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SpecError("calibration spec folder must be a string or null")
+    if not FOLDER_RE.fullmatch(value):
+        raise SpecError(f"calibration spec folder {value!r} is not a valid workstation folder name")
+    return value
 
 
 def download_floorplan_png(fp: Floorplan, allowed_hosts: list[str], max_bytes: int,

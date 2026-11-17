@@ -2,10 +2,12 @@
 
 The systemd unit loads `installer.conf` and `secrets/tracking.env` as
 environment files and adds the values Step 9 renders (`MV3DT_INSTALL_DIR`,
-`AMC_PUBLIC_HOST`, `AMC_AUTOMATION_CONFIG`, `BIND`). The ticket secret, the
-web app project id and the allowed origins are shared with the tracking
-service (Step 8), because the web app signs both services' tickets with the
-same secret.
+`AMC_PUBLIC_HOST`, `AMC_AUTOMATION_CONFIG`, `BIND`). The ticket secret and
+the allowed origins are shared with the tracking service (Step 8), because
+the web app signs both services' tickets with the same secret. Unlike the
+tracking service, this one serves any web project, so it does not read
+`TRACKING_PROJECT_ID`: the web app checks the user's project permission
+before it signs a ticket.
 """
 
 from __future__ import annotations
@@ -27,9 +29,6 @@ def _truthy(value: str | None) -> bool:
 @dataclass(frozen=True)
 class Settings:
     ticket_secret: str = ""
-    # The web app project whose tickets are accepted (TRACKING_PROJECT_ID in
-    # tracking.env). Not installer.conf's AMC_PROJECT_ID, which is AMC's own id.
-    project_id: str = ""
     allowed_origins: list[str] = field(default_factory=list)
     ticket_issuer: str | None = None
     install_dir: Path = Path(DEFAULT_INSTALL_DIR)
@@ -44,7 +43,6 @@ class Settings:
         config = env.get("AMC_AUTOMATION_CONFIG", "").strip()
         return cls(
             ticket_secret=env.get("WORKSTATION_TICKET_SECRET", ""),
-            project_id=env.get("TRACKING_PROJECT_ID", "").strip(),
             allowed_origins=[o for o in origins if o],
             ticket_issuer=env.get("TICKET_ISSUER", "").strip() or None,
             install_dir=Path(env.get("MV3DT_INSTALL_DIR", "").strip() or DEFAULT_INSTALL_DIR),

@@ -131,15 +131,34 @@ def test_a_tracking_ticket_cannot_control_amc(amc_env):
     assert not amc_env[0].exists()
 
 
-def test_project_comes_from_tracking_project_id_not_amcs_own_id(amc_env):
-    """installer.conf's AMC_PROJECT_ID is AMC's id and must not be read as the web project."""
+def test_a_ticket_for_any_web_project_is_accepted(amc_env):
+    """The service no longer pins one web project; the web app checks permission before it signs.
+
+    TRACKING_PROJECT_ID (and installer.conf's AMC_PROJECT_ID, AMC's own id) no
+    longer narrows which tickets are accepted.
+    """
     settings = Settings.from_env({
         "WORKSTATION_TICKET_SECRET": SECRET, "TRACKING_PROJECT_ID": "proj-1", "ALLOWED_ORIGINS": ORIGIN,
         "AMC_PROJECT_ID": "20261019_151133_2885",
     })
-    assert settings.project_id == "proj-1"
-    assert make_client(settings, make_ticket(pid="proj-1")).get("/amc/status").status_code == 200
-    assert make_client(settings, make_ticket(pid="other")).get("/amc/status").status_code == 403
+    for pid in ("proj-1", "other", "20261019_151133_2885"):
+        assert make_client(settings, make_ticket(pid=pid)).get("/amc/status").status_code == 200
+
+
+@pytest.mark.parametrize("pid", [None, ""])
+def test_a_ticket_without_a_project_is_a_401(amc_env, pid):
+    claims = {"sub": "user-1", "scope": "amc", "aud": "p2bp-workstation", "exp": int(time.time()) + 900}
+    if pid is not None:
+        claims["pid"] = pid
+    token = jwt.encode(claims, SECRET, algorithm="HS256")
+    assert make_client(ticket=token).get("/amc/status").status_code == 401
+
+
+def test_a_provision_ticket_cannot_use_the_amc_routes(amc_env):
+    c = make_client(ticket=make_ticket(scope="amc-provision"))
+    assert c.get("/amc/status").status_code == 403
+    assert c.post("/amc/start").status_code == 403
+    assert not amc_env[0].exists()
 
 
 def test_issuer_is_checked_when_configured(amc_env):
@@ -285,27 +304,39 @@ def test_fallback_address_is_the_tailscale_ipv4(monkeypatch):
 # ---------------------------------------------------------------- settings and CLI
 def test_settings_from_env():
     s = Settings.from_env({
-        "WORKSTATION_TICKET_SECRET": SECRET, "TRACKING_PROJECT_ID": " proj-1 ",
+        "WORKSTATION_TICKET_SECRET": SECRET,
         "ALLOWED_ORIGINS": "https://a.example/, http://localhost:5173", "TICKET_ISSUER": "",
         "MV3DT_INSTALL_DIR": "/srv/mv3dt", "AMC_AUTOMATION_CONFIG": "/srv/mv3dt/amc_control/amc_automation.yaml",
     })
-    assert s.project_id == "proj-1" and s.ticket_issuer is None
+    assert s.ticket_secret == SECRET and s.ticket_issuer is None
     assert s.allowed_origins == ["https://a.example", "http://localhost:5173"]
     assert str(s.install_dir) == "/srv/mv3dt" and s.bind_address() == ("127.0.0.1", 8091)
 
 
 @pytest.mark.parametrize("env,message", [
     ({}, "WORKSTATION_TICKET_SECRET"),
-    ({"WORKSTATION_TICKET_SECRET": SECRET, "TRACKING_PROJECT_ID": "p"}, "ALLOWED_ORIGINS"),
-    ({"WORKSTATION_TICKET_SECRET": SECRET, "TRACKING_PROJECT_ID": "p", "ALLOWED_ORIGINS": "*"}, "not *"),
-    ({"WORKSTATION_TICKET_SECRET": SECRET, "TRACKING_PROJECT_ID": "p", "ALLOWED_ORIGINS": ORIGIN,
+    ({"WORKSTATION_TICKET_SECRET": SECRET}, "ALLOWED_ORIGINS"),
+    ({"WORKSTATION_TICKET_SECRET": SECRET, "ALLOWED_ORIGINS": "*"}, "not *"),
+    ({"WORKSTATION_TICKET_SECRET": SECRET, "ALLOWED_ORIGINS": ORIGIN,
       "BIND": "0.0.0.0:8091"}, "only loopback"),
-    ({"WORKSTATION_TICKET_SECRET": SECRET, "TRACKING_PROJECT_ID": "p", "ALLOWED_ORIGINS": ORIGIN,
+    ({"WORKSTATION_TICKET_SECRET": SECRET, "ALLOWED_ORIGINS": ORIGIN,
       "BIND": "nonsense"}, "host:port"),
 ])
 def test_serve_refuses_an_unsafe_or_incomplete_setup(env, message, capsys):
     assert cli._serve(Settings.from_env(env)) == 2
     assert message in capsys.readouterr().err
+
+
+def test_serve_does_not_need_a_tracking_project_id(monkeypatch, capsys):
+    """The secret and origins are enough; serve reaches uvicorn without TRACKING_PROJECT_ID."""
+    import uvicorn
+
+    ran = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: ran.append(kw))
+    env = {"WORKSTATION_TICKET_SECRET": SECRET, "ALLOWED_ORIGINS": ORIGIN}
+    assert cli._serve(Settings.from_env(env)) == 0
+    assert ran and ran[0]["host"] == "127.0.0.1" and ran[0]["port"] == 8091
+    assert "TRACKING_PROJECT_ID" not in capsys.readouterr().err
 
 
 def test_check_config_reports_a_bad_override(tmp_path, capsys):
