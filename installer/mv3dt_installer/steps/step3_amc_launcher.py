@@ -61,6 +61,7 @@ import argparse
 import atexit
 import contextlib
 import filecmp
+import hashlib
 import json
 import os
 import pathlib
@@ -102,6 +103,12 @@ __all__ = [
     "check_env_drift",
     "render_env",
     "write_env_atomic",
+    "UI_NGINX_CONF_NAME",
+    "COMPOSE_OVERRIDE_NAME",
+    "ui_api_url",
+    "render_ui_nginx_conf",
+    "render_compose_override",
+    "write_ui_cache_override",
     "render_amc_wrapper",
     "write_amc_wrapper",
     "decide_hold_strategy",
@@ -181,6 +188,7 @@ _SERVICE_WAIT_TIMEOUT_S = 1800.0
 _UI_WAIT_POLL_S = 1.0
 _BACKEND_LOG_INTERVAL_S = 10.0
 _MS_SERVICE = "auto-magic-calib-ms"
+_UI_SERVICE = "auto-magic-calib-ui"
 
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,49}$")
 
@@ -474,6 +482,11 @@ def _expected_amc_worktree_change(line: str) -> bool:
     path = line[3:].strip()
     if path == f"{AMC_SUBDIR}/compose/.env":
         return True
+    if status == "??" and path in (
+        f"{AMC_SUBDIR}/compose/{UI_NGINX_CONF_NAME}",
+        f"{AMC_SUBDIR}/compose/{COMPOSE_OVERRIDE_NAME}",
+    ):
+        return True
     return status == "??" and path.startswith(
         (f"{AMC_SUBDIR}/projects/", f"{AMC_SUBDIR}/models/")
     )
@@ -485,7 +498,8 @@ def clone_amc(ctx: "Context", amc_root: pathlib.Path) -> bool:
     A fresh install is a blobless, sparse clone of `AMC_REPO_URL` at
     `AMC_TAG` limited to `AMC_SUBDIR` (git >= 2.25), detached at
     `AMC_COMMIT`. An existing checkout is only moved to the pin when it is
-    clean apart from the installer-managed `.env` and untracked runtime data.
+    clean apart from the installer-managed compose config and untracked
+    runtime data.
     """
     clone_root = amc_clone_root(amc_root)
     if clone_root is None:
@@ -731,12 +745,10 @@ def render_env(cfg: AmcConfig) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_env_atomic(compose_dir: pathlib.Path, content: str) -> bool:
-    """Write `compose/.env` atomically (tmp + `os.replace`), content-
-    idempotent like `systemd.install_unit`. Returns whether the file
-    changed.
+def _write_text_atomic(dest: pathlib.Path, content: str) -> bool:
+    """Write `dest` atomically (tmp + `os.replace`), content-idempotent
+    like `systemd.install_unit`. Returns whether the file changed.
     """
-    dest = compose_dir / ".env"
     if dest.is_file():
         try:
             existing = dest.read_text(encoding="utf-8")
@@ -749,6 +761,105 @@ def write_env_atomic(compose_dir: pathlib.Path, content: str) -> bool:
     tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, dest)
     return True
+
+
+def write_env_atomic(compose_dir: pathlib.Path, content: str) -> bool:
+    """Write `compose/.env` atomically and content-idempotently. Returns
+    whether the file changed.
+    """
+    return _write_text_atomic(compose_dir / ".env", content)
+
+
+# ---------------------------------------------------------------------------
+# AMC-PROJECT-LIFECYCLE section 2 -- AMC UI runtime config caching
+# ---------------------------------------------------------------------------
+
+UI_NGINX_CONF_NAME = "mv3dt-ui-nginx.conf"
+COMPOSE_OVERRIDE_NAME = "compose.override.yml"
+
+# The UI image's `/etc/nginx/conf.d/default.conf`, verbatim from the pinned
+# `vss-auto-calibration-ui:3.3.0` except for the two marked additions. The
+# override replaces the whole file, so a change to the pinned UI image must
+# re-copy it. `{hash}` is the only substitution.
+_UI_NGINX_CONF_TEMPLATE = """\
+server {{
+    listen 5000;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Large calibration video uploads (multipart). Default nginx limit (~1m) causes 413 before the AMC backend.
+    # Applies to this server block (including any location /api reverse-proxy overlays in deployments).
+    client_max_body_size 4g;
+    client_body_timeout 1800s;
+
+    # mv3dt: the entrypoint writes API_URL into env-config.js at container
+    # start, so it must never be cached. The exact match wins over the
+    # regex asset block below.
+    location = /env-config.js {{
+        expires off;
+        add_header Cache-Control "no-store" always;
+    }}
+
+    # Handle SPA routing - redirect all requests to index.html
+    location / {{
+        try_files $uri $uri/ /index.html;
+        # mv3dt: the internal redirect to /index.html lands here again, so
+        # these apply to the HTML. The versioned script URL makes a browser
+        # that cached an old immutable env-config.js fetch it anew.
+        add_header Cache-Control "no-cache" always;
+        sub_filter '/env-config.js"' '/env-config.js?v={hash}"';
+        sub_filter_once on;
+    }}
+
+    # Cache static assets
+    location ~* \\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$ {{
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }}
+
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+}}
+"""
+
+
+def ui_api_url(cfg: AmcConfig) -> str:
+    """The API URL the UI compose file hands the UI container:
+    `AUTO_MAGIC_CALIB_MS_API_URL` when set, otherwise its default."""
+    return cfg.ms_api_url or f"http://{cfg.host_ip}:{cfg.ms_port}/v1"
+
+
+def render_ui_nginx_conf(cfg: AmcConfig) -> str:
+    """Render `compose/mv3dt-ui-nginx.conf`: the UI image's nginx config
+    plus a no-store `env-config.js` and a cache-busting script URL keyed on
+    the first 12 hex digits of the SHA-256 of `ui_api_url(cfg)`."""
+    digest = hashlib.sha256(ui_api_url(cfg).encode("utf-8")).hexdigest()[:12]
+    return _UI_NGINX_CONF_TEMPLATE.format(hash=digest)
+
+
+def render_compose_override() -> str:
+    """Render `compose/compose.override.yml`, which Compose merges on its own
+    because Step 3 runs it from `compose/` without `-f`."""
+    return (
+        "services:\n"
+        f"  {_UI_SERVICE}:\n"
+        "    volumes:\n"
+        f"      - ./{UI_NGINX_CONF_NAME}:/etc/nginx/conf.d/default.conf:ro\n"
+    )
+
+
+def write_ui_cache_override(compose_dir: pathlib.Path, cfg: AmcConfig) -> bool:
+    """Write both UI cache override files atomically and content-
+    idempotently. Returns whether either changed."""
+    conf_changed = _write_text_atomic(
+        compose_dir / UI_NGINX_CONF_NAME, render_ui_nginx_conf(cfg)
+    )
+    override_changed = _write_text_atomic(
+        compose_dir / COMPOSE_OVERRIDE_NAME, render_compose_override()
+    )
+    return conf_changed or override_changed
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +899,13 @@ def compose_pull(ctx: "Context", compose_dir: pathlib.Path) -> None:
 
 def compose_up(ctx: "Context", compose_dir: pathlib.Path) -> None:
     _run_compose(ctx, compose_dir, "up", "-d")
+
+
+def compose_recreate_ui(ctx: "Context", compose_dir: pathlib.Path) -> None:
+    """Recreate only the UI container, so a running stack picks up a
+    changed `.env` or UI nginx override (a bind-mounted file's content is
+    not part of the Compose config hash)."""
+    _run_compose(ctx, compose_dir, "up", "-d", "--force-recreate", "--no-deps", _UI_SERVICE)
 
 
 def compose_down(ctx: "Context", compose_dir: pathlib.Path) -> None:
@@ -1694,19 +1812,27 @@ def launch_amc(
             ctx.log.warn(f"pinned AMC compose files no longer reference {image}")
 
         env_changed = write_env_atomic(compose_dir, render_env(cfg))
+        override_changed = write_ui_cache_override(compose_dir, cfg)
         ownership = ctx.run_root(
-            "chown", f"{ctx.user.uid}:{ctx.user.gid}", str(compose_dir / ".env"),
+            "chown", f"{ctx.user.uid}:{ctx.user.gid}",
+            str(compose_dir / ".env"),
+            str(compose_dir / UI_NGINX_CONF_NAME),
+            str(compose_dir / COMPOSE_OVERRIDE_NAME),
             check=False, capture_output=True, text=True,
         )
         if ownership.returncode != 0:
             raise AmcLaunchError(
-                f"could not hand AMC .env to {ctx.user.name}: "
+                f"could not hand AMC compose config to {ctx.user.name}: "
                 f"{_result_detail(ownership)}"
             )
         if env_changed:
             ctx.report_installed("AMC compose/.env", cfg.project_name)
         else:
             ctx.report_already_installed("AMC compose/.env", cfg.project_name)
+        if override_changed:
+            ctx.report_installed("AMC UI cache override", cfg.project_name)
+        else:
+            ctx.report_already_installed("AMC UI cache override", cfg.project_name)
 
         compose_validate(ctx, compose_dir)
         docker_login(ctx)
@@ -1724,6 +1850,11 @@ def launch_amc(
             if not skip_pull:
                 compose_pull(ctx, compose_dir)
             compose_up(ctx, compose_dir)
+        elif env_changed or override_changed:
+            # A reused stack skips `up`, and `up -d` would not recreate a
+            # container whose bind-mounted file only changed content. `.env`
+            # counts too: a changed HOST_IP changes the UI's API_URL.
+            compose_recreate_ui(ctx, compose_dir)
 
         api_url = f"http://localhost:{cfg.ms_port}/v1/ready"
         ui_url = f"http://localhost:{cfg.ui_port}"
