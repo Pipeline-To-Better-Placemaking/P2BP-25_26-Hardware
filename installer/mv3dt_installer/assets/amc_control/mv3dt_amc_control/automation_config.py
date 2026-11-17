@@ -34,7 +34,7 @@ class AmcSection(_Strict):
 
 
 class ProjectSection(_Strict):
-    mode: Literal["reuse_installer_project", "create_new"] = "reuse_installer_project"
+    mode: Literal["reuse_installer_project", "create_new", "web_project"] = "reuse_installer_project"
     name_template: str = "{title}-{date}"
 
 
