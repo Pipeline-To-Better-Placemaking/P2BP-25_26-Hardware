@@ -25,6 +25,12 @@ section 6) first records new footage in step 2: it writes the request file
 `[sudo -n] <install_dir>/bin/mv3dt-installer record-footage --pending`, which
 records every camera into <folder>/footage/ and reports on stdout (section 5).
 Only the run's first pass records; Continue never records again.
+
+Cancelling a web_project run undoes it (installer/plan/AMC-PROJECT-LIFECYCLE.md
+section 5): the AMC project is replaced by a new, empty one, footage the run
+recorded is deleted and the earlier footage moved back, and the run's
+calibration/<UTC> folder is removed. Each finished undo action is saved, so an
+undo cut off by a service restart carries on without repeating any of them.
 """
 from __future__ import annotations
 
@@ -48,7 +54,7 @@ from .controller import _read_conf
 from .amc_api import AmcApi, AmcApiError, default_base_url
 from .automation_config import AutomationConfig, ConfigError, load_config
 from .calibration_spec import CalibrationSpec, SpecError, download_floorplan_png
-from .projects import STATE_READY, ProjectNotFound, ProjectStore, default_projects_root
+from .projects import STATE_FAILED, STATE_READY, ProjectNotFound, ProjectStore, default_projects_root
 
 STEPS: list[tuple[str, int, str]] = [
     ("project_setup", 1, "Project Setup"),
@@ -78,6 +84,12 @@ RECORD_CANCEL_GRACE_SECONDS = 60.0
 # The recorder is cancelled once it runs this much longer than the recording.
 RECORD_OVERRUN_SECONDS = 180.0
 STDERR_TAIL_LINES = 10
+# The recorder's manifest in footage/ (AMC-FOOTAGE-RECORDING.md section 5).
+FOOTAGE_MANIFEST = ".mv3dt-footage.json"
+CANCELLING_MESSAGE = "Cancelling: undoing this run"
+# Undo actions, in order, as recorded in Job.undone (AMC-PROJECT-LIFECYCLE.md section 5.2).
+AMC_DELETED, AMC_CREATED, AMC_BOUND = "amc_deleted", "amc_created", "amc_bound"
+FOOTAGE_CLEARED, FOOTAGE_RESTORED, RESULTS_REMOVED = "footage_cleared", "footage_restored", "results_removed"
 
 
 def default_record_argv(install_dir: Path) -> list[str]:
@@ -193,6 +205,19 @@ class Job:
     # True once step 2 recorded this run's footage. A run records at most once:
     # Continue never records, so a new recording needs a new run.
     footage_recorded: bool = False
+    # web_project cancel (AMC-PROJECT-LIFECYCLE.md section 5.1). True once the run is about
+    # to change its AMC project (an upload, a config post, verify, calibrate).
+    amc_changed: bool = False
+    # The clips the recorder reported (its final line's files), saved with footage_recorded.
+    recorded_files: list[str] = field(default_factory=list)
+    # The calibration/<UTC> folder name step 7 writes, saved before it is created.
+    calibration_dir: str = ""
+    # True from cancel until the undo finishes the job cancelled.
+    cancelling: bool = False
+    # Undo actions finished so far, each saved as it completes.
+    undone: list[str] = field(default_factory=list)
+    # The replacement AMC project, saved as soon as create_project returns.
+    reset_amc_project_id: str = ""
     steps: list[dict] = field(default_factory=list)
     result: dict = field(default_factory=dict)
     started_at: int = field(default_factory=_now)
@@ -218,6 +243,11 @@ class Job:
             "StartedAt": self.started_at,
             "UpdatedAt": self.updated_at,
         }
+
+
+def _plain_name(name: Any) -> bool:
+    """A single path component: never a directory, a parent or a hidden way out of the folder."""
+    return isinstance(name, str) and name not in ("", ".", "..") and "/" not in name and "\\" not in name
 
 
 def _new_steps() -> list[dict]:
@@ -280,6 +310,8 @@ class CalibrationRunner:
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._loaded = False
+        # True while a thread owns the cancel undo, so it never runs twice at once.
+        self._undoing = False
 
     # ---- persistence ------------------------------------------------------
     @property
@@ -307,6 +339,16 @@ class CalibrationRunner:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
             job = Job(**data)
         except (OSError, ValueError, TypeError):
+            return
+        if job.cancelling:
+            # An undo cut off by a restart carries on; it is never continued as a run.
+            job.state, job.message = "running", CANCELLING_MESSAGE
+            for s in job.steps:
+                if s["State"] == "running":
+                    s["State"] = "pending"
+            self._job = job
+            self._save()
+            self._start_undo(job)
             return
         if job.state in ACTIVE:
             job.state = "interrupted"
@@ -394,15 +436,45 @@ class CalibrationRunner:
             job = self._job
             if job is None or job.state not in ACTIVE | RESUMABLE:
                 raise NothingToResume("there is no run to cancel")
+            if not job.folder:
+                self._cancel.set()
+                if job.state not in ACTIVE:  # nothing is executing, so finish it here
+                    self._finish("cancelled", "Cancelled.")
+                return job.public()
+            # web_project: cancel undoes the run (AMC-PROJECT-LIFECYCLE.md section 5.2).
+            if job.cancelling:
+                return job.public()
+            executing = job.state in ACTIVE
+            job.cancelling = True
+            job.state, job.message = "running", CANCELLING_MESSAGE
+            self._save()
             self._cancel.set()
-            if job.state not in ACTIVE:  # nothing is executing, so finish it here
-                self._finish("cancelled", "Cancelled.")
+            public = job.public()
+            if executing:
+                return public  # the run's own thread undoes the run once it stops
+            if self._threaded:
+                self._start_undo(job)
+                return public
+        self._start_undo(job)  # unthreaded (tests): run it here, without the lock
+        with self._lock:
             return job.public()
 
     def config(self) -> AutomationConfig:
         return self._load_config()
 
     # ---- execution ------------------------------------------------------------
+    def _start_undo(self, job: Job) -> None:
+        """Undo on a new thread (or right here when unthreaded), unless a thread already owns it."""
+        with self._lock:
+            if self._undoing:
+                return
+            self._undoing = True
+        if self._threaded:
+            self._thread = threading.Thread(target=self._undo, args=(job,), daemon=True)
+            self._thread.start()
+        else:
+            self._undo(job)
+
     def _launch(self, resuming: bool = False) -> None:
         self._cancel.clear()
         if self._threaded:
@@ -417,6 +489,8 @@ class CalibrationRunner:
 
     def _finish(self, state: str, message: str) -> None:
         with self._lock:
+            if self._job and self._job.cancelling:
+                return  # the undo decides how the run ends
             if self._job:
                 self._job.state, self._job.message = state, message
                 if self._job.folder and state in TERMINAL:
@@ -462,6 +536,178 @@ class CalibrationRunner:
         except OSError:
             pass  # the service's state file still holds the run
 
+    # ---- cancel: undo a web_project run (AMC-PROJECT-LIFECYCLE.md section 5.2) ----------
+    def _undone(self, job: Job, action: str) -> None:
+        with self._lock:
+            if action not in job.undone:
+                job.undone.append(action)
+            self._save()
+
+    def _undo(self, job: Job) -> None:
+        """Undo the run, then finish it cancelled. Never raises; never holds the lock on AMC.
+
+        Every action already in job.undone is skipped, so a restart part way through
+        neither repeats one nor creates a second AMC project.
+        """
+        undone, problems = [], []
+        try:
+            if job.amc_changed:
+                self._undo_amc(job, undone, problems)
+            if job.footage_recorded:
+                self._undo_footage(job, undone, problems)
+            if job.calibration_dir:
+                self._undo_results(job, undone, problems)
+        except Exception as e:  # never leave the job stuck cancelling
+            problems.append(f"the undo stopped on an unexpected error: {e!r}")
+        if problems:
+            message = "Cancelled, but " + "; ".join(problems) + "."
+            if undone:
+                message += " Undone: " + "; ".join(undone) + "."
+        elif undone:
+            message = "Cancelled. Undone: " + "; ".join(undone) + "."
+        else:
+            message = "Cancelled. Nothing needed undoing."
+        with self._lock:
+            job.cancelling = False
+            self._undoing = False
+            if self._job is job:
+                self._finish("cancelled", message)
+
+    def _amc_ready(self, cfg: AutomationConfig, api: AmcApi) -> bool:
+        """Start AMC and wait for it, as provisioning does; the undo ignores the cancel flag."""
+        if api.ready():
+            return True
+        self.controller.start()
+        deadline = self._clock() + cfg.amc.ready_timeout_seconds
+        while not api.ready():
+            if self._clock() >= deadline:
+                return False
+            self._sleep(min(5.0, max(deadline - self._clock(), 0.0)))
+        return True
+
+    def _undo_amc(self, job: Job, undone: list[str], problems: list[str]) -> None:
+        if AMC_BOUND in job.undone:
+            undone.append(f"the AMC project was reset to empty (new AMC project {job.reset_amc_project_id})")
+            return
+        if AMC_CREATED not in job.undone and not self._replace_amc_project(job, problems):
+            return
+        new = job.reset_amc_project_id
+        try:
+            binding = self.store.get_by_folder(job.folder)
+            if binding is None or binding.project_id != job.project_id:
+                raise ProjectNotFound(f"workstation folder {job.folder} is no longer bound to this project")
+            self.store.update(job.folder, amc_project_id=new, amc_project_name=job.folder)
+        except (ProjectNotFound, OSError, ValueError) as e:
+            problems.append(f"the new AMC project {new} could not be recorded for the folder: {e}")
+            return
+        self._undone(job, AMC_BOUND)
+        undone.append(f"the AMC project was reset to empty (new AMC project {new})")
+
+    def _replace_amc_project(self, job: Job, problems: list[str]) -> bool:
+        """Stop, delete and recreate the job's AMC project; True once the new id is saved."""
+        old = job.amc_project_id
+        failed = "the AMC project could not be reset: "
+        try:
+            cfg = self.config()
+            api = self._api(cfg)
+        except (ConfigError, AmcApiError) as e:
+            problems.append(failed + str(e))
+            return False
+
+        def create_failed(error: str) -> bool:
+            # The old project is gone: a failed binding without it makes the next setup create one.
+            problems.append(failed + error + "; set the project up on the workstation again")
+            try:
+                self.store.update(job.folder, state=STATE_FAILED, amc_project_id=None, error=error)
+            except (ProjectNotFound, OSError, ValueError):
+                pass
+            return False
+
+        try:
+            if AMC_DELETED not in job.undone:
+                try:  # a calibration may still be running; step state cannot say
+                    api.stop_calibration(old)
+                except Exception:
+                    pass
+            if not self._amc_ready(cfg, api):
+                not_ready = f"AMC did not become ready within {int(cfg.amc.ready_timeout_seconds)} s"
+                if AMC_DELETED in job.undone:
+                    return create_failed(f"AMC project {old} was deleted but {not_ready}")
+                problems.append(failed + not_ready)
+                return False
+            if AMC_DELETED not in job.undone:
+                try:
+                    api.delete_project(old)  # False (AMC's 404) counts as deleted
+                except (AmcApiError, httpx.HTTPError) as e:
+                    problems.append(failed + f"could not delete AMC project {old}: {e}")
+                    return False
+                self._undone(job, AMC_DELETED)
+            try:
+                new = api.create_project(job.folder)
+            except (AmcApiError, httpx.HTTPError) as e:
+                return create_failed(f"AMC project {old} was deleted but a new one could not be created: {e}")
+            with self._lock:  # the id and amc_created in one save, before the binding is written
+                job.reset_amc_project_id = new
+                if AMC_CREATED not in job.undone:
+                    job.undone.append(AMC_CREATED)
+                self._save()
+            return True
+        finally:
+            api.close()
+
+    def _undo_footage(self, job: Job, undone: list[str], problems: list[str]) -> None:
+        footage = self._folder() / "footage"
+        failed = "the earlier footage could not be restored: "
+        if FOOTAGE_CLEARED not in job.undone:
+            try:
+                for name in [*job.recorded_files, FOOTAGE_MANIFEST]:
+                    if _plain_name(name):
+                        (footage / name).unlink(missing_ok=True)
+            except OSError as e:
+                problems.append(failed + f"could not delete this run's footage: {e}")
+                return
+            self._undone(job, FOOTAGE_CLEARED)
+        if FOOTAGE_RESTORED not in job.undone:
+            previous = footage / "previous"
+            try:
+                if previous.is_dir() and not previous.is_symlink():
+                    for item in sorted(previous.iterdir()):
+                        try:
+                            os.replace(item, footage / item.name)
+                        except FileNotFoundError:
+                            pass  # already moved by an undo that was cut off
+                    try:
+                        previous.rmdir()
+                    except OSError:
+                        pass  # not empty: what is left stays where it is
+            except OSError as e:
+                problems.append(failed + f"could not move it back from {previous}: {e}")
+                return
+            self._undone(job, FOOTAGE_RESTORED)
+        undone.append("this run's footage was deleted and the earlier footage moved back")
+
+    def _undo_results(self, job: Job, undone: list[str], problems: list[str]) -> None:
+        if RESULTS_REMOVED not in job.undone:
+            if not _plain_name(job.calibration_dir):
+                problems.append(f"this run's results were not removed: {job.calibration_dir!r} is not a "
+                                "folder name")
+                return
+            target = self._folder() / "calibration" / job.calibration_dir
+            try:
+                if target.is_symlink():
+                    target.unlink()
+                else:
+                    shutil.rmtree(target)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                problems.append(f"this run's results in {target} could not be removed: {e}")
+                return
+            with self._lock:
+                job.result.pop("ResultFile", None)
+            self._undone(job, RESULTS_REMOVED)
+        undone.append("this run's calibration results were removed")
+
     def _set_step(self, key: str, state: str, message: str = "", done: str | None = None,
                   needs_user: bool = False) -> None:
         with self._lock:
@@ -469,6 +715,9 @@ class CalibrationRunner:
             s["State"], s["Message"], s["NeedsUser"] = state, message, needs_user
             if done is not None:
                 s["Done"] = done
+            if self._job.cancelling:  # keep "Cancelling" on show while the run thread stops
+                self._save()
+                return
             self._job.message = f"Step {s['Number']}: {s['Title']}" + (f" - {message}" if message else "")
             self._save()
 
@@ -486,6 +735,16 @@ class CalibrationRunner:
             self._sleep(min(left, 1.0))
 
     def _run(self, resuming: bool) -> None:
+        job = self._job
+        self._run_steps(resuming)
+        with self._lock:  # a cancel during the run left the undo to this thread
+            undo = self._job is job and job.cancelling and not self._undoing
+            if undo:
+                self._undoing = True
+        if undo:
+            self._undo(job)
+
+    def _run_steps(self, resuming: bool) -> None:
         job = self._job
         self._resuming = resuming
         try:
@@ -551,6 +810,14 @@ class CalibrationRunner:
             api.close()
 
     # ---- helpers --------------------------------------------------------------
+    def _changing_amc(self) -> None:
+        """Record, before the call, that this web_project run is about to change its AMC project."""
+        job = self._job
+        if job.folder and not job.amc_changed:
+            with self._lock:
+                job.amc_changed = True
+                self._save()
+
     def _finished_in_amc(self, key: str) -> Outcome:
         earlier = self._job.step(key).get("Done", "")
         return Outcome("done", "finished in AMC" + (f"; {earlier}" if earlier else ""), done=earlier)
@@ -663,6 +930,7 @@ class CalibrationRunner:
 
     def _upload_videos(self, api: AmcApi, pid: str, videos: list[tuple[str, Path]]) -> str:
         self._set_step("video_configuration", "running", f"uploading {len(videos)} videos")
+        self._changing_amc()
         api.upload_videos(pid, videos)
         self._job.videos_uploaded = True
         self._save()
@@ -711,6 +979,7 @@ class CalibrationRunner:
                     saved = self._folder() / "floorplan" / "layout.png"
                     saved.parent.mkdir(parents=True, exist_ok=True)
                     saved.write_bytes(png)
+                self._changing_amc()
                 api.upload_layout(pid, png)
                 notes.append("uploaded the floor plan as layout.png")
         if todo:
@@ -853,9 +1122,11 @@ class CalibrationRunner:
                              + (f"; last output: {tail}" if tail else ""))
         if rc != 0:
             raise StepFailed(_record_failure(rc, final, list(stderr_tail)))
-        self._job.footage_recorded = True
-        self._save()
         files = [f for f in final.get("files") or [] if isinstance(f, str)]
+        with self._lock:
+            self._job.recorded_files = files
+            self._job.footage_recorded = True
+            self._save()
         return f"recorded {len(files)} clips of {total} into {self._folder() / 'footage'}"
 
     def _cancel_recorder(self, proc: subprocess.Popen) -> bool:
@@ -918,6 +1189,7 @@ class CalibrationRunner:
                 else:
                     todo.append(f"Enter {scale:.2f} layout px/m on AMC's Parameters step "
                                 f"(the settings file has no {p.scale.settings_key} key)")
+            self._changing_amc()
             api.post_config(pid, settings)
             notes.insert(0, f"applied {path.name}")
         else:
@@ -927,6 +1199,7 @@ class CalibrationRunner:
         if scale is None and p.scale.source != "none":
             notes.append("no floor plan scale available")
         if p.focal_lengths:
+            self._changing_amc()
             api.upload_focal_lengths(pid, p.focal_lengths)
             notes.append(f"{len(p.focal_lengths)} focal lengths")
         if todo:
@@ -947,6 +1220,7 @@ class CalibrationRunner:
             raise StepFailed("rectification.mode is api but rectification.api start/status paths are not set "
                              "(take them from AMC's /openapi.yaml)")
         pid = self._job.amc_project_id
+        self._changing_amc()
         api.request(r.api.start.method, r.api.start.path.format(project_id=pid),
                     json=r.api.start.json_body or None, label="start rectification")
         deadline = self._clock() + r.api.timeout_seconds
@@ -1003,12 +1277,14 @@ class CalibrationRunner:
         if self._job.step("rectification")["State"] == "waiting":
             return Outcome("waiting", f"Nothing to do: the saved {path.name} is uploaded after rectification",
                            needs_user=False)
+        self._changing_amc()
         api.upload_alignment(self._job.amc_project_id, path, cfg.alignment.coord_space)
         return Outcome("done", f"re-used saved alignment {path} ({cfg.alignment.coord_space} coordinates)")
 
     # ---- step 6 ---------------------------------------------------------------
     def _execute(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
         pid = self._job.amc_project_id
+        self._changing_amc()
         state = api.verify_project(pid)
         if state != "READY":
             with self._lock:
@@ -1041,8 +1317,13 @@ class CalibrationRunner:
             job.result["EvaluationStatistics"] = stats
             notes.append("evaluation statistics saved")
         if job.folder:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            out_dir = self._folder() / "calibration" / stamp
+            # Saved before the folder exists, so a cancel always knows what to remove. A retried
+            # step 7 reuses it rather than leaving an earlier attempt's folder behind.
+            if not job.calibration_dir:
+                with self._lock:
+                    job.calibration_dir = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    self._save()
+            out_dir = self._folder() / "calibration" / job.calibration_dir
             out_dir.mkdir(parents=True, exist_ok=True)
             if stats:
                 (out_dir / "evaluation_statistics.json").write_text(json.dumps(stats, indent=2) + "\n",
