@@ -30,9 +30,16 @@ Judgment calls:
   `sudo tailscale up` instead of installing something that cannot work.
   When the address changes, `pending_update()` re-runs the step.
 - **`amc_automation.yaml` is seeded once** beside the package (never inside
-  it, where an upgrade would replace it), with `project.mode: create_new` so
-  a first automated run cannot overwrite the live calibration that Step 4's
-  ingest timer would install. The operator switches it once runs are trusted.
+  it, where an upgrade would replace it), with `project.mode: web_project`,
+  so every automated run is locked to the calling web project's own AMC
+  project and folder and never touches the installer's live calibration
+  (`AMC-WEB-PROJECTS.md` section 6). A file seeded by an earlier release with
+  `create_new` is switched by hand.
+- **The projects root is the service user's.** `<install_dir>/amc_projects`
+  (mode 750) holds one folder per web project; it is created on every run if
+  missing and never deleted or emptied. `~<service user>/mv3dt-projects`
+  links to it for browsing, but only when nothing exists at that path: an
+  operator's own file, directory or link there is never replaced.
 """
 
 from __future__ import annotations
@@ -82,6 +89,8 @@ __all__ = [
     "sync_package",
     "ensure_venv",
     "seed_config_file",
+    "ensure_projects_root",
+    "ensure_projects_link",
     "tailscale_ipv4",
     "render_sudoers",
     "insecure_sudo_target",
@@ -115,6 +124,9 @@ CONFIG_FILE_NAME = "amc_automation.yaml"
 CONFIG_FILE_MODE = 0o644
 STATE_DIRNAME = "state"
 STATE_DIR_MODE = 0o750
+PROJECTS_DIRNAME = "amc_projects"
+PROJECTS_DIR_MODE = 0o750
+PROJECTS_LINK_NAME = "mv3dt-projects"
 REQUIREMENTS_MARKER = ".mv3dt-requirements.sha256"
 
 SUDOERS_DIR = pathlib.Path("/etc/sudoers.d")
@@ -142,11 +154,11 @@ CONFIG_SEED = """\
 #   cd {control_dir} && venv/bin/python3 -m mv3dt_amc_control check-config
 
 project:
-  # create_new keeps automated runs away from the live calibration: each run
-  # makes its own AMC project, which the ingest timer ignores. Change this to
-  # reuse_installer_project once automated runs are trusted; a finished run
-  # is then installed into DeepStream by the ingest timer.
-  mode: create_new
+  # web_project locks every run to the calling web project: its AMC project
+  # and its folder under {projects_dir}/, both made when the project is set
+  # up from the web app. Footage, floor plan, results and run records stay in
+  # that folder, and the installer's live calibration is never touched.
+  mode: web_project
 
 layout:
   # Hosts the floor plan may be downloaded from: the web app's storage host,
@@ -160,6 +172,9 @@ _SLEEP: Callable[[float], None] = time.sleep
 _HTTP_GET: Callable[[str], tuple] = _http_get
 _LSTAT: Callable[[str], os.stat_result] = os.lstat
 _REALPATH: Callable[[str], str] = os.path.realpath
+# Ownership check of the projects root in verify (the other lstat seam is
+# the sudo target check's, whose fake reports root everywhere).
+_PROJECTS_LSTAT: Callable[[str], os.stat_result] = os.lstat
 _HEALTH_ATTEMPTS = 10
 _HEALTH_INTERVAL_S = 1.0
 
@@ -187,6 +202,14 @@ def _config_file(ctx: Any) -> pathlib.Path:
 
 def _state_dir(ctx: Any) -> pathlib.Path:
     return _control_dir(ctx) / STATE_DIRNAME
+
+
+def _projects_dir(ctx: Any) -> pathlib.Path:
+    return pathlib.Path(ctx.install_dir) / PROJECTS_DIRNAME
+
+
+def _projects_link(ctx: Any) -> pathlib.Path:
+    return pathlib.Path(ctx.user.home) / PROJECTS_LINK_NAME
 
 
 def _installer_bin(ctx: Any) -> pathlib.Path:
@@ -319,6 +342,70 @@ def ensure_state_dir(ctx: Any) -> None:
     _chown(ctx, state_dir)
 
 
+def ensure_projects_root(ctx: Any) -> Optional[str]:
+    """Create `<install_dir>/amc_projects`, the service user's, mode 750.
+
+    Returns an error, or None. Idempotent, and never deletes or empties an
+    existing root. A symlink or a non-directory at that path is refused
+    rather than replaced.
+    """
+    root = _projects_dir(ctx)
+    if root.is_symlink() or (os.path.lexists(root) and not root.is_dir()):
+        return f"{root} exists but is not a directory; move it aside and re-run"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        root.chmod(PROJECTS_DIR_MODE)
+    except OSError as exc:
+        return f"could not create {root}: {exc}"
+    _chown(ctx, root)
+    return None
+
+
+def ensure_projects_link(ctx: Any) -> bool:
+    """Link `~<service user>/mv3dt-projects` to the projects root.
+
+    Returns True when the link was created. Anything already at that path
+    (a file, a directory or a link anywhere) is left alone, with a warning
+    unless it is already this link.
+    """
+    link = _projects_link(ctx)
+    target = _projects_dir(ctx)
+    if os.path.lexists(link):
+        if link.is_symlink() and os.readlink(link) == str(target):
+            return False
+        log.warn(
+            f"step9: {link} already exists and is not a link to {target}; it "
+            f"was left alone. The web project folders are in {target}"
+        )
+        return False
+    try:
+        os.symlink(str(target), str(link))
+    except FileExistsError:
+        log.warn(f"step9: {link} appeared while linking it; it was left alone")
+        return False
+    except OSError as exc:
+        log.warn(f"step9: could not link {link} to {target} ({exc})")
+        return False
+    with contextlib.suppress(OSError):  # best effort, e.g. a non-root test process
+        os.lchown(str(link), ctx.user.uid, ctx.user.gid)
+    log.info(f"linked {link} to {target}")
+    return True
+
+
+def _projects_root_problem(ctx: Any) -> Optional[str]:
+    """Why the projects root is unusable by the service, or None."""
+    root = _projects_dir(ctx)
+    try:
+        st = _PROJECTS_LSTAT(str(root))
+    except OSError:
+        return f"{root} is missing"
+    if stat_mod.S_ISLNK(st.st_mode) or not stat_mod.S_ISDIR(st.st_mode):
+        return f"{root} is not a directory"
+    if st.st_uid != ctx.user.uid:
+        return f"{root} is owned by uid {st.st_uid}, not {ctx.user.name}"
+    return None
+
+
 def seed_config_file(ctx: Any) -> tuple:
     """Write `amc_automation.yaml` once. Returns `(written, error)`.
 
@@ -328,7 +415,9 @@ def seed_config_file(ctx: Any) -> tuple:
     path = _config_file(ctx)
     if os.path.lexists(path):
         return False, None
-    content = CONFIG_SEED.format(control_dir=_control_dir(ctx))
+    content = CONFIG_SEED.format(
+        control_dir=_control_dir(ctx), projects_dir=_projects_dir(ctx)
+    )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(str(path), flags, CONFIG_FILE_MODE)
@@ -340,7 +429,7 @@ def seed_config_file(ctx: Any) -> tuple:
     except OSError as exc:
         return False, f"could not write {path}: {exc}"
     _chown(ctx, path)
-    log.info(f"wrote {path} (automation overrides; project.mode: create_new)")
+    log.info(f"wrote {path} (automation overrides; project.mode: web_project)")
     return True, None
 
 
@@ -513,6 +602,7 @@ def service_environment(ctx: Any, host_ip: str) -> dict:
         "MV3DT_INSTALL_DIR": str(ctx.install_dir),
         "AMC_STATE_DIR": str(_state_dir(ctx)),
         "AMC_AUTOMATION_CONFIG": str(_config_file(ctx)),
+        "AMC_PROJECTS_DIR": str(_projects_dir(ctx)),
         "AMC_PUBLIC_HOST": host_ip,
         "BIND": BIND,
         "PYTHONUNBUFFERED": "1",
@@ -560,7 +650,8 @@ def update_reason(ctx: Any) -> Optional[str]:
     installed copies and, when `ctx` carries the invoking user and tailscale
     reports an address, the unit and sudo rule this release would write with
     the ones on disk (so a changed Tailscale address is an update too).
-    Never looks at `amc_automation.yaml`, `state/` or `tracking.env`.
+    Never looks at `amc_automation.yaml`, `state/`, `tracking.env` or the
+    projects root.
     """
     control_dir = _control_dir(ctx)
     source = pathlib.Path(ctx.asset_path(ASSET_DIR, PACKAGE_NAME))
@@ -764,6 +855,11 @@ class Step9AmcControl:
         ctx.progress.phase(2)
         ctx.progress.task(f"creating the state directory and {CONFIG_FILE_NAME}")
         ensure_state_dir(ctx)
+        ctx.progress.task(f"creating {_projects_dir(ctx)}")
+        projects_error = ensure_projects_root(ctx)
+        if projects_error:
+            return StepResult(status=StepStatus.FAILED, message=projects_error)
+        ensure_projects_link(ctx)
         _, seed_error = seed_config_file(ctx)
         if seed_error:
             log.warn(
@@ -819,6 +915,13 @@ class Step9AmcControl:
                         command="journalctl -u mv3dt-amc-control -n 50",
                     )
                 ],
+            )
+
+        problem = _projects_root_problem(ctx)
+        if problem is not None:
+            return StepResult(
+                status=StepStatus.FAILED,
+                message=f"{problem}; the AMC control service keeps web projects there",
             )
 
         path = _sudoers_path()
@@ -882,6 +985,8 @@ class Step9AmcControl:
 
         log.info(f"AMC control: {UNIT_NAME} {enabled}/{active}")
         log.info(f"  automation settings: {_config_file(ctx)}")
+        log.info(f"  web project folders: {_projects_dir(ctx)}")
+        log.info(f"  link to them: {_projects_link(ctx)}")
         log.info("  logs: journalctl -u mv3dt-amc-control")
         log.info(
             "  AMC's API description: "

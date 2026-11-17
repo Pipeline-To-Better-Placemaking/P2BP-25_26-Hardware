@@ -49,6 +49,8 @@ the web app repository owns ([section 9](#9-web-app-setup)).
   venv/
   amc_automation.yaml       operator-managed settings, seeded once (section 6)
   state/                    launcher log and automation progress, mode 750
+<install_dir>/amc_projects/ one folder per web project, mode 750, never deleted
+~<service user>/mv3dt-projects -> <install_dir>/amc_projects
 /etc/systemd/system/mv3dt-amc-control.service
 /etc/sudoers.d/mv3dt-amc-control
 ```
@@ -56,6 +58,15 @@ the web app repository owns ([section 9](#9-web-app-setup)).
 Everything under `amc_control/` is owned by the invoking user, who is also
 the service user. Nothing is written to `secrets/`: the service reads Step 8's
 `secrets/tracking.env`.
+
+The **projects root** `<install_dir>/amc_projects/` is created on every run
+if missing, owned by the service user, mode 750, and is never deleted or
+emptied on upgrade or re-run; a symlink or a non-directory at that path fails
+the step rather than being replaced. Its layout is
+[`AMC-WEB-PROJECTS` section 4](AMC-WEB-PROJECTS.md#4-workstation-folder-layout).
+The link `~<service user>/mv3dt-projects` is created, owned by the user, only
+when nothing exists at that path: an existing file, directory or link there
+is left alone and `run()` logs a warning naming it.
 
 ---
 
@@ -69,7 +80,7 @@ Gated by `MV3DT_AMC_CONTROL` in `installer.conf` with the CLI flag
 | Python 3.10+ with `venv` | the service venv |
 | `<install_dir>/bin/mv3dt-installer` (Step 3) | the service runs its `amc` subcommand; the sudo rule names it |
 | `bin/mv3dt-installer` and every directory above it owned by root, not group- or other-writable | otherwise whoever can replace the binary gets passwordless root through the rule (section 5); preflight and verify fail naming the offending path |
-| `MV3DT_TRACKING_HISTORY=on` and a complete `secrets/tracking.env` (Step 8) | the web app signs AMC and tracking tickets with one `WORKSTATION_TICKET_SECRET`; `TRACKING_PROJECT_ID` and `ALLOWED_ORIGINS` apply to both services |
+| `MV3DT_TRACKING_HISTORY=on` and a complete `secrets/tracking.env` (Step 8) | the web app signs AMC and tracking tickets with one `WORKSTATION_TICKET_SECRET`; `ALLOWED_ORIGINS` applies to both services. `TRACKING_PROJECT_ID` is still required because Step 8 needs it, but it no longer pins AMC ([section 7](#7-api-and-ticket-contract)) |
 | `visudo` | the sudo rule is checked before it is installed |
 | A Tailscale IPv4 (`tailscale ip -4`) | it is the address remote browsers use for AMC and is part of the sudo rule |
 
@@ -90,13 +101,18 @@ conversion) are added. `python-multipart` is test-only
 The unit runs `venv/bin/python3 -m mv3dt_amc_control serve` as the invoking
 user, loads `installer.conf` and `secrets/tracking.env` as environment files,
 and sets `MV3DT_INSTALL_DIR`, `AMC_STATE_DIR`, `AMC_AUTOMATION_CONFIG`,
-`AMC_PUBLIC_HOST` (the Tailscale IPv4) and `BIND`. `NoNewPrivileges` must stay
+`AMC_PROJECTS_DIR` (`<install_dir>/amc_projects`, the projects root),
+`AMC_PUBLIC_HOST` (the Tailscale IPv4) and `BIND`. A unit written by an
+earlier release, without `AMC_PROJECTS_DIR`, differs from the rendered one,
+so `pending_update()` re-runs the step. `NoNewPrivileges` must stay
 unset because the service uses `sudo`: it starts and stops AMC with
 `sudo -n <install_dir>/bin/mv3dt-installer amc ...`, never through the
 `bin/amc` wrapper (section 5).
 
-`serve` refuses to start without the ticket secret, the project id and the
-allowed origins, with a wildcard origin, or on a non-loopback bind.
+`serve` refuses to start without the ticket secret and the allowed origins,
+with a wildcard origin, or on a non-loopback bind. It no longer requires the
+project id
+([`AMC-WEB-PROJECTS` section 9](AMC-WEB-PROJECTS.md#9-tickets-and-specs)).
 
 ---
 
@@ -154,12 +170,17 @@ Check edits with:
 cd <install_dir>/amc_control && venv/bin/python3 -m mv3dt_amc_control check-config
 ```
 
-The seeded file sets `project.mode: create_new`, so a first automated run
-makes its own AMC project and cannot overwrite the live calibration that
+The seeded file sets `project.mode: web_project`: every automated run is
+locked to the calling web project's own AMC project and folder under the
+projects root
+([`AMC-WEB-PROJECTS` section 6](AMC-WEB-PROJECTS.md#6-locking-calibration-to-the-project)),
+so it never touches the installer's live calibration that
 [`STEP-4`](STEP-4-CALIB-OUTPUT-WIRING.md#7-later-recalibration)'s ingest timer
-would install. Switch to `reuse_installer_project` once runs are trusted.
-`layout.allowed_hosts` must list the web app's storage host before floor plans
-can be downloaded.
+would install. `create_new` and `reuse_installer_project` keep their meaning.
+**The file is never rewritten**, so a workstation seeded by an earlier release
+with `create_new` is switched by hand: set `project.mode: web_project` in
+`amc_automation.yaml` and run `check-config`. `layout.allowed_hosts` must list
+the web app's storage host before floor plans can be downloaded.
 
 The automated workflow, against AMC 3.3.0's seven steps:
 
@@ -186,11 +207,16 @@ step 6 with a to-do list and continues on request.
 | `GET /amc/status`, `POST /amc/start`, `POST /amc/stop` | AMC's state, launch, shutdown |
 | `GET /amc/automation/status`, `POST .../start`, `.../continue`, `.../cancel` | the automated run |
 | `GET /amc/automation/config` | settings in effect |
+| `POST /projects`, `GET /projects/current`, `.../files`, `.../files/{path}` | web project provisioning and folder retrieval: [`AMC-WEB-PROJECTS` section 8](AMC-WEB-PROJECTS.md#8-workstation-api-contract-required) |
 
 Tickets are Step 8's ([`STEP-8` section 3.2](STEP-8-TRACKING-HISTORY.md#32-tickets-required)) with
-`scope: "amc"`: HS256, `aud: "p2bp-workstation"`, `exp`, `sub`, `pid`, and
-`iss` checked when `TICKET_ISSUER` is set. Wrong scope or project is 403, so a
-tracking ticket cannot control AMC. `POST /amc/automation/start` also takes a
+`scope: "amc"` (or `amc-provision` for `POST /projects`): HS256,
+`aud: "p2bp-workstation"`, `exp`, `sub`, `pid`, and `iss` checked when
+`TICKET_ISSUER` is set. A wrong scope is 403, so a tracking ticket cannot
+control AMC. **The service accepts tickets for any web project**: it no
+longer compares `pid` with `TRACKING_PROJECT_ID`, and the web app checks the
+user's permission on the project before signing
+([`AMC-WEB-PROJECTS` section 9](AMC-WEB-PROJECTS.md#9-tickets-and-specs)). `POST /amc/automation/start` also takes a
 spec signed the same way with `scope: "amc-calibration-spec"`, carrying the
 project title and a short-lived link to its floor plan.
 
@@ -204,7 +230,8 @@ executing or waiting for the user.
 
 `run` phases: package and venv; settings and state; sudo rule; unit; tailnet
 exposure (a failed `tailscale serve` is a warning with the manual command).
-`verify` requires the unit enabled and active, the sudo rule present with
+`verify` requires the unit enabled and active, the projects root a
+directory (not a symlink) owned by the service user, the sudo rule present with
 mode 440 and matching the current Tailscale address, and `GET /health`
 answering with the secret configured. `pending_update()` re-runs a completed
 step when the bundled package, requirements, unit or sudo rule differ.
@@ -225,7 +252,8 @@ to match, as for Step 7
 
 ### 9.1 Environment
 
-`report` prints the URL to set and where the secret comes from. In the web
+`report` prints the URL to set and where the secret comes from, plus the
+projects root and the link to it. In the web
 app's environment:
 
 | Variable | Value |
@@ -294,9 +322,12 @@ Step 9 is implemented; these are the units as they shipped.
 | A2 Sudo rule targets the installer binary (PR #69) | `feat/installer-amc-sudo-root-target` | `steps/step9_amc_control.py`, `assets/amc_control/mv3dt_amc_control/api.py`, `controller.py`, `assets/systemd/mv3dt-amc-control.service.in`, this doc sections 3 to 5, `tests/test_step9_amc_control.py`, `tests/amc_control/test_amc_control_controller.py` | A1 | 2 |
 | A3 CI installs service test requirements (PR #68) | `feat/installer-ci-service-deps` | `.github/workflows/installer-tests.yml`, `tests/amc_control/test_amc_control_api.py` | A1 | 2 |
 | A4 Doc follow-ups | `feat/installer-step9-doc-fixes` | this doc, `DEVELOPMENT-STATUS.md`, `installer/README.md`, `CLAUDE.md`, the `report` line in `steps/step9_amc_control.py` and its test | A2 | 3 |
+| H1 to H5 AMC web projects (PRs #73, #74, #76, #75 and #77) | `feat/installer-amc-project-store` to `feat/installer-step9-projects-root` | the units in [`AMC-WEB-PROJECTS` section 13](AMC-WEB-PROJECTS.md#13-decomposition); H5 is `steps/step9_amc_control.py`, `tests/test_step9_amc_control.py` and this doc | A4 | 4 |
 
 Package paths are relative to `installer/mv3dt_installer/`; test paths are
-relative to `installer/`. A4 is stacked on A2 because both edit this doc.
+relative to `installer/`. A4 is stacked on A2 because both edit this doc. The
+H units' own dependencies and waves are in
+[`AMC-WEB-PROJECTS` section 13](AMC-WEB-PROJECTS.md#13-decomposition).
 
 ---
 
@@ -331,6 +362,8 @@ Repo files referenced:
   contract, `tracking.env`, and the tailnet exposure rules this step reuses.
 - [`LIVE-BASELINE-AND-EDIT-PROTECTION.md`](LIVE-BASELINE-AND-EDIT-PROTECTION.md)
   — AMC's unauthenticated ports.
+- [`AMC-WEB-PROJECTS.md`](AMC-WEB-PROJECTS.md) — the projects root, the
+  project routes, any-project tickets and the `web_project` mode.
 - [`DEVELOPMENT-STATUS.md`](DEVELOPMENT-STATUS.md) — what has run on the
   workstation.
 - `installer/mv3dt_installer/steps/step9_amc_control.py`,
