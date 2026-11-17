@@ -93,6 +93,37 @@ def test_provision_dependency_accepts_only_provision_tickets():
     assert c.post("/projects").status_code == 401
 
 
+@pytest.mark.parametrize("scopes", [(SCOPE, PROVISION_SCOPE), frozenset({SCOPE, PROVISION_SCOPE})])
+def test_a_two_scope_dependency_accepts_either_and_refuses_a_third(scopes):
+    """GET /projects/current takes amc or amc-provision (AMC-WEB-PROJECTS.md section 8)."""
+    app = FastAPI()
+    either = ticket_dependency(SECRET, None, scopes)
+
+    @app.get("/projects/current")
+    def current(claims: dict = Depends(either)):
+        return claims
+
+    c = TestClient(app)
+    assert c.get("/projects/current", headers=bearer(mint(scope=SCOPE))).status_code == 200
+    assert c.get("/projects/current", headers=bearer(mint(scope=PROVISION_SCOPE))).status_code == 200
+    assert c.get("/projects/current", headers=bearer(mint(scope="tracking"))).status_code == 403
+    assert c.get("/projects/current", headers=bearer(mint(scope="amc-calibration-spec"))).status_code == 403
+
+
+def test_verify_ticket_takes_a_set_of_scopes():
+    both = (SCOPE, PROVISION_SCOPE)
+    assert verify_ticket(mint(scope=PROVISION_SCOPE), SECRET, scope=both)["scope"] == PROVISION_SCOPE
+    with pytest.raises(TicketError) as exc:
+        verify_ticket(mint(scope="tracking"), SECRET, scope=both)
+    assert exc.value.status == 403
+
+
+def test_a_list_scope_claim_is_a_403_not_a_crash():
+    with pytest.raises(TicketError) as exc:
+        verify_ticket(mint(scope=[SCOPE]), SECRET, scope=(SCOPE, PROVISION_SCOPE))
+    assert exc.value.status == 403
+
+
 def test_amc_dependency_refuses_provision_tickets():
     c = scoped_app()
     assert c.get("/amc", headers=bearer(mint(scope=SCOPE, pid="any"))).status_code == 200
