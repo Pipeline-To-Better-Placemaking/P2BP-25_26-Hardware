@@ -80,7 +80,7 @@ input and its multi-view config pins `video_resolution: [1920, 1080]`. When
 this was decided the fleet's main streams were left at the sensor's native
 3072x1728, which `-c:v copy` passed through unchanged. As of 2026-10-20 the
 connected cameras' main streams are set to 1920x1080 at 22 fps
-([`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-10-20)),
+([`DEVELOPMENT-STATUS`](DEVELOPMENT-STATUS.md#current-workstation-state-last-verified-2026-11-16)),
 but the clip is still always scaled and re-encoded, whatever the camera
 sends: a camera already set to 1080p costs only the encode, and a camera left
 at its native resolution, or reset to it, still produces a valid clip.
