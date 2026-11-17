@@ -73,10 +73,12 @@ always run the flow below, also on Continue; they never take the
 
 ### 3.1 Before starting
 
-- **Videos first**: when `get_project_info` reports `video_files_count` of 0
-  (step 2 is still waiting for footage), the step is `waiting` with
-  `needs_user=False`: "Rectification runs once the videos are in AMC". AMC's
-  own UI disables Start in that case.
+- **Videos first**: when step 2 is `waiting`, or `get_project_info`
+  reports `video_files_count` of 0, the step is `waiting` with
+  `needs_user=False`: "Rectification runs once the videos are in AMC". A
+  `web_project` run's reused AMC project can still hold the previous run's
+  videos while step 2 waits for new footage, so the count alone is not
+  enough. AMC's own UI disables Start when there are no videos.
 - **Configuration**: AMC's UI posts the configuration just before starting;
   the run already posted it in step 3
   ([section 4](#4-step-3-the-scale-locked)), so it posts nothing extra.
@@ -188,6 +190,12 @@ SHA-256 of the `floorplan/layout.png` this run uploaded. A remembered scale
 is used only when the run's layout has the same hash, so a new floor plan
 asks again.
 
+- **Hash**: step 2 saves the SHA-256 of the layout it uploads on the job as
+  `layout_sha256`; steps 3 and 6 use that saved value.
+- **No uploaded layout** (the user uploads it in AMC, or `layout.enabled` is
+  off): the job has no hash, so no remembered scale is used and none is
+  written; the scale is still confirmed for this run.
+
 - **Schema**: `schema_version` stays 1. Both keys are read as optional
   (`null` when absent), so older files still load.
 - **Wire**: they appear in the binding `GET /projects/current` returns; the
@@ -205,7 +213,7 @@ Otherwise it stays `waiting`, with a message saying what AMC reports:
 | Step | Confirmed when |
 |---|---|
 | 2 Video Configuration | `get_project_info`: `video_files_count` at least 1 and `layout_file` true |
-| 3 Parameters | [section 4](#4-step-3-the-scale-locked) item 3 |
+| 3 Parameters | [section 4.2](#42-posting-and-waiting) item 3 |
 | 4 Rectification (`ui`) | `rectification_state` is `COMPLETED` |
 | 5 Manual Alignment | `get_project_info`: `alignment_file` true |
 
