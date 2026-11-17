@@ -121,7 +121,8 @@ class Binding:
     @classmethod
     def from_json(cls, data: Any) -> Binding:
         """Strict parse; ValueError for anything not written by `to_json`."""
-        if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
+        version = data.get("schema_version") if isinstance(data, dict) else None
+        if type(version) is not int or version != SCHEMA_VERSION:  # True == 1
             raise ValueError("not a version 1 binding")
         try:
             b = cls(**{a: data[k] for k, a in _KEYS.items()})
@@ -178,12 +179,30 @@ class ProjectStore:
         return int(self._clock())
 
     def folder_path(self, folder: str) -> Path:
+        """Where the folder lives (or would). A name check only, no disk access."""
         return self.root / validate_folder(folder)
 
-    def _read(self, folder: str) -> Binding | None:
-        if not FOLDER_RE.fullmatch(folder):
+    def _real_dir(self, folder: Any) -> Path | None:
+        """The folder's real path, or None unless it is a plain directory
+        directly under the real root (a symlinked entry could point anywhere)."""
+        if not isinstance(folder, str) or not FOLDER_RE.fullmatch(folder):
             return None
-        path = self.root / folder / BINDING_FILE
+        entry = self.root / folder
+        try:
+            if entry.is_symlink() or not entry.is_dir():
+                return None
+            real = entry.resolve(strict=True)
+            if real.parent != self.root.resolve(strict=True) or real.name != folder:
+                return None
+        except (OSError, RuntimeError):
+            return None
+        return real
+
+    def _read(self, folder: Any) -> Binding | None:
+        base = self._real_dir(folder)
+        if base is None:
+            return None
+        path = base / BINDING_FILE
         try:
             if path.is_symlink() or not path.is_file():
                 return None
@@ -193,7 +212,7 @@ class ProjectStore:
         return b if b.folder == folder else None
 
     def get_by_folder(self, folder: str) -> Binding | None:
-        return self._read(folder) if isinstance(folder, str) else None
+        return self._read(folder)
 
     def get_by_pid(self, pid: str) -> Binding | None:
         for b in self.list():
@@ -203,17 +222,10 @@ class ProjectStore:
 
     def list(self) -> list[Binding]:
         try:
-            entries = sorted(self.root.iterdir(), key=lambda p: p.name)
+            names = sorted(p.name for p in self.root.iterdir())
         except OSError:
             return []
-        out = []
-        for entry in entries:
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            b = self._read(entry.name)
-            if b is not None:
-                out.append(b)
-        return out
+        return [b for b in map(self._read, names) if b is not None]
 
     def create(self, pid: str, folder: str, title: str) -> Binding:
         """Bind `pid` to a new folder in state provisioning.
@@ -225,6 +237,13 @@ class ProjectStore:
         validate_folder(folder)
         if not isinstance(pid, str) or not pid:
             raise ValueError("web project id is required")
+        now = self._now()
+        b = Binding(project_id=pid, folder=folder, title=title,
+                    amc_project_id=None, amc_project_name=None,
+                    state=STATE_PROVISIONING, error="",
+                    created_at=now, updated_at=now,
+                    last_run_at=None, calib_runs=0)
+        b._check()  # before anything touches the disk
         with self._lock:
             existing = self.get_by_folder(folder)
             if existing is not None and existing.project_id != pid:
@@ -236,23 +255,33 @@ class ProjectStore:
             if existing is not None:
                 return existing
             path = self.folder_path(folder)
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise FolderTaken(f"{path} exists and is not a plain directory")
             path.mkdir(parents=True, exist_ok=True)
+            if self._real_dir(folder) is None:
+                raise FolderTaken(f"{path} is not a plain directory under the projects root")
             for sub in SUBDIRS:
                 (path / sub).mkdir(exist_ok=True)
-            now = self._now()
-            b = Binding(project_id=pid, folder=folder, title=title or "",
-                        amc_project_id=None, amc_project_name=None,
-                        state=STATE_PROVISIONING, error="",
-                        created_at=now, updated_at=now,
-                        last_run_at=None, calib_runs=0)
             _write_atomic(path / BINDING_FILE, b.to_json())
             return b
 
     def save(self, binding: Binding) -> Binding:
+        """Rewrite an existing binding. Only fields `update` may change can
+        differ from what is on disk, so a save never moves or steals a binding."""
         b = replace(binding, updated_at=self._now())
         b._check()
         with self._lock:
-            _write_atomic(self.folder_path(b.folder) / BINDING_FILE, b.to_json())
+            current = self._read(b.folder)
+            if current is None:
+                raise ProjectNotFound(f"no project bound to folder {b.folder!r}")
+            for name in _IMMUTABLE:
+                if getattr(b, name) != getattr(current, name):
+                    raise ValueError(f"binding field cannot change: {name}")
+            bound = self.get_by_pid(b.project_id)
+            if bound is not None and bound.folder != b.folder:
+                raise ProjectAlreadyBound(
+                    f"web project is already bound to folder {bound.folder!r}")
+            _write_atomic(self.root / b.folder / BINDING_FILE, b.to_json())
         return b
 
     def update(self, folder: str, /, **changes: Any) -> Binding:
@@ -270,7 +299,10 @@ class ProjectStore:
             return self.save(replace(current, **changes))
 
     def list_files(self, folder: str) -> list[dict[str, Any]]:
-        base = self.folder_path(folder)
+        """FileNotFoundError unless the folder is a plain directory under the root."""
+        base = self._real_dir(folder)
+        if base is None:
+            raise FileNotFoundError(f"no project folder {folder!r}")
         out: list[dict[str, Any]] = []
         for dirpath, dirnames, filenames in os.walk(base):  # never follows links
             d = Path(dirpath)
@@ -293,10 +325,9 @@ class ProjectStore:
     def resolve_file(self, folder: str, rel: str) -> Path:
         """The regular file at `rel` inside the folder; FileNotFoundError otherwise."""
         missing = FileNotFoundError(f"no such file in the project: {rel!r}")
-        try:
-            base = self.folder_path(folder).resolve(strict=True)
-        except (InvalidFolder, OSError):
-            raise missing from None
+        base = self._real_dir(folder)
+        if base is None:
+            raise missing
         if not isinstance(rel, str) or not rel or "\x00" in rel or "\\" in rel:
             raise missing
         parts = PurePosixPath(rel)

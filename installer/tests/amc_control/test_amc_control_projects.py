@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -327,3 +328,93 @@ def test_resolve_file_bad_folder(files_store):
         files_store.resolve_file("../lab", "notes.txt")
     with pytest.raises(FileNotFoundError):
         files_store.resolve_file("absent", "notes.txt")
+
+
+# --- folders that are not plain directories, save and create checks ----------
+
+@pytest.fixture
+def evil_store(store, tmp_path):
+    """`<root>/evil` is a symlink to a directory outside the root that looks
+    like a valid project folder."""
+    store.create("p1", "lab", "Lab")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.txt").write_text("secret")
+    (outside / "project.json").write_text(json.dumps(
+        {**store.get_by_folder("lab").to_json(), "ProjectId": "p9", "Folder": "evil"}))
+    os.symlink(outside, store.root / "evil")
+    (store.root / "plain-file").write_text("not a dir")
+    return store
+
+
+def test_symlinked_folder_is_invisible_to_lookups(evil_store):
+    assert evil_store.get_by_folder("evil") is None
+    assert evil_store.get_by_pid("p9") is None
+    assert [b.folder for b in evil_store.list()] == ["lab"]
+    with pytest.raises(P.ProjectNotFound):
+        evil_store.update("evil", state=P.STATE_READY)
+
+
+@pytest.mark.parametrize("folder", ["evil", "plain-file", "absent"])
+def test_list_files_refuses_non_plain_folder(evil_store, folder):
+    with pytest.raises(FileNotFoundError):
+        evil_store.list_files(folder)
+
+
+@pytest.mark.parametrize("folder", ["evil", "plain-file"])
+def test_resolve_file_refuses_non_plain_folder(evil_store, folder):
+    with pytest.raises(FileNotFoundError):
+        evil_store.resolve_file(folder, "x.txt")
+
+
+@pytest.mark.parametrize("folder", ["evil", "plain-file"])
+def test_create_refuses_non_plain_folder(evil_store, folder):
+    with pytest.raises(P.FolderTaken):
+        evil_store.create("p2", folder, "x")
+    assert evil_store.get_by_pid("p2") is None
+
+
+def test_symlinked_root_still_works(tmp_path):
+    real = tmp_path / "real-root"
+    real.mkdir()
+    os.symlink(real, tmp_path / "link-root")
+    s = P.ProjectStore(tmp_path / "link-root")
+    s.create("p1", "lab", "Lab")
+    (real / "lab" / "footage" / "cam_00.mp4").write_bytes(b"x")
+    assert s.get_by_pid("p1").folder == "lab"
+    assert [e["Path"] for e in s.list_files("lab")] == ["footage/cam_00.mp4"]
+    want = real.resolve() / "lab" / "footage" / "cam_00.mp4"
+    assert s.resolve_file("lab", "footage/cam_00.mp4") == want
+
+
+def test_save_cannot_move_or_steal_a_binding(store):
+    a = store.create("pa", "a", "A")
+    b = store.create("pb", "b", "B")
+    with pytest.raises(ValueError):
+        store.save(replace(a, folder="b"))  # b is bound to pb
+    with pytest.raises(ValueError):
+        store.save(replace(a, project_id="pb"))
+    with pytest.raises(ValueError):
+        store.save(replace(a, created_at=1))
+    with pytest.raises(P.ProjectNotFound):
+        store.save(replace(a, folder="c"))  # no binding there
+    assert not (store.root / "c").exists()
+    assert store.get_by_folder("b") == b
+    assert store.get_by_pid("pa").folder == "a"
+    saved = store.save(replace(a, state=P.STATE_READY))
+    assert store.get_by_folder("a") == saved
+
+
+@pytest.mark.parametrize("title", [5, None, ["x"]])
+def test_create_rejects_bad_title_before_writing(store, title):
+    with pytest.raises(ValueError):
+        store.create("p1", "lab", title)
+    assert not (store.root / "lab").exists()
+
+
+@pytest.mark.parametrize("version", [True, 1.0, "1"])
+def test_schema_version_must_be_exactly_int_1(store, version):
+    good = store.create("p1", "lab", "Lab").to_json()
+    good["schema_version"] = version
+    (store.root / "lab" / "project.json").write_text(json.dumps(good))
+    assert store.get_by_folder("lab") is None
