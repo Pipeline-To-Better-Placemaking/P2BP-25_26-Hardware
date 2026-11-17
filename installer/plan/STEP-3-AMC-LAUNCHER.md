@@ -163,6 +163,10 @@ written atomically and only when content changes. `PROJECT_NAME` and
 AMC 3.3.0 does not consume them there. The upstream optional `VIOS_BASE_URL`
 (RTSP input) and `VGGT_MODEL_PATH` keys are left at their Compose defaults.
 
+Two more generated files sit next to `.env`, `compose/mv3dt-ui-nginx.conf`
+and `compose/compose.override.yml`, which stop the UI caching its runtime
+config ([`AMC-PROJECT-LIFECYCLE` section 2](AMC-PROJECT-LIFECYCLE.md#2-amc-ui-runtime-config-caching-locked)).
+
 ---
 
 ## 5. Authentication and Compose bring-up

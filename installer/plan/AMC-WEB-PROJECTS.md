@@ -166,6 +166,10 @@ keep their meaning for workstations that still set them.
 | 7 Results | the result ZIP and statistics always go to `<folder>/calibration/<UTC>/` |
 | end of run | `runs/<job id>.json` written; on success `LastRunAt` and `CalibRuns` updated and AMC's saved alignment file, if any, copied to `<folder>/alignment/alignment_data.json` |
 
+> **Amended:** cancelling a run now replaces the AMC project with an empty
+> one on purpose and records the new id
+> ([`AMC-PROJECT-LIFECYCLE` section 5](AMC-PROJECT-LIFECYCLE.md#5-cancel-resets-the-run-locked)).
+
 A spec whose `folder` differs from the binding's is `400`. AMC stays one shared
 instance: the existing one-run-at-a-time rule is unchanged. The runner builds
 its own `ProjectStore` from `projects.default_projects_root()` (which reads
@@ -221,6 +225,11 @@ FastAPI's `{"detail": "..."}`.
   `WORKSTATION_AMC_TICKET_MINUTES` and the journal is readable only by
   administrators. CORS and Private Network Access handling are STEP-9's
 ([`STEP-9` section 7](STEP-9-AMC-CONTROL.md#7-api-and-ticket-contract)).
+
+> **Amended:** video files are listed with `Downloadable: false` and their
+> download is `403`, and `DELETE /projects/current` (`amc-delete` scope)
+> deletes the project
+> ([`AMC-PROJECT-LIFECYCLE` sections 3 and 4](AMC-PROJECT-LIFECYCLE.md#4-no-video-downloads-locked)).
 
 ---
 
@@ -302,8 +311,9 @@ FastAPI's `{"detail": "..."}`.
 
 Settled exclusions:
 
-- Deleting a project in either place. Nothing removes a folder or AMC
-  project; a web project deleted later leaves its folder for the operator.
+- Deleting a project in either place. **Reversed** by
+  [`AMC-PROJECT-LIFECYCLE` section 3](AMC-PROJECT-LIFECYCLE.md#3-deleting-a-project-required):
+  deleting a web project now deletes its folder and AMC project.
 - Applying the migration to the production database
   (`npm run db:migrate`) is an operator action, done once the web PRs merge.
 
