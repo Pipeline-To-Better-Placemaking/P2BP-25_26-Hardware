@@ -8,7 +8,9 @@ Routes (all but /health need a web app ticket for any web project; scope
     POST /amc/start               launch AMC (`mv3dt-installer amc --keep-up ...`)
     POST /amc/stop                shut AMC down (`mv3dt-installer amc --down`)
     GET  /amc/automation/status   the current or last automated run
-    POST /amc/automation/start    start a run from a spec signed by the web app
+    POST /amc/automation/start    start a run from a spec signed by the web app; with
+                                  Record: {Seconds} step 2 records new footage first
+                                  (AMC-FOOTAGE-RECORDING.md section 6)
     POST /amc/automation/continue after the manual steps, or to retry
     POST /amc/automation/cancel   stop the run (AMC keeps calibrating if it started)
     GET  /amc/automation/config   the automation settings in effect
@@ -30,8 +32,10 @@ answered for those origins (a public https page calling a private address).
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from . import __version__
 from .auth import PROVISION_SCOPE, SCOPE, TicketError, ticket_dependency, verify_ticket
@@ -82,6 +86,17 @@ def create_app(
         # this the preflight is refused and the browser never sends the request.
         allow_private_network=True,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_body(request: Request, exc: RequestValidationError):
+        # A bad start body (such as Record.Seconds outside 30 to 1800) is a 400 like
+        # every other refused start; the other routes keep FastAPI's 422.
+        if request.url.path == "/amc/automation/start":
+            problems = "; ".join(
+                f"{'.'.join(str(p) for p in e.get('loc', ())[1:]) or 'body'}: {e.get('msg', 'invalid')}"
+                for e in exc.errors())
+            return JSONResponse({"detail": f"invalid start request: {problems}"}, status_code=400)
+        return await request_validation_exception_handler(request, exc)
 
     ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, SCOPE)
     provision_ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, PROVISION_SCOPE)
@@ -148,7 +163,10 @@ def create_app(
     def automation_start(body: AutomationStart, claims: dict = Depends(ticket)):
         try:
             spec = verify_spec(body.Spec, settings.ticket_secret, claims["pid"], settings.ticket_issuer)
-            return exclusive(lambda: runner.start(spec))
+            if body.Record is None:
+                return exclusive(lambda: runner.start(spec))
+            seconds = body.Record.Seconds
+            return exclusive(lambda: runner.start(spec, record_seconds=seconds))
         except SpecError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Busy as exc:

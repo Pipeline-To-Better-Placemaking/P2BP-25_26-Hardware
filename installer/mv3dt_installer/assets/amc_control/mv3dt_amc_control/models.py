@@ -1,6 +1,11 @@
 """Response and request bodies of the AMC control API (field names match the web app)."""
 
+from typing import Annotated
+
 from pydantic import BaseModel, Field
+
+RECORD_MIN_SECONDS = 30
+RECORD_MAX_SECONDS = 1800
 
 
 class AmcStatus(BaseModel):
@@ -36,8 +41,17 @@ class AutomationJob(BaseModel):
     UpdatedAt: int
 
 
+class RecordRequest(BaseModel):
+    Seconds: Annotated[int, Field(strict=True, ge=RECORD_MIN_SECONDS, le=RECORD_MAX_SECONDS,
+                                  description="Length of the recording, 30 to 1800 seconds")]
+
+
 class AutomationStart(BaseModel):
     Spec: str = Field(description="Signed calibration spec from POST /api/workstation/project/{id}/calibration-spec")
+    Record: RecordRequest | None = Field(
+        default=None,
+        description="Record new footage from every camera in step 2 (project.mode web_project only); "
+                    "absent uploads the footage already in the folder")
 
 
 class ProjectProvision(BaseModel):
