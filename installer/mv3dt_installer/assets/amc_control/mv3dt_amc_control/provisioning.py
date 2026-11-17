@@ -236,16 +236,25 @@ class Provisioner:
                 "AmcProjectDeleted": amc_deleted, "Leftover": leftover}
 
     def _amc_starting(self) -> ProvisionError:
-        """Ask AMC to start (returns at once) and build the 503 the client retries after."""
+        """Ask AMC to start (returns at once) and build the 503 the client retries after.
+
+        The controller's error is read before and after `start()`: `start()`
+        clears it, and an earlier start that exited with an error is only
+        recorded when `status()` looks. The later error wins when both exist.
+        """
+        before = self._controller_error()
         self.controller.start()
+        error = self._controller_error() or before
         message = "AMC is starting on the workstation; try again shortly"
-        try:
-            error = self.controller.status().get("Error") or ""
-        except Exception:
-            error = ""
         if error:
             message += f" (last start error: {error})"
         return ProvisionError(503, message, retry_after=AMC_STARTING_RETRY_SECONDS)
+
+    def _controller_error(self) -> str:
+        try:
+            return self.controller.status().get("Error") or ""
+        except Exception:
+            return ""
 
     # ---- background job -----------------------------------------------------
     def _job(self, folder: str, spec: CalibrationSpec) -> None:
