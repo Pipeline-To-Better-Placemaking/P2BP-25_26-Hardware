@@ -45,9 +45,9 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | Installed camera inventory | Current: refreshed with `--scan-cameras` for the two cameras in use | 2026-10-20 | `<install_dir>/cameras.yml`; operator |
 | Step 9 AMC control | Installed on v0.4.25 with `--amc-control on`; all five phases passed. `mv3dt-amc-control` runs as `p2bp-admin` on `127.0.0.1:8091`, published at `https://p2bp-admin-workstation.tailafa4a7.ts.net:8444`. `/health` returns 200 locally and over the tailnet with `ticket_configured: true`; `/amc/status` returns 401 without a ticket and 200 (`State: ready`) with a scope `amc` ticket signed by the shared secret. **AMC start and stop through the sudo rule have not been exercised** ([`STEP-9`](STEP-9-AMC-CONTROL.md)) | 2026-11-16 | installer transcript; `curl`; `journalctl -u mv3dt-amc-control` |
 | Step 9 sudo rule | `/etc/sudoers.d/mv3dt-amc-control` passes `visudo -c` and allows only `/opt/mv3dt/bin/mv3dt-installer amc --keep-up --no-open --non-interactive --host-ip 100.95.170.92` and `... amc --down`; `/opt/mv3dt/bin/` and the binary are `root:root 755` ([`STEP-9` section 5](STEP-9-AMC-CONTROL.md#5-the-sudo-rule)) | 2026-11-16 | `sudo -n -l`; `stat` |
-| Step 9 automation settings | `layout.allowed_hosts` in `/opt/mv3dt/amc_control/amc_automation.yaml` is `[]`, so the automation routes cannot fetch a floor plan until the web app's storage host is added | 2026-11-16 | `amc_automation.yaml` |
+| Step 9 automation settings | `layout.allowed_hosts` in `/opt/mv3dt/amc_control/amc_automation.yaml` is `[uegnaokrlmfsfthwhicl.supabase.co]`, the production `SUPABASE_URL` host; `check-config` passes and the service was restarted. No floor plan has been fetched yet | 2026-11-16 | `amc_automation.yaml`; `check-config` |
 | Tailnet HTTPS | `8443` serves tracking (`/health` 200), `8444` serves AMC control; Tailscale IPv4 `100.95.170.92` | 2026-11-16 | `curl` over the tailnet |
-| Web app AMC wiring | Web PR #34 (merge `852ebe6`) adds the ticket and calibration-spec routes. They answer 503 until the web deployment sets `WORKSTATION_AMC_URL=https://p2bp-admin-workstation.tailafa4a7.ts.net:8444` beside the existing `WORKSTATION_TICKET_SECRET`; whether the deployment has it is **not verified** | 2026-11-16 | `P2BP-25_26-Web` `main` |
+| Web app AMC wiring | Web PR #34 (merge `852ebe6`) adds the ticket and calibration-spec routes. The Vercel deployment has `WORKSTATION_AMC_URL=https://p2bp-admin-workstation.tailafa4a7.ts.net:8444` beside the existing `WORKSTATION_TICKET_SECRET`. A ticket issued by the deployed app has **not yet been used** against the workstation | 2026-11-16 | `P2BP-25_26-Web` `main`; operator |
 
 > **Swapping cameras invalidates the inventory.** Link-local IPs change with
 > the hardware, so after connecting a different camera, refresh with
@@ -95,15 +95,11 @@ operator work; do not claim software automation has completed them.
 
 To resume on the workstation:
 
-1. **Set the web app's AMC URL**: `WORKSTATION_AMC_URL` in the web
-   deployment's environment, as in the table above. Its
-   `WORKSTATION_TICKET_SECRET` must equal the value in
-   `/opt/mv3dt/secrets/tracking.env`.
-2. **Allow the floor plan host**: add the web app's storage host to
-   `layout.allowed_hosts` in `/opt/mv3dt/amc_control/amc_automation.yaml`,
-   then restart `mv3dt-amc-control`.
-3. **Exercise AMC start and stop from the web app**, which runs the sudo rule
-   for the first time, then record the result in the table above.
+1. **Exercise AMC start and stop from the web app** after its next deploy,
+   which runs the sudo rule for the first time, then record the result in
+   the table above.
+2. **Run a calibration-spec automation** to confirm the floor plan download
+   passes `layout.allowed_hosts`.
 
 Do not use `--reset-state`, purge NVIDIA packages, or delete AMC data. Treat
 any failure as evidence to diagnose from the full transcript before changing
