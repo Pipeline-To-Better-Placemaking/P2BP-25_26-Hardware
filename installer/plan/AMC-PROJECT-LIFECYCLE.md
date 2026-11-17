@@ -225,6 +225,8 @@ Three job fields are saved, each before the change it records:
 |---|---|
 | `amc_changed` | `true` before the run's first call that changes the AMC project (an upload, a config post, verify, calibrate) |
 | `cancelling` | `true` when the undo starts, until the job finishes `cancelled` |
+| `undone` | the undo actions finished so far, each appended and saved as it completes: `amc_deleted`, `amc_created`, `amc_bound`, `footage_cleared`, `footage_restored`, `results_removed` |
+| `reset_amc_project_id` | the new AMC project's id, saved as soon as `create_project` returns and before the binding is written |
 | `recorded_files` | the `files` list from the recorder's final line, with `footage_recorded` |
 | `calibration_dir` | the `calibration/<UTC>` folder name, before step 7 creates it |
 
@@ -260,11 +262,26 @@ paused, failed or interrupted one. No lock is held while it waits on AMC.
    could not be undone and why (for example "Cancelled, but the AMC project
    could not be reset: ...").
 
-Every undo action tolerates having already happened (a missing file, an
-AMC `404`), so the undo can run again. A job loaded with `cancelling` set,
-after a service restart, restarts the undo instead of becoming
-`interrupted`, and `resume()` refuses it: a half-undone run is never
-continued against the new, empty AMC project.
+A job loaded with `cancelling` set, after a service restart, restarts the
+undo instead of becoming `interrupted`, and `resume()` refuses it: a
+half-undone run is never continued against the new, empty AMC project.
+
+**Restart-safe (REQUIRED):** a restarted undo skips every action already in
+`undone`. Re-running a finished action is not safe in general: recorded
+clips and the older clips in `previous/` share names
+(`<camera id>-<position>.mp4`), so deleting `recorded_files` again after
+`previous/` was moved back would delete the older footage. So:
+
+- the AMC reset records `amc_deleted` after the delete, saves
+  `reset_amc_project_id` and records `amc_created` once `create_project`
+  returns, and records `amc_bound` after the binding is written; a restart
+  after `amc_created` reuses the saved id and never creates a second
+  project;
+- the footage undo records `footage_cleared` after deleting
+  `recorded_files` and the manifest, before moving anything back from
+  `previous/`, and `footage_restored` after the move; the move itself
+  tolerates files already moved;
+- within one action, a missing file or an AMC `404` counts as done.
 
 Kept: the floor plan and alignment files in the folder (project inputs,
 not run outputs), earlier `calibration/<UTC>` results, and the run's
