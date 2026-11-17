@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 import httpx
 
@@ -31,6 +31,8 @@ from .projects import (STATE_FAILED, STATE_PROVISIONING, STATE_READY, SUBDIRS, B
                        InvalidFolder, ProjectAlreadyBound, ProjectStore, validate_folder)
 
 RESTART_ERROR = "interrupted by a service restart; set it up again"
+BUSY_MESSAGE = "A project is being set up on the workstation; try again when it finishes"
+T = TypeVar("T")
 LAYOUT_FILE = Path("floorplan") / "layout.png"
 
 
@@ -88,7 +90,8 @@ class Provisioner:
         self._clock = clock
         self._wait = wait
         self._spawn = spawn
-        self._lock = threading.Lock()
+        # Reentrant so a run_exclusive callback may call busy().
+        self._lock = threading.RLock()
         self._running: str | None = None  # the folder being provisioned
 
     def _default_api(self, cfg: AutomationConfig) -> AmcApi:
@@ -101,6 +104,19 @@ class Provisioner:
         """True while a provisioning job runs."""
         with self._lock:
             return self._running is not None
+
+    def run_exclusive(self, fn: Callable[[], T]) -> T:
+        """Run `fn` while no provisioning job can start; ProvisionError 409 if one runs.
+
+        Other AMC users (an automated run starting or continuing, AMC being
+        stopped) call through here so their busy check and their action are
+        one critical section with `provision`'s. Lock order is provisioner
+        then runner, the same order `provision` takes through `runner_busy`.
+        """
+        with self._lock:
+            if self._running is not None:
+                raise ProvisionError(409, BUSY_MESSAGE)
+            return fn()
 
     def recover(self) -> list[Binding]:
         """At service start: no job survives a restart, so `provisioning` becomes `failed`."""

@@ -6,6 +6,8 @@ Run from installer/: `python3 -m pytest tests/amc_control -v`
 """
 from __future__ import annotations
 
+import os
+import threading
 import time
 
 import pytest
@@ -85,6 +87,8 @@ class FakeRunner:
     def __init__(self):
         self.active = False
         self.started = []
+        self.resumed = 0
+        self.inside_start = None  # a test hook run inside start()
 
     def uses_amc(self):
         return self.active
@@ -92,11 +96,22 @@ class FakeRunner:
     def status(self):
         return None
 
-    def start(self, spec):
-        self.started.append(spec)
+    def _job(self, pid="proj-1", title="Living Room", by="user-1"):
         now = int(time.time())
-        return {"JobId": "j1", "ProjectId": spec.project_id, "ProjectTitle": spec.title, "State": "running",
-                "Steps": [], "StartedBy": spec.issued_to, "StartedAt": now, "UpdatedAt": now}
+        return {"JobId": "j1", "ProjectId": pid, "ProjectTitle": title, "State": "running",
+                "Steps": [], "StartedBy": by, "StartedAt": now, "UpdatedAt": now}
+
+    def start(self, spec):
+        if self.inside_start:
+            self.inside_start()
+        self.started.append(spec)
+        self.active = True
+        return self._job(spec.project_id, spec.title, spec.issued_to)
+
+    def resume(self):
+        self.resumed += 1
+        self.active = True
+        return self._job()
 
 
 class Env:
@@ -303,16 +318,64 @@ def test_provision_while_run_active_is_409(env):
     assert not env.root.exists()
 
 
-def test_amc_stop_and_automation_start_are_409_while_provisioning(slow):
+def test_amc_stop_and_automation_start_and_continue_are_409_while_provisioning(slow):
     c = slow.client()
     provision(c)
     assert c.post("/amc/stop", headers=auth()).status_code == 409
     r = c.post("/amc/automation/start", json={"Spec": make_spec()}, headers=auth())
     assert r.status_code == 409 and "being set up" in r.json()["detail"]
-    assert slow.controller.stopped == 0 and slow.runner.started == []
+    r = c.post("/amc/automation/continue", headers=auth())
+    assert r.status_code == 409 and "being set up" in r.json()["detail"]
+    assert slow.controller.stopped == 0 and slow.runner.started == [] and slow.runner.resumed == 0
     slow.run_pending()
     assert c.post("/amc/stop", headers=auth()).status_code == 202
+    assert c.post("/amc/automation/continue", headers=auth()).status_code == 202
+    slow.runner.active = False
     assert c.post("/amc/automation/start", json={"Spec": make_spec()}, headers=auth()).status_code == 202
+
+
+def test_provision_racing_a_run_start_waits_and_is_refused(slow):
+    """A provision arriving while a run is starting blocks on the check-and-start, then sees the run."""
+    c = slow.client()
+    outcome = {}
+
+    def other_request():
+        try:
+            outcome["result"] = slow.provisioner.provision(slow.spec(pid="proj-2", folder="kitchen"), "proj-2")
+        except ProvisionError as exc:
+            outcome["error"] = exc
+
+    def inside_start():
+        t = threading.Thread(target=other_request)
+        t.start()
+        t.join(0.3)
+        outcome["blocked"] = t.is_alive()
+        outcome["thread"] = t
+
+    slow.runner.inside_start = inside_start
+    r = c.post("/amc/automation/start", json={"Spec": make_spec()}, headers=auth())
+    assert r.status_code == 202
+    outcome["thread"].join(5)
+    assert outcome["blocked"] is True
+    assert "result" not in outcome
+    assert outcome["error"].status == 409 and "calibration run" in outcome["error"].message
+    assert not (slow.root / "kitchen").exists() and slow.pending == []
+
+
+def test_run_start_racing_a_provision_is_refused(slow):
+    """The reverse order: a provision that won the lock makes the run start 409."""
+    c = slow.client()
+    assert provision(c).status_code == 202
+    with pytest.raises(ProvisionError) as exc:
+        slow.provisioner.run_exclusive(lambda: slow.runner.start(slow.spec()))
+    assert exc.value.status == 409 and slow.runner.started == []
+
+
+def test_amc_stop_is_refused_while_a_run_uses_amc(env):
+    env.runner.active = True
+    r = env.client().post("/amc/stop", headers=auth())
+    assert r.status_code == 409 and "calibration run" in r.json()["detail"]
+    assert env.controller.stopped == 0
 
 
 def test_job_failure_clears_busy(env, monkeypatch):
@@ -486,3 +549,16 @@ def test_cli_projects(env, monkeypatch, capsys):
     assert amc_id in living and "ready" in living and "2026-11-17 01:34 UTC" in living
     assert living.split()[-2] == "2" and living.endswith(str(env.root / "living-room"))
     assert "kitchen: failed: AMC did not become ready" in lines
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any directory")
+def test_cli_projects_reports_an_unreadable_root(env, monkeypatch, capsys):
+    provision(env.client())
+    monkeypatch.setenv("AMC_PROJECTS_DIR", str(env.root))
+    env.root.chmod(0o000)
+    try:
+        assert cli.main(["projects"]) == 1
+    finally:
+        env.root.chmod(0o750)
+    out = capsys.readouterr()
+    assert "cannot read the projects root" in out.err and "no project folders" not in out.out

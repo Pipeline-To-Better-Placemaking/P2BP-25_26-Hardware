@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .settings import Settings, is_loopback
@@ -78,6 +79,11 @@ def _projects(settings: Settings) -> int:
     from .projects import ProjectStore, default_projects_root
 
     store = ProjectStore(default_projects_root())
+    # The root is mode 750 for the service user; list() would hide a permission error.
+    if store.root.exists() and not os.access(store.root, os.R_OK | os.X_OK):
+        print(f"cannot read the projects root {store.root}: run this as the service user or with sudo",
+              file=sys.stderr)
+        return 1
     bindings = store.list()
     if not bindings:
         print(f"no project folders in {store.root}")

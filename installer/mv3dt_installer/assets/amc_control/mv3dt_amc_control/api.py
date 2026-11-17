@@ -18,8 +18,9 @@ Routes (all but /health need a web app ticket for any web project; scope
     GET  /projects/current/files/{path}  download one file (ticket also accepted as ?ticket=)
 
 The project is always the ticket's `pid`. While a project is being set up,
-POST /projects, POST /amc/stop and POST /amc/automation/start answer 409
-(AMC-WEB-PROJECTS.md sections 5 and 8).
+POST /projects, POST /amc/stop, POST /amc/automation/start and
+POST /amc/automation/continue answer 409 (AMC-WEB-PROJECTS.md sections 5
+and 8): one AMC user at a time.
 
 The browser calls this service directly over the tailnet, so CORS allows
 only ALLOWED_ORIGINS, and Chrome's Private Network Access preflight is
@@ -86,9 +87,12 @@ def create_app(
     provision_ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, PROVISION_SCOPE)
     any_ticket = ticket_dependency(settings.ticket_secret, settings.ticket_issuer, {SCOPE, PROVISION_SCOPE})
 
-    def not_while_provisioning() -> None:
-        if provisioner.busy():
-            raise HTTPException(409, "A project is being set up on the workstation; try again when it finishes")
+    def exclusive(fn):
+        """Run fn with no provisioning job running or able to start meanwhile; 409 otherwise."""
+        try:
+            return provisioner.run_exclusive(fn)
+        except ProvisionError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
 
     def wire(binding: Binding) -> dict:
         return binding.to_wire(store.root / binding.folder)
@@ -123,10 +127,12 @@ def create_app(
 
     @app.post("/amc/stop", response_model=AmcStatus, status_code=202)
     def amc_stop(claims: dict = Depends(ticket)):
-        if runner.uses_amc():
-            raise HTTPException(409, "A calibration run is using AMC; cancel the run first")
-        not_while_provisioning()
-        controller.stop()
+        def stop() -> None:
+            if runner.uses_amc():
+                raise HTTPException(409, "A calibration run is using AMC; cancel the run first")
+            controller.stop()
+
+        exclusive(stop)
         return controller.status()
 
     # -- automation ---------------------------------------------------------
@@ -140,10 +146,9 @@ def create_app(
 
     @app.post("/amc/automation/start", response_model=AutomationJob, status_code=202)
     def automation_start(body: AutomationStart, claims: dict = Depends(ticket)):
-        not_while_provisioning()
         try:
             spec = verify_spec(body.Spec, settings.ticket_secret, claims["pid"], settings.ticket_issuer)
-            return runner.start(spec)
+            return exclusive(lambda: runner.start(spec))
         except SpecError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Busy as exc:
@@ -155,7 +160,7 @@ def create_app(
     def automation_continue(claims: dict = Depends(ticket)):
         same_project(claims)
         try:
-            return runner.resume()
+            return exclusive(runner.resume)
         except NothingToResume as exc:
             raise HTTPException(409, str(exc)) from exc
         except ConfigError as exc:
