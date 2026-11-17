@@ -140,7 +140,10 @@ thread reads stdin, and a line `cancel` or end of file interrupts the
 recording (`_thread.interrupt_main()`, the `KeyboardInterrupt` path
 `footage.record` already handles, which stops every `ffmpeg` and removes
 every `.part` file). `SIGTERM` and `SIGINT` take the same path. Nothing may
-`SIGKILL` the command: that would orphan the `ffmpeg` children.
+`SIGKILL` the command: that would orphan the `ffmpeg` children. **REQUIRED:**
+the handler catches that interrupt across steps 6 to 8, not only inside
+`footage.record`: a cancel that lands while footage is being set aside or
+restored still finishes the restore, then prints the exit `3` line.
 
 **Per-camera errors.** `footage.record` keeps each failed camera's reason
 (the redacted `ffmpeg` stderr tail it already logs) on its result, so the
@@ -157,7 +160,8 @@ flushed as written:
 | Exit | `ok` | `cancelled` | `reason` | `failed` |
 |---|---|---|---|---|
 | `0` recorded | `true` | `false` | `""` | `[]` |
-| `1` camera failed or no room | `false` | `false` | what failed | `[{"id", "ip", "error"}]`, password redacted |
+| `1` camera failed | `false` | `false` | what failed | `[{"id", "ip", "error"}]`, password redacted |
+| `1` no room (before recording) | `false` | `false` | free and needed bytes | `[]` |
 | `2` invalid request or setup | `false` | `false` | which check failed | `[]` |
 | `3` cancelled | `false` | `true` | `"cancelled"` | `[]` |
 
@@ -230,7 +234,7 @@ example sudo refused it.
 | Unit | Branch | Files touched | Depends on | Wave |
 |---|---|---|---|---|
 | F0 This spec | `feat/installer-footage-recording-plan` | this doc, `AMC-WEB-PROJECTS.md` section 12 | none | 1 |
-| F1 Root command and sudo line | `feat/installer-record-footage-command` | `mv3dt_installer/record_footage.py`, `mv3dt_installer/footage.py`, `steps/step9_amc_control.py`, `tests/test_record_footage.py`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | F0 | 2 |
+| F1 Root command and sudo line | `feat/installer-record-footage-command` | `mv3dt_installer/record_footage.py`, `mv3dt_installer/footage.py`, `steps/step9_amc_control.py`, `tests/test_record_footage.py`, `tests/test_footage.py`, `tests/test_step9_amc_control.py`, `STEP-9-AMC-CONTROL.md` | F0 | 2 |
 | F2 Recording from step 2 | `feat/installer-amc-run-recording` | `mv3dt_amc_control/automation.py`, `models.py`, `api.py`, `tests/amc_control/test_amc_control_automation.py` | F0 | 2 |
 | F3 Record option on the Calibration page | `feat/calibration-record-footage` | `calibration/amcApi.ts`, `calibration/Calibration.tsx` | none | 1 |
 
