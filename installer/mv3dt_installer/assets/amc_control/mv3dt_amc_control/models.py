@@ -38,3 +38,30 @@ class AutomationJob(BaseModel):
 
 class AutomationStart(BaseModel):
     Spec: str = Field(description="Signed calibration spec from POST /api/workstation/project/{id}/calibration-spec")
+
+
+class ProjectProvision(BaseModel):
+    Spec: str = Field(description="Signed calibration spec with a folder, from POST /api/workstation/project/{id}/provision")
+
+
+class ProjectBinding(BaseModel):
+    """A web project's workstation folder: project.json without schema_version, plus Path."""
+
+    ProjectId: str
+    Folder: str
+    Title: str
+    AmcProjectId: str | None = None
+    AmcProjectName: str | None = None
+    State: str = Field(description="provisioning | ready | failed")
+    Error: str = ""
+    CreatedAt: int
+    UpdatedAt: int
+    LastRunAt: int | None = None
+    CalibRuns: int = 0
+    Path: str = Field(description="The folder's absolute path on the workstation")
+
+
+class ProjectFile(BaseModel):
+    Path: str = Field(description="Relative to the project folder, '/' separated")
+    Size: int
+    ModifiedAt: int
