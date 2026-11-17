@@ -85,9 +85,12 @@ The API URL in the hash is the one the UI compose file resolves:
 
 `launch_amc` skips `compose up` when the stack is already running, and
 `up -d` does not recreate a container whose bind-mounted file only changed
-content. So when either file changed and the stack is running, Step 3 runs
-`docker compose up -d --force-recreate --no-deps auto-magic-calib-ui`. A
-stack that is not running comes up with the new files as usual.
+content. So when either file, or `compose/.env`, changed and the stack is
+running, Step 3 runs
+`docker compose up -d --force-recreate --no-deps auto-magic-calib-ui`.
+`.env` is included because a changed `HOST_IP` changes the UI's `API_URL`,
+the fault this section exists for. A stack that is not running comes up
+with the new files as usual.
 
 ### 2.3 Checkout check (REQUIRED)
 
@@ -137,7 +140,7 @@ Workstation responses:
 | `404` | the ticket's project has no folder | `{detail}` |
 | `409` | this project has a run that is not `completed` or `cancelled`, or a provisioning job runs | `{detail}` |
 | `502` | AMC refused the delete (anything but `404`) | `{detail}` |
-| `503` | AMC is not ready; the service has asked it to start | `{detail}`, `Retry-After: 15` |
+| `503` | AMC is not ready; the service has asked it to start | `{detail}` (includes the controller's last start error, if any), `Retry-After: 15` |
 
 ### 3.2 Workstation behaviour
 
@@ -221,6 +224,7 @@ Three job fields are saved, each before the change it records:
 | Field | Set |
 |---|---|
 | `amc_changed` | `true` before the run's first call that changes the AMC project (an upload, a config post, verify, calibrate) |
+| `cancelling` | `true` when the undo starts, until the job finishes `cancelled` |
 | `recorded_files` | the `files` list from the recorder's final line, with `footage_recorded` |
 | `calibration_dir` | the `calibration/<UTC>` folder name, before step 7 creates it |
 
@@ -231,8 +235,9 @@ this run" and returns at once. The undo runs on the runner's own thread:
 after the run thread stops for a running job, or on a new thread for a
 paused, failed or interrupted one. No lock is held while it waits on AMC.
 
-1. **AMC calibration**: when step 6 started, `stop_calibration` on the
-   job's AMC project, ignoring errors.
+1. **AMC calibration**: when `amc_changed`, `stop_calibration` on the
+   job's AMC project, ignoring errors. Step state cannot say whether step 6
+   started, because cancel resets the running step to `pending`.
 2. **AMC project**: when `amc_changed`, make AMC ready the way provisioning
    does (start it and wait up to `amc.ready_timeout_seconds`), delete the
    job's AMC project and create a new one named after the folder, then
@@ -254,6 +259,12 @@ paused, failed or interrupted one. No lock is held while it waits on AMC.
 5. **Finish**: `cancelled`, with a message saying what was undone, or what
    could not be undone and why (for example "Cancelled, but the AMC project
    could not be reset: ...").
+
+Every undo action tolerates having already happened (a missing file, an
+AMC `404`), so the undo can run again. A job loaded with `cancelling` set,
+after a service restart, restarts the undo instead of becoming
+`interrupted`, and `resume()` refuses it: a half-undone run is never
+continued against the new, empty AMC project.
 
 Kept: the floor plan and alignment files in the folder (project inputs,
 not run outputs), earlier `calibration/<UTC>` results, and the run's
