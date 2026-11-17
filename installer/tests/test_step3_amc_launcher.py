@@ -1936,7 +1936,7 @@ def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
     ups = [call for call in runner.calls if call[:3] == ("docker", "compose", "up")]
     assert ups == [
         (
-            "docker", "compose", "up", "-d", "--no-deps", "--force-recreate",
+            "docker", "compose", "up", "-d", "--force-recreate", "--no-deps",
             "auto-magic-calib-ui",
         )
     ]
@@ -1948,34 +1948,80 @@ def test_running_stack_reuses_configured_ports(tmp_path, monkeypatch):
     assert not any(call[:3] == ("docker", "compose", "up") for call in runner.calls)
 
 
-@pytest.mark.parametrize(
-    "name", [".env", "mv3dt-ui-nginx.conf", "compose.override.yml"]
-)
-def test_changed_compose_config_recreates_the_ui(tmp_path, monkeypatch, name):
-    ctx = FakeContext(tmp_path, runner_user=_passing_runner())
+@pytest.mark.parametrize("name", ["mv3dt-ui-nginx.conf", "compose.override.yml"])
+def test_changed_ui_override_recreates_the_ui_on_a_running_stack(
+    tmp_path, monkeypatch, name
+):
+    runner = _running_stack_runner(
+        _ps_json(step3.AMC_MS_IMAGE, step3.AMC_UI_IMAGE)
+    )
+    runner.when(
+        lambda a: a[:4] == ("docker", "compose", "port", "auto-magic-calib-ui"),
+        stdout="0.0.0.0:5000\n",
+    )
+    runner.when(
+        lambda a: a[:4] == ("docker", "compose", "port", "auto-magic-calib-ms"),
+        stdout="0.0.0.0:8000\n",
+    )
+    ctx = FakeContext(tmp_path, runner_user=runner)
     amc_root = _stub_amc_root_with_compose(ctx)
     monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
-    monkeypatch.setattr(step3, "resolve_ports", lambda ctx, cfg: cfg)
     recreated: list[int] = []
     monkeypatch.setattr(
         step3, "compose_recreate_ui", lambda ctx, path: recreated.append(1)
     )
 
-    assert step3.launch_amc(ctx, no_open=True, non_interactive=True).status is (
-        StepStatus.COMPLETE
-    )
-    assert recreated == [1]
+    def _launch():
+        result = step3.launch_amc(ctx, no_open=True, non_interactive=True)
+        assert result.status is StepStatus.COMPLETE
 
-    assert step3.launch_amc(ctx, no_open=True, non_interactive=True).status is (
-        StepStatus.COMPLETE
-    )
+    _launch()
     assert recreated == [1]
-
+    _launch()
+    assert recreated == [1]
     (amc_root / "compose" / name).write_text("stale\n")
-    assert step3.launch_amc(ctx, no_open=True, non_interactive=True).status is (
-        StepStatus.COMPLETE
-    )
+    _launch()
     assert recreated == [1, 1]
+    # A changed `.env` alone does not trigger it.
+    (amc_root / "compose" / ".env").write_text("stale\n")
+    _launch()
+    assert recreated == [1, 1]
+
+
+def test_stopped_stack_comes_up_without_a_ui_recreate(tmp_path, monkeypatch):
+    ctx = FakeContext(tmp_path, runner_user=_passing_runner())
+    _stub_amc_root_with_compose(ctx)
+    monkeypatch.setattr(step3, "ensure_container_prerequisites", lambda ctx: None)
+    monkeypatch.setattr(step3, "resolve_ports", lambda ctx, cfg: cfg)
+    monkeypatch.setattr(
+        step3,
+        "compose_recreate_ui",
+        lambda ctx, path: pytest.fail("a stack that was down comes up as usual"),
+    )
+
+    result = step3.launch_amc(ctx, no_open=True, non_interactive=True)
+
+    assert result.status is StepStatus.COMPLETE
+    compose = step3.default_amc_root(ctx.user.home) / "compose"
+    assert (compose / "mv3dt-ui-nginx.conf").is_file()
+    assert (compose / "compose.override.yml").is_file()
+    chowns = [c for c in ctx.runner_root.calls if c[:1] == ("chown",)]
+    assert chowns and chowns[-1][2:] == (
+        str(compose / ".env"),
+        str(compose / "mv3dt-ui-nginx.conf"),
+        str(compose / "compose.override.yml"),
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        " M tools/auto-magic-calib/compose/mv3dt-ui-nginx.conf",
+        "?? tools/auto-magic-calib/compose/other.yml",
+    ],
+)
+def test_checkout_check_only_allows_the_override_files_untracked(line):
+    assert step3._expected_amc_worktree_change(line) is False
 
 
 def test_keyboard_interrupt_returns_failure_and_cleans_up(tmp_path, monkeypatch):

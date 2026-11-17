@@ -480,8 +480,9 @@ def _expected_amc_worktree_change(line: str) -> bool:
     """
     status = line[:2]
     path = line[3:].strip()
-    if path in (
-        f"{AMC_SUBDIR}/compose/.env",
+    if path == f"{AMC_SUBDIR}/compose/.env":
+        return True
+    if status == "??" and path in (
         f"{AMC_SUBDIR}/compose/{UI_NGINX_CONF_NAME}",
         f"{AMC_SUBDIR}/compose/{COMPOSE_OVERRIDE_NAME}",
     ):
@@ -901,10 +902,10 @@ def compose_up(ctx: "Context", compose_dir: pathlib.Path) -> None:
 
 
 def compose_recreate_ui(ctx: "Context", compose_dir: pathlib.Path) -> None:
-    """Recreate only the UI container, so it picks up a changed `.env` or
-    UI nginx override (a bind-mounted file's content is not part of the
-    Compose config hash)."""
-    _run_compose(ctx, compose_dir, "up", "-d", "--no-deps", "--force-recreate", _UI_SERVICE)
+    """Recreate only the UI container, so a running stack picks up a
+    changed UI nginx override (a bind-mounted file's content is not part of
+    the Compose config hash)."""
+    _run_compose(ctx, compose_dir, "up", "-d", "--force-recreate", "--no-deps", _UI_SERVICE)
 
 
 def compose_down(ctx: "Context", compose_dir: pathlib.Path) -> None:
@@ -1832,7 +1833,6 @@ def launch_amc(
             ctx.report_installed("AMC UI cache override", cfg.project_name)
         else:
             ctx.report_already_installed("AMC UI cache override", cfg.project_name)
-        ui_config_changed = env_changed or override_changed
 
         compose_validate(ctx, compose_dir)
         docker_login(ctx)
@@ -1850,9 +1850,9 @@ def launch_amc(
             if not skip_pull:
                 compose_pull(ctx, compose_dir)
             compose_up(ctx, compose_dir)
-        if ui_config_changed:
-            # `up -d` alone leaves a running or stopped UI container on its
-            # old config when only a bind-mounted file changed.
+        elif override_changed:
+            # A reused stack skips `up`, and `up -d` would not recreate a
+            # container whose bind-mounted file only changed content.
             compose_recreate_ui(ctx, compose_dir)
 
         api_url = f"http://localhost:{cfg.ms_port}/v1/ready"
