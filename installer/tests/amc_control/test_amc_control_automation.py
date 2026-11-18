@@ -23,7 +23,7 @@ from amc_control_fake_api import DEFAULT_CONFIG, FakeAmc  # noqa: E402
 from mv3dt_amc_control import automation as automation_mod  # noqa: E402
 from mv3dt_amc_control.api import create_app  # noqa: E402
 from mv3dt_amc_control.automation import CalibrationRunner  # noqa: E402
-from mv3dt_amc_control.automation_config import ConfigError, load_config  # noqa: E402
+from mv3dt_amc_control.automation_config import CalibrationSection, ConfigError, load_config  # noqa: E402
 from mv3dt_amc_control.calibration_spec import SPEC_SCOPE, SpecError, verify_spec  # noqa: E402
 from mv3dt_amc_control.projects import STATE_FAILED, STATE_READY, ProjectStore  # noqa: E402
 from mv3dt_amc_control.settings import Settings  # noqa: E402
@@ -349,6 +349,190 @@ def test_amc_calibration_error_reports_the_log(ws):
     job = runner.start(spec())
     assert job["State"] == "failed"
     assert "not enough tracklets" in job["Steps"][5]["Message"]
+
+
+# ---------------------------------------------------------------- step 6: AMC's calibration states
+INSTALLER_AMC_ID = "20261019_151133_2885"
+DETECTOR = CalibrationSection().detector_type     # the run's detector: these configs leave the default
+SLOW_POLLS = {**FULLY_AUTOMATED, "calibration": {"poll_seconds": 1, "timeout_seconds": 3}}
+
+
+def calibration_reads(fake):
+    return [(kw["project_state"], kw["amc_state"]) for kw in calls(fake, "get_project_info")]
+
+
+def test_calibration_finishes_on_amc_state_completed_with_project_state_back_to_ready(ws):
+    # AMC 3.3.0: project_state goes RUNNING then back to READY; only amc_state says COMPLETED.
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+    assert calibration_reads(fake)[-1] == ("READY", "COMPLETED")
+    assert ("RUNNING", "RUNNING") in calibration_reads(fake)
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR} in about 0 min; scale 100 px/m")
+    assert job_file(runner)["calibration_started"] is True
+
+
+def test_stale_completed_from_an_earlier_calibration_does_not_finish_step_6(ws):
+    # The reused project still reports its earlier COMPLETED calibration for a few reads.
+    fake = FakeAmc(calib_stale_reads=3)
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+    reads = calibration_reads(fake)
+    first = reads.index(("RUNNING", "RUNNING"))
+    assert reads[first - 3:first] == [("READY", "COMPLETED")] * 3   # all polled through
+    assert calls(fake, "calibrate") == [{"detector_type": DETECTOR}]
+
+
+def test_stale_completed_beyond_the_lag_window_finishes_the_step(ws):
+    # Without RUNNING ever seen, COMPLETED counts once the lag window is over.
+    fake = FakeAmc(calib_stale_reads=10)
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+    assert ("RUNNING", "RUNNING") not in calibration_reads(fake)
+
+
+def test_calibration_error_in_amc_state_fails_with_the_log(ws):
+    runner, fake = make_runner(ws, FULLY_AUTOMATED, fake=FakeAmc(fail_calibration=True))
+    job = runner.start(spec())
+    assert job["State"] == "failed"
+    message = job["Steps"][5]["Message"]
+    assert "ended in ERROR (project_state READY, amc_state ERROR)" in message
+    assert "not enough tracklets" in message
+
+
+def test_calibration_stopped_without_finishing_names_both_states(ws):
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=FakeAmc(calibration_end="READY"))
+    job = runner.start(spec())
+    assert job["State"] == "failed"
+    message = job["Steps"][5]["Message"]
+    assert "stopped without finishing (project_state READY, amc_state READY)" in message
+    assert "calibration log" in message
+
+
+def test_calibration_timeout_fails_and_shows_it_was_still_running(ws):
+    runner, fake = make_runner(ws, SLOW_POLLS, fake=FakeAmc(running_polls=10 ** 9))
+    job = runner.start(spec())
+    assert job["State"] == "failed"
+    assert "calibration still running after 0 min (project_state RUNNING, amc_state RUNNING)" \
+        in job["Steps"][5]["Message"]
+
+
+def test_running_step_message_reads_calibrating_not_ready(ws):
+    seen = []
+    runner, fake = make_runner(ws, {**FULLY_AUTOMATED, "calibration": {"poll_seconds": 1}})
+    set_step = runner._set_step
+
+    def spy(key, state, message="", *a, **kw):
+        if key == "execute" and state == "running" and message:
+            seen.append(message)
+        return set_step(key, state, message, *a, **kw)
+
+    runner._set_step = spy
+    assert runner.start(spec())["State"] == "completed"
+    assert seen and all(m.startswith("calibrating for 0 min (typically 10-60 min)") for m in seen)
+
+
+def interrupt_at_step_6(ws, fake, **fields):
+    """Turn the saved job into one cut off by a restart during step 6, and reload it."""
+    _, install = ws
+    state = install / "amc_control" / "state" / "amc_automation_job.json"
+    data = json.loads(state.read_text())
+    data["state"] = "running"
+    data["steps"][5]["State"] = "running"
+    data.update(fields)
+    state.write_text(json.dumps(data))
+    runner2, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    assert runner2.status()["State"] == "interrupted"
+    return runner2
+
+
+def test_continue_after_a_restart_while_amc_still_calibrates_polls_without_a_second_post(ws):
+    fake = FakeAmc(running_polls=10 ** 9)
+    runner, _ = make_runner(ws, SLOW_POLLS, fake=fake)
+    assert runner.start(spec())["State"] == "failed"     # timed out; AMC keeps calibrating
+    runner2 = interrupt_at_step_6(ws, fake)
+    fake.running_polls = fake.projects[INSTALLER_AMC_ID]["polls"] + 2
+    job = runner2.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate")) == 1
+    assert len(calls(fake, "verify_project")) == 1
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR}")
+
+
+def test_continue_after_amc_finished_unwatched_is_done_without_a_post(ws):
+    fake = FakeAmc(running_polls=10 ** 9)
+    runner, _ = make_runner(ws, SLOW_POLLS, fake=fake)
+    assert runner.start(spec())["State"] == "failed"
+    p = fake.projects[INSTALLER_AMC_ID]
+    p["state"], p["amc_state"] = "READY", "COMPLETED"   # AMC finished while nobody watched
+    assert job_file(runner)["calibration_posted"] is True
+    job = interrupt_at_step_6(ws, fake, calibration_posted=True).resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate")) == 1 and len(calls(fake, "verify_project")) == 1
+    assert job["Steps"][5]["Message"] == "the calibration had finished in AMC while the run was not watching"
+
+
+def test_continue_after_a_refused_calibrate_post_recalibrates_a_reused_project(ws):
+    # The reused project reports COMPLETED from an earlier calibration; this run's post failed.
+    fake = FakeAmc(calibrate_refusals=1)
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and "calibrate failed: HTTP 500" in job["Steps"][5]["Message"]
+    saved = job_file(runner)
+    assert saved["calibration_started"] is True and saved["calibration_posted"] is False
+    assert fake.projects[INSTALLER_AMC_ID]["amc_state"] == "COMPLETED"
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate_refused")) == 1 and len(calls(fake, "calibrate")) == 1
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR}")
+    assert ("RUNNING", "RUNNING") in calibration_reads(fake)    # the result is the new calibration
+
+
+def test_restart_between_saving_and_posting_calibrate_recalibrates(ws):
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    assert runner.start(spec())["State"] == "completed"
+    assert len(calls(fake, "calibrate")) == 1
+    # The service died after calibration_started was saved and before the post reached AMC.
+    job = interrupt_at_step_6(ws, fake, calibration_started=True, calibration_posted=False).resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate")) == 2 and len(calls(fake, "verify_project")) == 2
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR}")
+
+
+def test_continue_after_a_failed_calibration_calibrates_again(ws):
+    fake = FakeAmc(fail_calibration=True)
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    assert runner.start(spec())["State"] == "failed"
+    fake.fail_calibration = False
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate")) == 2 and len(calls(fake, "verify_project")) == 2
+
+
+def test_a_job_file_from_before_calibration_started_still_loads(ws):
+    _, install = ws
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    runner.start(spec())
+    state = install / "amc_control" / "state" / "amc_automation_job.json"
+    data = json.loads(state.read_text())
+    del data["calibration_started"], data["calibration_posted"]
+    state.write_text(json.dumps(data))
+    runner2, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    assert runner2.status()["State"] == "completed"
+    assert runner2._job.calibration_started is False and runner2._job.calibration_posted is False
+
+
+def test_project_calibrating_in_amc_state_only_is_refused(ws):
+    fake = FakeAmc(running_polls=100)
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    p = fake.projects[INSTALLER_AMC_ID]
+    p["state"], p["amc_state"] = "READY", "RUNNING"
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and "already calibrating" in job["Steps"][0]["Message"]
+    assert calls(fake, "calibrate") == []
 
 
 def test_no_footage_fails_with_a_hint(ws):

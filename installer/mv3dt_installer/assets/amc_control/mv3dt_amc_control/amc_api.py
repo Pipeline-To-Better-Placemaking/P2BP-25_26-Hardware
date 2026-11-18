@@ -24,13 +24,13 @@ def _detail(r: httpx.Response) -> str:
     return r.text[:500]
 
 
-def _reply_state(r: httpx.Response) -> str:
-    """The rectification_state a request's reply carries, upper-cased, or ""."""
+def _reply_state(r: httpx.Response, key: str = "rectification_state") -> str:
+    """The state a request's reply carries under `key`, upper-cased, or ""."""
     try:
         body = r.json()
     except ValueError:
         return ""
-    state = body.get("rectification_state") if isinstance(body, dict) else None
+    state = body.get(key) if isinstance(body, dict) else None
     return state.upper() if isinstance(state, str) else ""
 
 
@@ -95,11 +95,15 @@ class AmcApi:
             raise AmcApiError("get_project_info reply has no project_info object")
         return info
 
-    def project_state(self, project_id: str) -> str:
-        state = self.get_project_info(project_id).get("project_state")
-        if not isinstance(state, str):
-            raise AmcApiError("project_info.project_state is missing")
-        return state.upper()
+    def calibration_states(self, project_id: str) -> tuple[str, str]:
+        """(project_state, amc_state), upper-cased, "" for a missing field.
+
+        AMC 3.3.0 reports a calibration through both: RUNNING in either while it runs, then
+        project_state back to READY and amc_state COMPLETED (or ERROR) when it ends.
+        """
+        info = self.get_project_info(project_id)
+        return tuple(v.upper() if isinstance(v := info.get(k), str) else ""
+                     for k in ("project_state", "amc_state"))
 
     def upload_videos(self, project_id: str, videos: list[tuple[str, Path]]) -> None:
         """videos: (name AMC should see, local path) in camera order."""
@@ -155,9 +159,12 @@ class AmcApi:
         state = self._json(r, "verify_project").get("project_state")
         return state.upper() if isinstance(state, str) else ""
 
-    def calibrate(self, project_id: str, detector_type: str) -> None:
-        self._check(self._http.post(self._url(f"calibrate/{project_id}"), json={"detector_type": detector_type},
-                                    timeout=self.timeout), "calibrate")
+    def calibrate(self, project_id: str, detector_type: str) -> str:
+        """Start the calibration; returns the reply's project_state, or "" when it has none."""
+        return _reply_state(self._check(self._http.post(self._url(f"calibrate/{project_id}"),
+                                                        json={"detector_type": detector_type},
+                                                        timeout=self.timeout), "calibrate"),
+                            "project_state")
 
     def stop_calibration(self, project_id: str) -> None:
         self._check(self._http.post(self._url(f"stop_calibration/{project_id}"), timeout=self.timeout),

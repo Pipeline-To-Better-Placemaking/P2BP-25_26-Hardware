@@ -198,7 +198,7 @@ The automated workflow, against AMC 3.3.0's seven steps:
 | 3 Parameters | posts the floor plan scale (waits for it in AMC when unknown); uploads focal lengths |
 | 4 Rectification | automatic through AMC's API (default), or done in the UI |
 | 5 Manual Alignment | re-uploads a saved `alignment_data.json` if present; otherwise the user |
-| 6 Execute | `verify_project` must be `READY`; `calibrate`; wait for `COMPLETED` |
+| 6 Execute | `verify_project` must be `READY`; `calibrate`; wait for `get_project_info`'s `amc_state` `COMPLETED` with neither `project_state` nor `amc_state` `RUNNING` (`project_state` returns to `READY`); a Continue after the calibration was posted takes the one AMC has instead of posting again |
 | 7 Results | evaluation statistics; optional result ZIP; Step 4 ingests the installer's project |
 
 Steps 1 to 5 all run first; if any needs the user the run pauses once before
