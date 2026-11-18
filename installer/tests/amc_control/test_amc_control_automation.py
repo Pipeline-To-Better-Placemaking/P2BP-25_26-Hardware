@@ -2031,7 +2031,8 @@ def postprocess_reads(fake):
 
 def test_unready_export_is_post_processed_before_the_download(ws):
     seen = []
-    runner, fake = make_runner(ws, {**FULLY_AUTOMATED, "calibration": {"poll_seconds": 1}})
+    runner, fake = make_runner(ws, {**FULLY_AUTOMATED, "calibration": {"poll_seconds": 1}},
+                               fake=FakeAmc(calibration_clears_export=True))
     set_step = runner._set_step
 
     def spy(key, state, message="", *a, **kw):
@@ -2051,13 +2052,51 @@ def test_unready_export_is_post_processed_before_the_download(ws):
     assert saved["postprocess_started"] is True and saved["postprocess_posted"] is True
 
 
-def test_ready_export_is_downloaded_without_post_processing(ws):
-    runner, fake = make_runner(ws, FULLY_AUTOMATED, fake=FakeAmc(export_ready_after_calibration=True))
+def test_a_stale_ready_export_is_post_processed_after_this_runs_calibration(ws):
+    # The reused project still reports the export of its earlier calibration.
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
     job = runner.start(spec())
     assert job["State"] == "completed", job
-    assert calls(fake, "postprocess") == [] and len(calls(fake, "mv3dt_result")) == 1
+    names = [n for n, _ in fake.calls]
+    before_post = [kw for n, kw in fake.calls[names.index("calibrate"):names.index("postprocess")]
+                   if n == "get_project_info"]
+    assert before_post[-1]["postprocess_state"] == "COMPLETED" and before_post[-1]["amc_export_ready"] is True
+    assert len(calls(fake, "postprocess")) == 1
+    assert names.index("postprocess") < names.index("mv3dt_result")
+    assert "post-processed in about" in job["Steps"][6]["Message"]
+
+
+def test_ready_export_without_this_runs_calibration_is_downloaded_without_post_processing(ws, monkeypatch):
+    real = automation_mod.AmcApi.mv3dt_result
+
+    def broken(*a, **kw):
+        raise automation_mod.AmcApiError("down")
+
+    monkeypatch.setattr(automation_mod.AmcApi, "mv3dt_result", broken)
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    assert runner.start(spec())["State"] == "failed"
+    assert len(calls(fake, "postprocess")) == 1
+    # A job whose calibration this run did not post (a job file from before calibration_posted).
+    runner._job.calibration_posted = False
+    runner._job.postprocess_started = runner._job.postprocess_posted = False
+    monkeypatch.setattr(automation_mod.AmcApi, "mv3dt_result", real)
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "postprocess")) == 1 and len(calls(fake, "mv3dt_result")) == 1
     assert "post-process" not in job["Steps"][6]["Message"]
-    assert job_file(runner)["postprocess_started"] is False
+
+
+def test_continue_with_completed_post_processing_but_no_export_fails(ws):
+    fake = FakeAmc(postprocess_running_polls=10 ** 9)
+    runner, _ = make_runner(ws, SLOW_POSTPROCESS, fake=fake)
+    assert runner.start(spec())["State"] == "failed"
+    assert job_file(runner)["postprocess_posted"] is True
+    p = fake.projects[INSTALLER_AMC_ID]
+    p["pp_state"], p["export_ready"] = "COMPLETED", False
+    job = runner.resume()
+    assert job["State"] == "failed"
+    assert "post-processing is COMPLETED but AMC reports no amc export" in job["Steps"][6]["Message"]
+    assert len(calls(fake, "postprocess")) == 1 and calls(fake, "mv3dt_result") == []
 
 
 @pytest.mark.parametrize("before", ["READY", "COMPLETED"])
@@ -2081,7 +2120,8 @@ def test_stale_postprocess_state_inside_the_lag_window_keeps_polling(ws, before)
 
 
 def test_stale_ready_beyond_the_lag_window_fails_naming_it(ws):
-    runner, fake = make_runner(ws, FULLY_AUTOMATED, fake=FakeAmc(postprocess_stale_reads=10))
+    fake = FakeAmc(postprocess_stale_reads=10, calibration_clears_export=True)
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
     job = runner.start(spec())
     assert job["State"] == "failed"
     assert "post-processing stopped without finishing (postprocess_state READY)" in job["Steps"][6]["Message"]

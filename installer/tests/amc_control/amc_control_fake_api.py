@@ -15,7 +15,8 @@ factory values at GET /v1/config/defaults.
 Like AMC 3.3.0, the export is built in a separate step: mv3dt_result answers
 HTTP 400 until POST /v1/postprocess/{id} has run, which get_project_info shows
 as postprocess_state READY, RUNNING, then COMPLETED with amc_export_ready true.
-A calibration clears the export again.
+Whether a calibration clears an earlier export is not verified on AMC 3.3.0, so by
+default it keeps it (calibration_clears_export turns clearing on).
 """
 from __future__ import annotations
 
@@ -66,12 +67,12 @@ class FakeAmc:
     # AMC's Layout Post-processing: state reads that report RUNNING before it ends, whether
     # it ends in ERROR, reads right after the post that still report the state from before
     # it, posts answered with HTTP 500 before one is accepted, and whether a calibration
-    # leaves an export ready (AMC 3.3.0 clears it).
+    # clears an earlier export (by default it keeps it, which is not ruled out on AMC 3.3.0).
     postprocess_running_polls: int = 2
     postprocess_fail: bool = False
     postprocess_stale_reads: int = 0
     postprocess_refusals: int = 0
-    export_ready_after_calibration: bool = False
+    calibration_clears_export: bool = False
     rect_cameras: list[dict] = field(default_factory=lambda: [
         {"camera_id": 0, "committed": None, "auto_estimate": {"model": "simple_radial", "k1": -0.12, "k2": None}},
         {"camera_id": 1, "committed": None, "auto_estimate": {"model": "simple_divisional", "k1": -0.3, "k2": 0.01}},
@@ -209,7 +210,7 @@ class FakeAmc:
             before = (p["state"], p["amc_state"])
             p["calib_stale"] = (fake.calib_stale_reads, before)
             p["state"], p["amc_state"], p["polls"] = "RUNNING", "RUNNING", 0
-            if not fake.export_ready_after_calibration:  # a new calibration needs post-processing again
+            if fake.calibration_clears_export:
                 p["pp_state"], p["export_ready"] = "READY", False
             log("calibrate", detector_type=body.get("detector_type"))
             reply = fake.calib_reply

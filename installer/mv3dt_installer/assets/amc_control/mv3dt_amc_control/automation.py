@@ -1813,19 +1813,24 @@ class CalibrationRunner:
 
         AMC 3.3.0 answers mv3dt_result with HTTP 400 until POST /v1/postprocess has built
         the export: get_project_info's postprocess_state goes READY, RUNNING, COMPLETED and
-        <result_type>_export_ready becomes true. A Continue polls a post-processing AMC is
-        running instead of posting again, and takes a COMPLETED one only when this run's post
-        was accepted. Returns a note for the step, "" when the export was already there.
+        <result_type>_export_ready becomes true. A ready export is trusted only after this
+        run's post-processing, or when this run did not calibrate: a reused project may still
+        report the export of an earlier calibration. A Continue polls a post-processing AMC is
+        running instead of posting again. Returns a note for the step, "" when the export was
+        already there.
         """
         job = self._job
         pid = job.amc_project_id
-        state, ready = api.postprocess_state(pid, cfg.results.result_type)
-        if ready:
-            return "post-processing had finished in AMC" if job.postprocess_started else ""
+        r = cfg.results
+        state, ready = api.postprocess_state(pid, r.result_type)
+        if ready and job.postprocess_posted:
+            return "post-processing had finished in AMC"
+        if ready and not job.calibration_posted:
+            return ""
         if state == "RUNNING":
             return self._poll_postprocess(cfg, api, None)
         if state == "COMPLETED" and job.postprocess_posted:
-            return "post-processing had finished in AMC"
+            raise self._postprocess_failed(f"is COMPLETED but AMC reports no {r.result_type} export")
         self._set_step("results", "running", "starting AMC's post-processing")
         self._changing_amc()
         with self._lock:
