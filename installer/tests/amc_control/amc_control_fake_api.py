@@ -42,6 +42,8 @@ class FakeAmc:
     # while reads are stale; "": no project_state in the reply).
     calib_stale_reads: int = 0
     calib_reply: str | None = None
+    # calibrate posts answered with HTTP 500 before one is accepted; a refused post changes nothing.
+    calibrate_refusals: int = 0
     rect_polls: int = 1
     ui_alignment_done: bool = False  # set by a test to stand in for the user's UI work
     with_gt: bool = False
@@ -171,6 +173,10 @@ class FakeAmc:
         async def calibrate(pid: str, request: Request):
             body = await request.json()
             p = project(pid)
+            if fake.calibrate_refusals:
+                fake.calibrate_refusals -= 1
+                log("calibrate_refused", detector_type=body.get("detector_type"))
+                raise HTTPException(500, "calibration could not start")
             before = (p["state"], p["amc_state"])
             p["calib_stale"] = (fake.calib_stale_reads, before)
             p["state"], p["amc_state"], p["polls"] = "RUNNING", "RUNNING", 0

@@ -250,8 +250,11 @@ class Job:
     rectification_started: bool = False
     rectification_phase: str = ""
     # Step 6: True once this run is about to post calibrate, so a Continue after a failure or
-    # a restart waits for, or takes, the calibration AMC already has instead of starting another.
+    # a restart waits for a calibration AMC is running instead of starting another.
     calibration_started: bool = False
+    # Step 6: True once AMC accepted this run's calibrate post or was seen calibrating after it.
+    # Only then is a COMPLETED amc_state this run's result rather than an earlier calibration's.
+    calibration_posted: bool = False
     # The floor plan scale (AMC-RECTIFICATION-AND-SCALE.md section 4): the SHA-256 of the
     # layout.png step 2 uploaded ("" when this run uploaded none), saved before the upload,
     # and the scale step 3 posted or the user confirmed in AMC (None until there is one).
@@ -1663,11 +1666,13 @@ class CalibrationRunner:
         job = self._job
         pid = job.amc_project_id
         if job.calibration_started:
-            # Continue after a failure or a restart: take the calibration AMC already has.
+            # Continue after a failure or a restart: wait for a calibration AMC is running, and
+            # take a finished one only when AMC accepted this run's post (else it is an earlier one).
             project_state, amc_state = api.calibration_states(pid)
             if "RUNNING" in (project_state, amc_state):
+                self._calibration_posted()
                 return self._poll_calibration(cfg, api, None, "")
-            if amc_state == "COMPLETED":
+            if amc_state == "COMPLETED" and job.calibration_posted:
                 return Outcome("done", "the calibration had finished in AMC while the run was not watching")
         scale_note = self._repost_scale(cfg, api)
         self._changing_amc()
@@ -1680,10 +1685,19 @@ class CalibrationRunner:
                                 "rectification and alignment in AMC, save, then press Continue")
             raise _PauseForUser()
         with self._lock:
-            job.calibration_started = True
+            job.calibration_started, job.calibration_posted = True, False
             self._save()
         reply = api.calibrate(pid, cfg.calibration.detector_type)
+        self._calibration_posted()
         return self._poll_calibration(cfg, api, reply, scale_note)
+
+    def _calibration_posted(self) -> None:
+        """Record that AMC took this run's calibration: its post was accepted or AMC runs it."""
+        job = self._job
+        if not job.calibration_posted:
+            with self._lock:
+                job.calibration_posted = True
+                self._save()
 
     def _poll_calibration(self, cfg: AutomationConfig, api: AmcApi, reply: str | None,
                           scale_note: str) -> Outcome:
@@ -1710,6 +1724,7 @@ class CalibrationRunner:
             running = "RUNNING" in states
             if running:
                 lagging = False
+                self._calibration_posted()
             elif lagging and lag_polls < LAG_POLLS:
                 lag_polls += 1
             elif amc_state == "COMPLETED":

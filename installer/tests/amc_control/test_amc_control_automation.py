@@ -433,13 +433,14 @@ def test_running_step_message_reads_calibrating_not_ready(ws):
     assert seen and all(m.startswith("calibrating for 0 min (typically 10-60 min)") for m in seen)
 
 
-def interrupt_at_step_6(ws, fake):
+def interrupt_at_step_6(ws, fake, **fields):
     """Turn the saved job into one cut off by a restart during step 6, and reload it."""
     _, install = ws
     state = install / "amc_control" / "state" / "amc_automation_job.json"
     data = json.loads(state.read_text())
     data["state"] = "running"
     data["steps"][5]["State"] = "running"
+    data.update(fields)
     state.write_text(json.dumps(data))
     runner2, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
     assert runner2.status()["State"] == "interrupted"
@@ -465,10 +466,38 @@ def test_continue_after_amc_finished_unwatched_is_done_without_a_post(ws):
     assert runner.start(spec())["State"] == "failed"
     p = fake.projects[INSTALLER_AMC_ID]
     p["state"], p["amc_state"] = "READY", "COMPLETED"   # AMC finished while nobody watched
-    job = interrupt_at_step_6(ws, fake).resume()
+    assert job_file(runner)["calibration_posted"] is True
+    job = interrupt_at_step_6(ws, fake, calibration_posted=True).resume()
     assert job["State"] == "completed", job
     assert len(calls(fake, "calibrate")) == 1 and len(calls(fake, "verify_project")) == 1
     assert job["Steps"][5]["Message"] == "the calibration had finished in AMC while the run was not watching"
+
+
+def test_continue_after_a_refused_calibrate_post_recalibrates_a_reused_project(ws):
+    # The reused project reports COMPLETED from an earlier calibration; this run's post failed.
+    fake = FakeAmc(calibrate_refusals=1)
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and "calibrate failed: HTTP 500" in job["Steps"][5]["Message"]
+    saved = job_file(runner)
+    assert saved["calibration_started"] is True and saved["calibration_posted"] is False
+    assert fake.projects[INSTALLER_AMC_ID]["amc_state"] == "COMPLETED"
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate_refused")) == 1 and len(calls(fake, "calibrate")) == 1
+    assert job["Steps"][5]["Message"].startswith("calibrated with resnet")
+    assert ("RUNNING", "RUNNING") in calibration_reads(fake)    # the result is the new calibration
+
+
+def test_restart_between_saving_and_posting_calibrate_recalibrates(ws):
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    assert runner.start(spec())["State"] == "completed"
+    assert len(calls(fake, "calibrate")) == 1
+    # The service died after calibration_started was saved and before the post reached AMC.
+    job = interrupt_at_step_6(ws, fake, calibration_started=True, calibration_posted=False).resume()
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "calibrate")) == 2 and len(calls(fake, "verify_project")) == 2
+    assert job["Steps"][5]["Message"].startswith("calibrated with resnet")
 
 
 def test_continue_after_a_failed_calibration_calibrates_again(ws):
@@ -487,11 +516,11 @@ def test_a_job_file_from_before_calibration_started_still_loads(ws):
     runner.start(spec())
     state = install / "amc_control" / "state" / "amc_automation_job.json"
     data = json.loads(state.read_text())
-    del data["calibration_started"]
+    del data["calibration_started"], data["calibration_posted"]
     state.write_text(json.dumps(data))
     runner2, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
     assert runner2.status()["State"] == "completed"
-    assert runner2._job.calibration_started is False
+    assert runner2._job.calibration_started is False and runner2._job.calibration_posted is False
 
 
 def test_project_calibrating_in_amc_state_only_is_refused(ws):
