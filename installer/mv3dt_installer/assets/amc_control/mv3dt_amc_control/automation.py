@@ -255,6 +255,8 @@ class Job:
         }
 
 
+# Polls after a rectification request during which AMC may still report the earlier state.
+LAG_POLLS = 3
 RECTIFICATION_MODELS = ("simple_radial", "radial", "simple_divisional")
 
 
@@ -826,8 +828,13 @@ class CalibrationRunner:
                                  "Waiting for the manual steps in AMC. Press Continue when they are saved.")
                     return
                 self._check_cancel()
+                resumed = was_waiting and resuming
+                if key == "manual_alignment" and not step.get("NeedsUser", True):
+                    # It waited only for rectification (section 3.1): a first pass, so the user
+                    # is asked to align the new footage instead of it counting as finished in AMC.
+                    resumed = False
                 self._set_step(key, "running")
-                outcome = handlers[key](cfg, api, resumed=was_waiting and resuming)
+                outcome = handlers[key](cfg, api, resumed=resumed)
                 self._set_step(key, outcome.state, outcome.message, outcome.done,
                                needs_user=outcome.state == "waiting" and outcome.needs_user)
             self._finish("completed", "Calibration finished.")
@@ -1312,8 +1319,7 @@ class CalibrationRunner:
         state = api.rectification_state(pid)
         if not job.rectification_started:
             if state == "RUNNING":
-                self._poll_rectification(cfg, api, "waiting for AMC's earlier rectification to end",
-                                         lambda s: s != "RUNNING", error_fails=False)
+                self._wait_out_rectification(cfg, api)
             action = "start"
         elif state == "COMPLETED":
             return self._rectified(api, linear, None)
@@ -1324,24 +1330,25 @@ class CalibrationRunner:
         else:  # NOT_STARTED or ERROR: start over, so Continue after a failure retries
             action = "start"
 
+        # reply: the state a request just made answered with, which opens a lag window;
+        # None when the poll resumes a phase AMC is RUNNING.
+        reply: str | None = None
         if linear:
             if action == "start":
                 self._begin_rectification("linear")
-                api.stage_linear_media(pid)
-            self._poll_rectification(cfg, api, "staging the linear videos", lambda s: s == "COMPLETED")
+                reply = api.stage_linear_media(pid)
+            self._poll_rectification(cfg, api, "staging the linear videos", "COMPLETED", reply)
             return self._rectified(api, linear, None)
 
         if action == "start":
             self._begin_rectification("estimate")
-            api.start_rectification(pid)
+            reply = api.start_rectification(pid)
             action = "estimate"
         if action == "estimate":
-            # Right after the start AMC may still say NOT_STARTED, so wait for a state the flow uses.
-            state = self._poll_rectification(cfg, api, "estimating distortion",
-                                             lambda s: s in ("READY_FOR_REVIEW", "COMPLETED"))
-            if state == "COMPLETED":
-                return self._rectified(api, linear, None)
+            # Only READY_FOR_REVIEW ends the estimate, so the run always commits.
+            self._poll_rectification(cfg, api, "estimating distortion", "READY_FOR_REVIEW", reply)
             action = "commit"
+        reply = None
         committed = None
         if action == "commit":
             committed = {}
@@ -1351,9 +1358,8 @@ class CalibrationRunner:
             if not committed:
                 raise StepFailed("AMC lists no cameras to rectify; check the uploaded videos")
             self._begin_rectification("generate")
-            api.commit_rectification(pid, {cid: params for cid, (params, _) in committed.items()})
-        # READY_FOR_REVIEW right after the commit means AMC has not picked it up yet.
-        self._poll_rectification(cfg, api, "generating rectified videos", lambda s: s == "COMPLETED")
+            reply = api.commit_rectification(pid, {cid: params for cid, (params, _) in committed.items()})
+        self._poll_rectification(cfg, api, "generating rectified videos", "COMPLETED", reply)
         return self._rectified(api, linear, committed)
 
     def _begin_rectification(self, phase: str) -> None:
@@ -1380,24 +1386,51 @@ class CalibrationRunner:
                          + ("" if estimated else ", no estimate") + ")")
         return Outcome("done", "rectified automatically: " + ", ".join(parts))
 
-    def _poll_rectification(self, cfg: AutomationConfig, api: AmcApi, doing: str,
-                            finished: Callable[[str], bool], error_fails: bool = True) -> str:
-        """Poll until finished(state) and return the state; ERROR or a timeout fails the step.
+    def _poll_rectification(self, cfg: AutomationConfig, api: AmcApi, doing: str, awaited: str,
+                            reply: str | None) -> None:
+        """Poll until the state is `awaited`; ERROR, another state or a timeout fails the step.
 
-        Each call has its own rectification.api.timeout_seconds; cancel is honoured between polls.
+        After a request (reply is its answer's state, possibly "") AMC may still report the
+        state from before it, so a lag window lasts until RUNNING is seen or for at most
+        LAG_POLLS polls; inside it every state keeps the poll going, ERROR included
+        (AMC-RECTIFICATION-AND-SCALE.md section 3.2). Each call has its own
+        rectification.api.timeout_seconds; cancel is honoured between polls.
         """
         pid = self._job.amc_project_id
         r = cfg.rectification.api
         deadline = self._clock() + r.timeout_seconds
+        lagging = reply is not None and reply != "RUNNING"
+        lag_polls = 0
         while True:
             state = api.rectification_state(pid)
-            if finished(state):
-                return state
-            if state == "ERROR" and error_fails:
+            if state == awaited:
+                return
+            if state == "RUNNING":
+                lagging = False
+            elif lagging and lag_polls < LAG_POLLS:
+                lag_polls += 1
+            elif state == "ERROR":
                 raise StepFailed(f"AMC rectification ended in ERROR while {doing}. Last log lines:\n"
+                                 + api.rectification_log(pid, tail_lines=10))
+            else:
+                raise StepFailed(f"AMC rectification is {state or 'in no state'} while {doing}, expected "
+                                 f"RUNNING or {awaited}. Last log lines:\n"
                                  + api.rectification_log(pid, tail_lines=10))
             if self._clock() >= deadline:
                 raise StepFailed(f"rectification still {state} after {r.timeout_seconds:g} s while {doing}. "
+                                 "Last log lines:\n" + api.rectification_log(pid, tail_lines=10))
+            self._set_step("rectification", "running", f"{doing}: {state}")
+            self._wait(r.poll_seconds)
+
+    def _wait_out_rectification(self, cfg: AutomationConfig, api: AmcApi) -> None:
+        """Before this run starts its own: poll while an earlier rectification is RUNNING."""
+        pid = self._job.amc_project_id
+        r = cfg.rectification.api
+        deadline = self._clock() + r.timeout_seconds
+        doing = "waiting for AMC's earlier rectification to end"
+        while (state := api.rectification_state(pid)) == "RUNNING":
+            if self._clock() >= deadline:
+                raise StepFailed(f"rectification still RUNNING after {r.timeout_seconds:g} s while {doing}. "
                                  "Last log lines:\n" + api.rectification_log(pid, tail_lines=10))
             self._set_step("rectification", "running", f"{doing}: {state}")
             self._wait(r.poll_seconds)
@@ -1432,12 +1465,16 @@ class CalibrationRunner:
 
     def _manual_alignment(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
         path = self._alignment_file(cfg)
+        rect_waiting = self._job.step("rectification")["State"] == "waiting"
         if path is None:
+            # In auto and linear the run rectifies by itself, so never ask for alignment before that.
+            if rect_waiting and cfg.rectification.mode in ("auto", "linear"):
+                return Outcome("waiting", "Manual Alignment comes after rectification", needs_user=False)
             if resumed:
                 return self._finished_in_amc("manual_alignment")
             return Outcome("waiting", "Do Manual Alignment in AMC: mark at least 4 matching point sets "
                                       "(6-8 recommended) on each camera and the layout, then Save")
-        if self._job.step("rectification")["State"] == "waiting":
+        if rect_waiting:
             return Outcome("waiting", f"Nothing to do: the saved {path.name} is uploaded after rectification",
                            needs_user=False)
         self._changing_amc()

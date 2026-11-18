@@ -116,8 +116,11 @@ rectification:
   #   waits for COMPLETED. It waits until step 2 is done and AMC has the
   #   videos. A run always starts its own rectification (an earlier COMPLETED
   #   may be from replaced footage); on Continue it picks up where its own
-  #   rectification is. ERROR or a timeout fails the step with the end of
-  #   AMC's rectification log, and Continue after ERROR starts over.
+  #   rectification is. Right after each request AMC may still report its
+  #   earlier state for up to 3 polls, which is tolerated. ERROR or a timeout
+  #   fails the step with the end of AMC's rectification log, and Continue
+  #   after ERROR starts over. Manual Alignment is asked for only once the run
+  #   has rectified.
   # linear: the footage is already rectified; stage it unchanged
   #   (POST /v1/linear_media/{id}) and wait for COMPLETED.
   # Cancelling a web_project run waits while a rectification is RUNNING (up to

@@ -31,6 +31,11 @@ class FakeAmc:
     # phase that ends in ERROR instead (estimate, generate or linear), and the cameras.
     rect_running_polls: int = 1
     rect_fail: str = ""
+    # State reads right after a start, commit or linear stage that still report the state
+    # from before it, and the rectification_state those requests reply with (None: RUNNING,
+    # or the earlier state while reads are stale; "": no state in the reply).
+    rect_stale_reads: int = 0
+    rect_reply: str | None = None
     rect_cameras: list[dict] = field(default_factory=lambda: [
         {"camera_id": 0, "committed": None, "auto_estimate": {"model": "simple_radial", "k1": -0.12, "k2": None}},
         {"camera_id": 1, "committed": None, "auto_estimate": {"model": "simple_divisional", "k1": -0.3, "k2": 0.01}},
@@ -158,12 +163,23 @@ class FakeAmc:
             log("mv3dt_result", result_type=result_type)
             return Response(buf.getvalue(), media_type="application/zip")
 
-        def rect_phase(p: dict, phase: str) -> None:
+        def rect_phase(p: dict, phase: str, message: str) -> dict:
+            before = p["rect_state"]
+            p["rect_stale"] = (fake.rect_stale_reads, before)
             p["rect_state"], p["rect_phase"], p["rect_n"] = "RUNNING", phase, 0
+            reply = fake.rect_reply
+            if reply is None:
+                reply = before if fake.rect_stale_reads else "RUNNING"
+            return {"code": 0, "message": message, **({"rectification_state": reply} if reply else {})}
 
         @app.get("/v1/rectification/{pid}")
         def rectification_state(pid: str):
             p = project(pid)
+            stale_left, stale_state = p.get("rect_stale", (0, ""))
+            if stale_left:
+                p["rect_stale"] = (stale_left - 1, stale_state)
+                log("rectification_state", state=stale_state)
+                return {"code": 0, "message": "", "rectification_state": stale_state, "rectification_pid": 4242}
             if p["rect_state"] == "RUNNING":
                 p["rect_n"] += 1
                 if p["rect_n"] > fake.rect_running_polls:
@@ -176,9 +192,10 @@ class FakeAmc:
 
         @app.post("/v1/rectification/{pid}")
         def start_rectification(pid: str):
-            rect_phase(project(pid), "estimate")
+            p = project(pid)
+            reply = rect_phase(p, "estimate", "started")
             log("start_rectification", pid=pid)
-            return {"code": 0, "message": "started"}
+            return reply
 
         @app.get("/v1/rectification/{pid}/cameras")
         def rectification_cameras(pid: str):
@@ -192,15 +209,15 @@ class FakeAmc:
         async def commit_rectification(pid: str, request: Request):
             p = project(pid)
             body = await request.json()
-            rect_phase(p, "generate")
+            reply = rect_phase(p, "generate", "generating")
             log("commit_rectification", body=body)
-            return {"code": 0, "message": "generating"}
+            return reply
 
         @app.post("/v1/linear_media/{pid}")
         def stage_linear_media(pid: str):
-            rect_phase(project(pid), "linear")
+            reply = rect_phase(project(pid), "linear", "staged")
             log("stage_linear_media", pid=pid)
-            return {"code": 0, "message": "staged"}
+            return reply
 
         @app.get("/v1/rectification/{pid}/log", response_class=PlainTextResponse)
         def rectification_log(pid: str):

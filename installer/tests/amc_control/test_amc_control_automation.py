@@ -1412,3 +1412,118 @@ def test_cancel_undo_deletes_after_the_rectification_timeout(ws, web):
     names = [n for n, _ in fake.calls[before:]]
     assert 3 <= names.count("rectification_state") <= 6
     assert names.count("delete_project") == 1 and names.index("delete_project") > names.index("rectification_state")
+
+
+@pytest.mark.parametrize("mode", ["auto", "linear"])
+def test_auto_and_linear_run_on_continue_instead_of_counting_as_finished_in_amc(ws, mode):
+    runner, fake = make_runner(ws, {**AUTO, "rectification": {"mode": mode}})
+    job = runner.start(spec(floorplan=False))        # step 2 waits for the layout, so step 4 waits too
+    assert job["Steps"][3]["State"] == "waiting"
+    fake.ui_alignment_done = True                    # the user uploads the layout in AMC
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    if mode == "auto":
+        assert len(calls(fake, "start_rectification")) == 1 and len(calls(fake, "commit_rectification")) == 1
+        assert job["Steps"][3]["Message"].startswith("rectified automatically: camera 0")
+    else:
+        assert len(calls(fake, "stage_linear_media")) == 1
+        assert job["Steps"][3]["Message"] == "videos staged as already linear"
+
+
+def test_linear_mode_marks_amc_changed_before_staging(ws, web):
+    _, _, fake = web
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web, {**WEB, "videos": {"enabled": False}, "layout": {"enabled": False},
+                                  "parameters": {"enabled": False}, "alignment": {"file": ""},
+                                  "rectification": {"mode": "linear"}})
+    fake.projects[WEB_AMC_ID]["videos"] = [("cam_00.mp4", 5)]   # already in AMC: step 4 is the first change
+    changing = runner._changing_amc
+
+    def spy():
+        fake.calls.append(("changing_amc", {"before": job_file(runner)["amc_changed"]}))
+        changing()
+    runner._changing_amc = spy
+    job = runner.start(spec(floorplan=False))
+    assert job["Steps"][3]["State"] == "done", job
+    order = [n for n, _ in fake.calls]
+    assert order[order.index("stage_linear_media") - 1] == "changing_amc"
+    assert calls(fake, "changing_amc")[0] == {"before": False}
+    assert job_file(runner)["amc_changed"] is True
+
+
+def test_alignment_waits_for_rectification_then_asks_for_the_new_footage(ws):
+    tmp_path, _ = ws
+    (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")      # no saved alignment
+    runner, fake = make_runner(ws, AUTO)
+    job = runner.start(spec(floorplan=False))
+    align = job["Steps"][4]
+    assert job["Steps"][3]["State"] == "waiting"
+    assert align["State"] == "waiting" and align["NeedsUser"] is False
+    assert align["Message"] == "Manual Alignment comes after rectification"
+    assert len(job["UserActions"]) == 1 and job["UserActions"][0].startswith("Upload layout.png")
+
+    amc_project(fake)["alignment"] = [[[0, 0]]]   # stale: from footage before this run
+    fake.ui_alignment_done = True                  # the layout is uploaded in AMC
+    job = runner.resume()
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][3]["State"] == "done"
+    align = job["Steps"][4]
+    assert align["State"] == "waiting" and align["NeedsUser"] is True
+    assert align["Message"].startswith("Do Manual Alignment in AMC")
+    assert calls(fake, "calibrate") == []
+    job = runner.resume()                          # the user aligned the new footage
+    assert job["State"] == "completed"
+    assert job["Steps"][4]["Message"].startswith("finished in AMC")
+
+
+def test_lag_window_tolerates_the_state_from_before_each_request(ws):
+    fake = FakeAmc(rect_stale_reads=2)
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    amc_project(fake)["rect_state"] = "COMPLETED"          # earlier footage's rectification
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "completed", job
+    assert len(calls(fake, "commit_rectification")) == 1   # a lagging COMPLETED never skips the commit
+    states = rect_states(fake)
+    assert states[1:3] == ["COMPLETED", "COMPLETED"]       # after the start
+    after_commit = states[states.index("READY_FOR_REVIEW", 3) + 1:]
+    assert after_commit[:2] == ["READY_FOR_REVIEW", "READY_FOR_REVIEW"]   # after the commit
+
+
+def test_lag_window_keeps_polling_through_an_earlier_error(ws):
+    fake = FakeAmc(rect_stale_reads=3)
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    amc_project(fake)["rect_state"] = "ERROR"
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    assert runner.start(spec())["State"] == "completed"
+    assert rect_states(fake)[1:4] == ["ERROR"] * 3
+
+
+def test_lag_window_ends_after_three_polls(ws):
+    fake = FakeAmc(rect_stale_reads=4)
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    amc_project(fake)["rect_state"] = "COMPLETED"
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed"
+    message = job["Steps"][3]["Message"]
+    assert "is COMPLETED while estimating distortion, expected RUNNING or READY_FOR_REVIEW" in message
+    assert "no grid lines found" in message
+    assert calls(fake, "commit_rectification") == []
+
+
+def test_running_in_the_reply_closes_the_lag_window(ws):
+    fake = FakeAmc(rect_stale_reads=1, rect_reply="RUNNING")
+    fake.add_project(INSTALLER_AMC_ID, "Living-Room")
+    amc_project(fake)["rect_state"] = "COMPLETED"
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and "is COMPLETED while estimating distortion" in job["Steps"][3]["Message"]
+
+
+def test_running_seen_in_a_poll_closes_the_lag_window(ws):
+    fake = FakeAmc(rect_fail="estimate", rect_reply="")    # no state in the reply
+    runner, _ = make_runner(ws, AUTO, fake=fake)
+    job = runner.start(spec())
+    assert job["State"] == "failed" and "ERROR while estimating distortion" in job["Steps"][3]["Message"]
+    assert rect_states(fake)[1:3] == ["RUNNING", "ERROR"]
