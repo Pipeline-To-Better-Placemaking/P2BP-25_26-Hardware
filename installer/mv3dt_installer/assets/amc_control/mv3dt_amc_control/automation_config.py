@@ -115,7 +115,7 @@ class AlignmentSection(_Strict):
 
 
 class CalibrationSection(_Strict):
-    detector_type: Literal["resnet", "transformer"] = "resnet"
+    detector_type: Literal["resnet", "transformer"] = "transformer"
     poll_seconds: float = Field(10, ge=0)
     timeout_seconds: float = Field(5400, gt=0)
 
