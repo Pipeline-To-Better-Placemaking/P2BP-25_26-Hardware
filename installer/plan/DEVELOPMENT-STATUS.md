@@ -15,8 +15,8 @@ connected across the step modules.** A reader who finds `report.py` can
 reasonably conclude the diagnostic work is done. It is not.
 [Section 5](#5-what-remains) is the honest list.
 
-Current release: **v0.4.30**. Current version string:
-`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.30"`.
+Current release: **v0.4.31**. Current version string:
+`installer/mv3dt_installer/__init__.py` `__version__ = "0.4.31"`.
 The release is published with a checksum-verified binary.
 
 ### Current workstation state (last verified 2026-11-16)
@@ -34,7 +34,8 @@ the 2026-09-25 fresh-install record, are in this file's git history.
 | PoE interface | `enp8s0` up at `169.254.3.134/16` (link-local) via `Wired connection 1` | 2026-10-20 | `ip -br addr`, `nmcli` |
 | Location and AMC project | `LOCATION_ID=Kevin-House`; `AMC_PROJECT_ID=20261023_091449_9720`. This replaced the `Living-Room` project `20261019_151133_2885` recorded on 2026-10-20; the new project's name and state were not re-checked | 2026-11-16 | `installer.conf` |
 | Calibration | **First successful calibration**: `Living-Room` is `COMPLETED` from two simultaneous 10-minute clips (1920x1080, recorded outside the installer and uploaded in the AMC UI). Step 4 ingested it as `Living-Room@20261020T170847Z`, installed the four DeepStream configs, deleted the footage folder, and enabled `mv3dt-ingest-living-room.timer` | 2026-10-20 | Step 4 transcript; AMC API |
-| Installer version on the workstation | 0.4.25 (`v0.4.25`, commit `0d4347a`), installed over v0.4.24 without a reset; `/opt/mv3dt/bin/mv3dt-installer` refreshed | 2026-11-16 | `mv3dt-installer --version`; v0.4.25 run |
+| Installer version on the workstation | 0.4.30 (`v0.4.30`, commit `5f183dc`, built `2026-11-18T09:42:13Z`) | 2026-11-18 | `/opt/mv3dt/bin/mv3dt-installer --version` over SSH |
+| Living-room chair ghosts | PeopleNet false positives reproduced, including 0.95 detector confidence and a 7-person fused hour. Two full-box exclusion rectangles added for `c1` / source 0; existing TV rule retained. Pipeline restarted at 09:55:31 EST; empty-room verification passed initially, current walk-and-sit acceptance remains open. Historical records and replay cleaning unchanged. See [incident record](WORKSTATION-GHOST-CHAIRS-2026-11-18.md) for coordinates, evidence and rollback | 2026-11-18 | isolated detector probe; live viewer; pipeline log; read-only replay query |
 | Step completion | Steps 1–6, 8 and 9 `COMPLETE`; Step 7 `SKIPPED` (gate off) | 2026-11-16 | `mv3dt-installer --status` |
 | Gates | `MV3DT_REMOTE_SUPERVISION=local`, `MV3DT_WEBAPP_INTEGRATION=off`, `MV3DT_TRACKING_HISTORY=on`, `MV3DT_AMC_CONTROL=on`, `MV3DT_VIEWER_STREAM=on`, `MV3DT_AUTO_INGEST=off` | 2026-11-16 | `installer.conf` |
 | Supervised services | `mv3dt-agent`, `mv3dt-pipeline@living-room`, `mv3dt-watchdog@living-room`, `mv3dt-tracking` and `mv3dt-amc-control` all `active (running)`; no `mv3dt-*` timer is loaded | 2026-11-16 | `systemctl list-units 'mv3dt*'`; `systemctl list-timers 'mv3dt*'` |
@@ -460,8 +461,8 @@ For the current state to be what this document claims:
 - [ ] Every step declares `phases` and calls exactly `phase(1)` through
       `phase(len(phases))` — pinned by
       `tests/test_steps_protocol.py::test_every_step_declares_phases_that_match_the_indices_it_uses`.
-- [x] `__version__` equals the most recent `v*` tag (`v0.4.30`).
-- [x] `gh pr list --state open` is empty at the v0.4.30 release cut.
+- [x] `__version__` equals the most recent `v*` tag (`v0.4.31`).
+- [x] `gh pr list --state open` is empty at the v0.4.31 release cut.
 
 ---
 
@@ -486,7 +487,7 @@ Settled exclusions, carried from [`08` §11](08-PROGRESS-AND-OBSERVABILITY.md#11
 ## References
 
 Facts in this document are drawn from the repository through release
-`v0.4.30`, the operator's supplied **v0.4.6**, **v0.4.7**, and **v0.4.8**
+`v0.4.31`, the operator's supplied **v0.4.6**, **v0.4.7**, and **v0.4.8**
 workstation runs, and earlier workstation runs of `mv3dt-installer` 0.1.2 through
 0.1.9, which are the source of the observed-failure inventory in
 [`08` §2](08-PROGRESS-AND-OBSERVABILITY.md#2-observed-failures-this-doc-exists-to-fix).
