@@ -11,6 +11,11 @@ and amc_state becomes COMPLETED (or ERROR).
 Like AMC 3.3.0, the fake keeps one current configuration for all projects
 (GET /v1/config), which POST /v1/config/{id} replaces whole, and serves the
 factory values at GET /v1/config/defaults.
+
+Like AMC 3.3.0, the export is built in a separate step: mv3dt_result answers
+HTTP 400 until POST /v1/postprocess/{id} has run, which get_project_info shows
+as postprocess_state READY, RUNNING, then COMPLETED with amc_export_ready true.
+A calibration clears the export again.
 """
 from __future__ import annotations
 
@@ -58,6 +63,15 @@ class FakeAmc:
     # or the earlier state while reads are stale; "": no state in the reply).
     rect_stale_reads: int = 0
     rect_reply: str | None = None
+    # AMC's Layout Post-processing: state reads that report RUNNING before it ends, whether
+    # it ends in ERROR, reads right after the post that still report the state from before
+    # it, posts answered with HTTP 500 before one is accepted, and whether a calibration
+    # leaves an export ready (AMC 3.3.0 clears it).
+    postprocess_running_polls: int = 2
+    postprocess_fail: bool = False
+    postprocess_stale_reads: int = 0
+    postprocess_refusals: int = 0
+    export_ready_after_calibration: bool = False
     rect_cameras: list[dict] = field(default_factory=lambda: [
         {"camera_id": 0, "committed": None, "auto_estimate": {"model": "simple_radial", "k1": -0.12, "k2": None}},
         {"camera_id": 1, "committed": None, "auto_estimate": {"model": "simple_divisional", "k1": -0.3, "k2": 0.01}},
@@ -69,7 +83,8 @@ class FakeAmc:
         # An existing project was calibrated before: READY with amc_state COMPLETED.
         self.projects[pid] = {"name": name, "state": "READY", "amc_state": "COMPLETED", "videos": [], "layout": None,
                               "alignment": None, "config": None, "focal": [], "polls": 0, "rect": 0,
-                              "rect_state": "NOT_STARTED", "rect_phase": "", "rect_n": 0}
+                              "rect_state": "NOT_STARTED", "rect_phase": "", "rect_n": 0,
+                              "pp_state": "COMPLETED", "export_ready": True, "pp_n": 0}
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -93,6 +108,7 @@ class FakeAmc:
             fake.next_id += 1
             fake.add_project(pid, project_name)
             fake.projects[pid]["state"] = fake.projects[pid]["amc_state"] = "INIT"
+            fake.projects[pid]["pp_state"], fake.projects[pid]["export_ready"] = "INIT", False
             log("create_project", name=project_name)
             return {"project_id": pid}
 
@@ -110,9 +126,22 @@ class FakeAmc:
                         p["state"] = "READY"
                         p["amc_state"] = fake.calibration_end or ("ERROR" if fake.fail_calibration else "COMPLETED")
                 project_state, amc_state = p["state"], p["amc_state"]
-            log("get_project_info", project_state=project_state, amc_state=amc_state)
+            pp_left, pp_before = p.get("pp_stale", (0, ("", False)))
+            if pp_left:
+                p["pp_stale"] = (pp_left - 1, pp_before)
+                pp_state, export_ready = pp_before
+            else:
+                if p["pp_state"] == "RUNNING":
+                    p["pp_n"] += 1
+                    if p["pp_n"] > fake.postprocess_running_polls:
+                        p["pp_state"] = "ERROR" if fake.postprocess_fail else "COMPLETED"
+                        p["export_ready"] = not fake.postprocess_fail
+                pp_state, export_ready = p["pp_state"], p["export_ready"]
+            log("get_project_info", project_state=project_state, amc_state=amc_state,
+                postprocess_state=pp_state, amc_export_ready=export_ready)
             return {"code": 0, "project_info": {
                 "project_state": project_state, "amc_state": amc_state, "project_name": p["name"],
+                "postprocess_state": pp_state, "amc_export_ready": export_ready, "vggt_export_ready": False,
                 "vggt_state": "INIT", "amc_results_available": amc_state == "COMPLETED",
                 "video_files_count": len(p["videos"]), "layout_file": p["layout"] is not None,
                 "alignment_file": p["alignment"] is not None or fake.ui_alignment_done,
@@ -180,11 +209,27 @@ class FakeAmc:
             before = (p["state"], p["amc_state"])
             p["calib_stale"] = (fake.calib_stale_reads, before)
             p["state"], p["amc_state"], p["polls"] = "RUNNING", "RUNNING", 0
+            if not fake.export_ready_after_calibration:  # a new calibration needs post-processing again
+                p["pp_state"], p["export_ready"] = "READY", False
             log("calibrate", detector_type=body.get("detector_type"))
             reply = fake.calib_reply
             if reply is None:
                 reply = before[0] if fake.calib_stale_reads else "RUNNING"
             return {"code": 0, **({"project_state": reply} if reply else {})}
+
+        @app.post("/v1/postprocess/{pid}")
+        def postprocess(pid: str):
+            p = project(pid)
+            if fake.postprocess_refusals:
+                fake.postprocess_refusals -= 1
+                log("postprocess_refused", pid=pid)
+                raise HTTPException(500, "post-processing could not start")
+            p["pp_stale"] = (fake.postprocess_stale_reads, (p["pp_state"], p["export_ready"]))
+            p["pp_state"], p["export_ready"], p["pp_n"] = "RUNNING", False, 0
+            log("postprocess", pid=pid)
+            # AMC 3.3.0 answers with a CalibrationResponse: no postprocess_state.
+            return {"code": 0, "message": "post-processing started", "project_state": p["state"],
+                    "calibration_pid": None}
 
         @app.post("/v1/stop_calibration/{pid}")
         def stop_calibration(pid: str):
@@ -215,6 +260,10 @@ class FakeAmc:
 
         @app.get("/v1/result/{pid}/mv3dt_result")
         def mv3dt_result(pid: str, result_type: str):
+            if not project(pid)["export_ready"]:
+                log("mv3dt_result_refused", result_type=result_type)
+                raise HTTPException(400, "AMC export artifacts are not available. Run post-processing after "
+                                         "calibration completes.")
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w") as z:
                 z.writestr("transforms.yml", f"project: {pid}\n")

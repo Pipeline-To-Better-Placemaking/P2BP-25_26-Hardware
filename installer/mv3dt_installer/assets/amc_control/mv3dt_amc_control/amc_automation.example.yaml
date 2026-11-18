@@ -197,3 +197,7 @@ results:
   # installer's ingest timer (mode reuse_installer_project).
   download_dir: ""
   result_type: amc
+  # AMC builds the export in its Layout Post-processing step, which the run
+  # starts after calibrating when the export is not ready yet. Polled every
+  # calibration.poll_seconds; the step fails after this many seconds.
+  postprocess_timeout_seconds: 1800

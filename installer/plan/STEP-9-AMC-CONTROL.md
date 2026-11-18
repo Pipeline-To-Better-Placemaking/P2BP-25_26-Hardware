@@ -199,7 +199,7 @@ The automated workflow, against AMC 3.3.0's seven steps:
 | 4 Rectification | automatic through AMC's API (default), or done in the UI |
 | 5 Manual Alignment | re-uploads a saved `alignment_data.json` if present; otherwise the user |
 | 6 Execute | `verify_project` must be `READY`; `calibrate`; wait for `get_project_info`'s `amc_state` `COMPLETED` with neither `project_state` nor `amc_state` `RUNNING` (`project_state` returns to `READY`); a Continue after the calibration was posted takes the one AMC has instead of posting again |
-| 7 Results | evaluation statistics; optional result ZIP; Step 4 ingests the installer's project |
+| 7 Results | evaluation statistics; when `get_project_info`'s `amc_export_ready` is not true, runs AMC's Layout Post-processing (`POST /v1/postprocess/{id}`, the same call as AMC's UI) and waits for `postprocess_state` `COMPLETED` with the export ready (`ERROR` or `FAILED` fails the step; AMC serves no `postprocess.log`, so the message points at it and at AMC's step; `results.postprocess_timeout_seconds`, default 1800); a Continue polls a post-processing AMC is running instead of posting again, and the cancel undo waits for one before deleting the project; optional result ZIP; Step 4 ingests the installer's project |
 
 Steps 1 to 5 all run first; if any needs the user the run pauses once before
 step 6 with a to-do list and continues on request. A step left to the user

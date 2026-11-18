@@ -166,6 +166,27 @@ class AmcApi:
                                                         timeout=self.timeout), "calibrate"),
                             "project_state")
 
+    def start_postprocess(self, project_id: str) -> str:
+        """Start AMC's Layout Post-processing, which builds the result exports.
+
+        Returns the reply's postprocess_state, or "" when it has none (AMC 3.3.0 replies
+        without one, so the caller's lag window always opens).
+        """
+        return _reply_state(self._check(self._http.post(self._url(f"postprocess/{project_id}"),
+                                                        timeout=self.timeout), "postprocess"),
+                            "postprocess_state")
+
+    def postprocess_state(self, project_id: str, result_type: str) -> tuple[str, bool]:
+        """(postprocess_state upper-cased or "", whether the <result_type> export is ready).
+
+        AMC 3.3.0: READY before post-processing, RUNNING while it runs, COMPLETED with
+        amc_export_ready true after it, ERROR or FAILED when it fails.
+        """
+        info = self.get_project_info(project_id)
+        state = info.get("postprocess_state")
+        return (state.upper() if isinstance(state, str) else "",
+                info.get(f"{result_type}_export_ready") is True)
+
     def stop_calibration(self, project_id: str) -> None:
         self._check(self._http.post(self._url(f"stop_calibration/{project_id}"), timeout=self.timeout),
                     "stop_calibration")

@@ -123,6 +123,8 @@ class CalibrationSection(_Strict):
 class ResultsSection(_Strict):
     download_dir: str = ""
     result_type: Literal["amc", "vggt"] = "amc"
+    # AMC's Layout Post-processing, which builds the export before it can be downloaded.
+    postprocess_timeout_seconds: float = Field(1800, gt=0)
 
 
 class AutomationConfig(_Strict):
