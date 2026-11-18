@@ -4,6 +4,10 @@ the runner sent. The /v1/rectification and /v1/linear_media routes follow AMC
 3.3.0's own API description; /v1/test_rectify is invented for the generic
 rectification.mode api, whose requests are configured, not hard-coded.
 
+Like AMC 3.3.0, a calibration shows in both project_state and amc_state:
+calibrate sets both RUNNING, and when it ends project_state goes back to READY
+and amc_state becomes COMPLETED (or ERROR).
+
 Like AMC 3.3.0, the fake keeps one current configuration for all projects
 (GET /v1/config), which POST /v1/config/{id} replaces whole, and serves the
 factory values at GET /v1/config/defaults.
@@ -31,6 +35,13 @@ class FakeAmc:
     calls: list[tuple[str, dict]] = field(default_factory=list)
     running_polls: int = 2          # get_project_info calls that report RUNNING after calibrate
     fail_calibration: bool = False
+    # The amc_state a calibration ends in when not "" (e.g. READY for one stopped in AMC).
+    calibration_end: str = ""
+    # get_project_info reads right after calibrate that still report the states from before
+    # it, and the project_state calibrate replies with (None: RUNNING, or the earlier state
+    # while reads are stale; "": no project_state in the reply).
+    calib_stale_reads: int = 0
+    calib_reply: str | None = None
     rect_polls: int = 1
     ui_alignment_done: bool = False  # set by a test to stand in for the user's UI work
     with_gt: bool = False
@@ -53,7 +64,8 @@ class FakeAmc:
     config: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG))
 
     def add_project(self, pid: str, name: str = "Existing") -> None:
-        self.projects[pid] = {"name": name, "state": "COMPLETED", "videos": [], "layout": None,
+        # An existing project was calibrated before: READY with amc_state COMPLETED.
+        self.projects[pid] = {"name": name, "state": "READY", "amc_state": "COMPLETED", "videos": [], "layout": None,
                               "alignment": None, "config": None, "focal": [], "polls": 0, "rect": 0,
                               "rect_state": "NOT_STARTED", "rect_phase": "", "rect_n": 0}
 
@@ -78,19 +90,28 @@ class FakeAmc:
             pid = f"2026{fake.next_id:04d}"
             fake.next_id += 1
             fake.add_project(pid, project_name)
-            fake.projects[pid]["state"] = "INIT"
+            fake.projects[pid]["state"] = fake.projects[pid]["amc_state"] = "INIT"
             log("create_project", name=project_name)
             return {"project_id": pid}
 
         @app.get("/v1/get_project_info/{pid}")
         def get_project_info(pid: str):
             p = project(pid)
-            if p["state"] == "RUNNING":
-                p["polls"] += 1
-                if p["polls"] > fake.running_polls:
-                    p["state"] = "ERROR" if fake.fail_calibration else "COMPLETED"
+            stale_left, stale_states = p.get("calib_stale", (0, ("", "")))
+            if stale_left:
+                p["calib_stale"] = (stale_left - 1, stale_states)
+                project_state, amc_state = stale_states
+            else:
+                if "RUNNING" in (p["state"], p["amc_state"]):
+                    p["polls"] += 1
+                    if p["polls"] > fake.running_polls:
+                        p["state"] = "READY"
+                        p["amc_state"] = fake.calibration_end or ("ERROR" if fake.fail_calibration else "COMPLETED")
+                project_state, amc_state = p["state"], p["amc_state"]
+            log("get_project_info", project_state=project_state, amc_state=amc_state)
             return {"code": 0, "project_info": {
-                "project_state": p["state"], "project_name": p["name"], "vggt_state": "INIT",
+                "project_state": project_state, "amc_state": amc_state, "project_name": p["name"],
+                "vggt_state": "INIT", "amc_results_available": amc_state == "COMPLETED",
                 "video_files_count": len(p["videos"]), "layout_file": p["layout"] is not None,
                 "alignment_file": p["alignment"] is not None or fake.ui_alignment_done,
                 "rectification_state": p["rect_state"]}}
@@ -150,15 +171,20 @@ class FakeAmc:
         async def calibrate(pid: str, request: Request):
             body = await request.json()
             p = project(pid)
-            p["state"], p["polls"] = "RUNNING", 0
+            before = (p["state"], p["amc_state"])
+            p["calib_stale"] = (fake.calib_stale_reads, before)
+            p["state"], p["amc_state"], p["polls"] = "RUNNING", "RUNNING", 0
             log("calibrate", detector_type=body.get("detector_type"))
-            return {"code": 0}
+            reply = fake.calib_reply
+            if reply is None:
+                reply = before[0] if fake.calib_stale_reads else "RUNNING"
+            return {"code": 0, **({"project_state": reply} if reply else {})}
 
         @app.post("/v1/stop_calibration/{pid}")
         def stop_calibration(pid: str):
             p = project(pid)
-            if p["state"] == "RUNNING":
-                p["state"] = "INIT"
+            if "RUNNING" in (p["state"], p["amc_state"]):
+                p["state"], p["amc_state"] = "INIT", "INIT"
             log("stop_calibration", pid=pid)
             return {"code": 0}
 

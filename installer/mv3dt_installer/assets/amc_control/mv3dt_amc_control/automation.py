@@ -11,7 +11,7 @@
                            as is (mode linear); mode ui leaves it to the UI
     5 Manual Alignment     manual the first time; a saved alignment file is re-uploaded after that
     6 Execute Calibration  automated: re-post the run's scale, verify the project is READY,
-                           calibrate, wait
+                           calibrate, wait until AMC's amc_state is COMPLETED
     7 Results              automated: evaluation statistics, optional result ZIP download
 
 Every step that needs a person is marked "waiting". Steps 1-5 all run first,
@@ -249,6 +249,9 @@ class Job:
     # (estimate, generate or linear), so a resumed run picks up the right wait.
     rectification_started: bool = False
     rectification_phase: str = ""
+    # Step 6: True once this run is about to post calibrate, so a Continue after a failure or
+    # a restart waits for, or takes, the calibration AMC already has instead of starting another.
+    calibration_started: bool = False
     # The floor plan scale (AMC-RECTIFICATION-AND-SCALE.md section 4): the SHA-256 of the
     # layout.png step 2 uploaded ("" when this run uploaded none), saved before the upload,
     # and the scale step 3 posted or the user confirmed in AMC (None until there is one).
@@ -988,7 +991,7 @@ class CalibrationRunner:
             note = "created a new AMC project"
             if cfg.project.mode == "reuse_installer_project":
                 note += " (installer.conf has no AMC_PROJECT_ID, so the installer will not ingest it on its own)"
-        if api.project_state(pid) == "RUNNING":
+        if "RUNNING" in api.calibration_states(pid):
             raise StepFailed(f"AMC project {pid} is already calibrating")
         job.amc_project_id, job.amc_project_name = pid, name
         return Outcome("done", f"{note}: {name or pid} ({pid})")
@@ -1657,32 +1660,72 @@ class CalibrationRunner:
         return note or f"scale {job.layout_px_per_m:g} px/m"
 
     def _execute(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
-        pid = self._job.amc_project_id
+        job = self._job
+        pid = job.amc_project_id
+        if job.calibration_started:
+            # Continue after a failure or a restart: take the calibration AMC already has.
+            project_state, amc_state = api.calibration_states(pid)
+            if "RUNNING" in (project_state, amc_state):
+                return self._poll_calibration(cfg, api, None, "")
+            if amc_state == "COMPLETED":
+                return Outcome("done", "the calibration had finished in AMC while the run was not watching")
         scale_note = self._repost_scale(cfg, api)
         self._changing_amc()
         state = api.verify_project(pid)
         if state != "READY":
             with self._lock:
-                s = self._job.step("manual_alignment")
+                s = job.step("manual_alignment")
                 s["State"], s["NeedsUser"] = "waiting", True
                 s["Message"] = (f"AMC reports {state or 'no state'} instead of READY. Check the videos, layout, "
                                 "rectification and alignment in AMC, save, then press Continue")
             raise _PauseForUser()
+        with self._lock:
+            job.calibration_started = True
+            self._save()
+        reply = api.calibrate(pid, cfg.calibration.detector_type)
+        return self._poll_calibration(cfg, api, reply, scale_note)
+
+    def _poll_calibration(self, cfg: AutomationConfig, api: AmcApi, reply: str | None,
+                          scale_note: str) -> Outcome:
+        """Poll get_project_info until AMC's amc_state is COMPLETED with nothing RUNNING.
+
+        AMC 3.3.0 reports a calibration through project_state and amc_state: RUNNING in either
+        while it runs, then project_state READY and amc_state COMPLETED (or ERROR). After the
+        calibrate post (reply is its answer's project_state, possibly "") a reused project may
+        still report its earlier calibration, so a lag window lasts until RUNNING is seen or
+        for at most LAG_POLLS polls; inside it every state keeps the poll going. reply is None
+        when nothing was posted because AMC was already seen calibrating.
+        """
+        pid = self._job.amc_project_id
         c = cfg.calibration
-        api.calibrate(pid, c.detector_type)
         start = self._clock()
+        lagging = reply is not None and reply != "RUNNING"
+        lag_polls = 0
         while True:
             self._wait(c.poll_seconds)
-            state = api.project_state(pid)
+            project_state, amc_state = api.calibration_states(pid)
+            states = (project_state, amc_state)
+            shown = f"project_state {project_state or 'missing'}, amc_state {amc_state or 'missing'}"
             minutes = int((self._clock() - start) // 60)
-            if state == "COMPLETED":
+            running = "RUNNING" in states
+            if running:
+                lagging = False
+            elif lagging and lag_polls < LAG_POLLS:
+                lag_polls += 1
+            elif amc_state == "COMPLETED":
                 return Outcome("done", f"calibrated with {c.detector_type} in about {minutes} min"
                                + (f"; {scale_note}" if scale_note else ""))
-            if state == "ERROR":
-                raise StepFailed("AMC calibration ended in ERROR. Last log lines:\n" + api.calibration_log(pid))
+            elif "ERROR" in states or "FAILED" in states:
+                raise StepFailed(f"AMC calibration ended in ERROR ({shown}). Last log lines:\n"
+                                 + api.calibration_log(pid))
+            else:
+                raise StepFailed(f"AMC calibration stopped without finishing ({shown}); "
+                                 "see AMC's calibration log")
             if self._clock() - start >= c.timeout_seconds:
-                raise StepFailed(f"calibration still {state} after {minutes} min; see AMC's calibration log")
-            self._set_step("execute", "running", f"{state} for {minutes} min (typically 10-60 min)")
+                raise StepFailed(f"calibration still running after {minutes} min ({shown}); "
+                                 "see AMC's calibration log")
+            doing = "calibrating" if running else "waiting for AMC to start calibrating"
+            self._set_step("execute", "running", f"{doing} for {minutes} min (typically 10-60 min)")
 
     # ---- step 7 ---------------------------------------------------------------
     def _results(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
