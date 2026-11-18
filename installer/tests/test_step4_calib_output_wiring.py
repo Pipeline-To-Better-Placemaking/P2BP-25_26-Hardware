@@ -420,8 +420,9 @@ def test_preflight_zero_camera_scan_requests_connection_and_rerun(
 
 
 def test_preflight_polls_running_then_completed(tmp_path, templates, monkeypatch):
-    # The first status request is the footage INIT check (footage spec 3).
-    runner = Runner(states=["RUNNING", "RUNNING", "COMPLETED"])
+    # The first status request is the footage INIT check (footage spec 3);
+    # the second is the single read before the wait (STEP-4 section 3.3).
+    runner = Runner(states=["RUNNING", "RUNNING", "RUNNING", "COMPLETED"])
     ctx = _ctx(tmp_path, templates, runner=runner)
 
     def wait(predicate, **kwargs):
@@ -433,7 +434,7 @@ def test_preflight_polls_running_then_completed(tmp_path, templates, monkeypatch
     result = step4.Step4CalibOutputWiring().preflight(ctx)
     assert result.status is StepStatus.COMPLETE
     urls = [call[0][-1] for call in runner.calls if call[0] and call[0][0] == "curl"]
-    assert urls == ["http://localhost:8000/v1/get_project_info/project-123"] * 3
+    assert urls == ["http://localhost:8000/v1/get_project_info/project-123"] * 4
 
 
 def test_preflight_error_fetches_calibration_log(tmp_path, templates, monkeypatch):
@@ -464,7 +465,8 @@ def test_status_and_log_polls_do_not_stream(tmp_path, templates, monkeypatch):
 
 
 def test_preflight_sets_waiting_task_before_wait(tmp_path, templates, monkeypatch):
-    ctx = _ctx(tmp_path, templates)
+    # Not yet COMPLETED at the footage check and the read before the wait.
+    ctx = _ctx(tmp_path, templates, runner=Runner(states=["RUNNING", "RUNNING", "COMPLETED"]))
     events = []
     ctx.progress = SimpleNamespace(
         phase=lambda n: None, task=lambda text: events.append(("task", text))
@@ -531,7 +533,10 @@ def test_preflight_bounded_wait_outcomes_need_action(
     tmp_path, templates, monkeypatch, outcome
 ):
     ctx = _ctx(
-        tmp_path, templates, non_interactive=outcome is waitui.WaitOutcome.SKIPPED
+        tmp_path,
+        templates,
+        runner=Runner(states=["RUNNING"]),
+        non_interactive=outcome is waitui.WaitOutcome.SKIPPED,
     )
 
     def wait(predicate, **kwargs):
@@ -543,6 +548,25 @@ def test_preflight_bounded_wait_outcomes_need_action(
     result = step4.Step4CalibOutputWiring().preflight(ctx)
     assert result.status is StepStatus.USER_ACTION_REQUIRED
     assert result.user_actions
+
+
+@pytest.mark.parametrize("non_interactive", [True, False])
+def test_preflight_completed_project_needs_no_wait(
+    tmp_path, templates, monkeypatch, non_interactive
+):
+    ctx = _ctx(
+        tmp_path,
+        templates,
+        runner=Runner(states=["COMPLETED"]),
+        non_interactive=non_interactive,
+    )
+
+    def wait(predicate, **kwargs):
+        raise AssertionError("a COMPLETED project must not wait")
+
+    monkeypatch.setattr(waitui, "wait_until", wait)
+    result = step4.Step4CalibOutputWiring().preflight(ctx)
+    assert result.status is StepStatus.COMPLETE
 
 
 def test_download_uses_current_amc_result_endpoint(tmp_path, templates):
@@ -1313,7 +1337,7 @@ def test_footage_skipped_when_project_is_past_init(
 
 
 def test_footage_skipped_non_interactive(tmp_path, templates, monkeypatch, capsys):
-    ctx = _footage_ctx(tmp_path, templates, non_interactive=True)
+    ctx = _footage_ctx(tmp_path, templates, states=("INIT",), non_interactive=True)
     fake = FakeFootage(monkeypatch)
     monkeypatch.setattr(
         waitui, "wait_until", lambda predicate, **kwargs: waitui.WaitOutcome.SKIPPED
