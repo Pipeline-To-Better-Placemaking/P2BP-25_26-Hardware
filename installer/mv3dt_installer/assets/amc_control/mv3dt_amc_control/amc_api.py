@@ -24,6 +24,16 @@ def _detail(r: httpx.Response) -> str:
     return r.text[:500]
 
 
+def _reply_state(r: httpx.Response) -> str:
+    """The rectification_state a request's reply carries, upper-cased, or ""."""
+    try:
+        body = r.json()
+    except ValueError:
+        return ""
+    state = body.get("rectification_state") if isinstance(body, dict) else None
+    return state.upper() if isinstance(state, str) else ""
+
+
 class AmcApi:
     def __init__(self, base_url: str, *, timeout: float = 60, upload_timeout: float = 600,
                  client: httpx.Client | None = None):
@@ -150,6 +160,50 @@ class AmcApi:
             return f"(could not fetch the calibration log: {e})"
         if r.status_code >= 400:
             return f"(could not fetch the calibration log: HTTP {r.status_code})"
+        return "\n".join(r.text.splitlines()[-tail_lines:])
+
+    def rectification_state(self, project_id: str) -> str:
+        r = self._check(self._http.get(self._url(f"rectification/{project_id}"), timeout=self.timeout),
+                        "rectification state")
+        state = self._json(r, "rectification state").get("rectification_state")
+        if not isinstance(state, str) or not state:
+            raise AmcApiError("rectification state reply has no rectification_state")
+        return state.upper()
+
+    def start_rectification(self, project_id: str) -> str:
+        """Start the estimate; returns the reply's rectification_state, or "" when it has none."""
+        return _reply_state(self._check(self._http.post(self._url(f"rectification/{project_id}"),
+                                                        timeout=self.timeout), "start rectification"))
+
+    def rectification_cameras(self, project_id: str) -> list[dict]:
+        r = self._check(self._http.get(self._url(f"rectification/{project_id}/cameras"), timeout=self.timeout),
+                        "rectification cameras")
+        cameras = self._json(r, "rectification cameras").get("cameras")
+        if not isinstance(cameras, list):
+            raise AmcApiError("rectification cameras reply has no cameras list")
+        return [c for c in cameras if isinstance(c, dict)]
+
+    def commit_rectification(self, project_id: str, cameras: dict[str, dict]) -> str:
+        """cameras: {camera_id: {"model", "k1", "k2"}}; AMC then generates the rectified videos.
+
+        Returns the reply's rectification_state, or "" when it has none.
+        """
+        return _reply_state(self._check(self._http.post(self._url(f"rectification/{project_id}/manual"),
+                                                        json={"cameras": cameras}, timeout=self.timeout),
+                                        "commit rectification"))
+
+    def stage_linear_media(self, project_id: str) -> str:
+        """Returns the reply's rectification_state, or "" when it has none."""
+        return _reply_state(self._check(self._http.post(self._url(f"linear_media/{project_id}"),
+                                                        timeout=self.timeout), "stage linear media"))
+
+    def rectification_log(self, project_id: str, tail_lines: int = 10) -> str:
+        try:
+            r = self._http.get(self._url(f"rectification/{project_id}/log"), timeout=self.timeout)
+        except httpx.HTTPError as e:
+            return f"(could not fetch the rectification log: {e})"
+        if r.status_code >= 400:
+            return f"(could not fetch the rectification log: HTTP {r.status_code})"
         return "\n".join(r.text.splitlines()[-tail_lines:])
 
     def evaluation_statistics(self, project_id: str) -> dict | None:

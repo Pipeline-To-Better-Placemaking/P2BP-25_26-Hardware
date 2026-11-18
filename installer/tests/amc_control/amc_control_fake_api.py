@@ -1,7 +1,8 @@
 """A stand-in for AMC's REST API, built from the endpoints NVIDIA documents in the
 amc-run-video-calibration skill. It records every call so tests can check what
-the runner sent. The rectification routes are invented for tests: the real ones
-come from AMC's /openapi.yaml and are configured, not hard-coded.
+the runner sent. The /v1/rectification and /v1/linear_media routes follow AMC
+3.3.0's own API description; /v1/test_rectify is invented for the generic
+rectification.mode api, whose requests are configured, not hard-coded.
 """
 from __future__ import annotations
 
@@ -26,10 +27,24 @@ class FakeAmc:
     with_gt: bool = False
     next_id: int = 1
     delete_status: int | None = None  # set by a test to make delete_project answer this status
+    # AMC's rectification: state reads that report RUNNING before a phase ends, the
+    # phase that ends in ERROR instead (estimate, generate or linear), and the cameras.
+    rect_running_polls: int = 1
+    rect_fail: str = ""
+    # State reads right after a start, commit or linear stage that still report the state
+    # from before it, and the rectification_state those requests reply with (None: RUNNING,
+    # or the earlier state while reads are stale; "": no state in the reply).
+    rect_stale_reads: int = 0
+    rect_reply: str | None = None
+    rect_cameras: list[dict] = field(default_factory=lambda: [
+        {"camera_id": 0, "committed": None, "auto_estimate": {"model": "simple_radial", "k1": -0.12, "k2": None}},
+        {"camera_id": 1, "committed": None, "auto_estimate": {"model": "simple_divisional", "k1": -0.3, "k2": 0.01}},
+    ])
 
     def add_project(self, pid: str, name: str = "Existing") -> None:
         self.projects[pid] = {"name": name, "state": "COMPLETED", "videos": [], "layout": None,
-                              "alignment": None, "config": None, "focal": [], "polls": 0, "rect": 0}
+                              "alignment": None, "config": None, "focal": [], "polls": 0, "rect": 0,
+                              "rect_state": "NOT_STARTED", "rect_phase": "", "rect_n": 0}
 
     def app(self) -> FastAPI:
         app = FastAPI()
@@ -64,7 +79,7 @@ class FakeAmc:
                 if p["polls"] > fake.running_polls:
                     p["state"] = "ERROR" if fake.fail_calibration else "COMPLETED"
             return {"code": 0, "project_info": {"project_state": p["state"], "project_name": p["name"],
-                                                "vggt_state": "INIT"}}
+                                                "vggt_state": "INIT", "video_files_count": len(p["videos"])}}
 
         @app.post("/v1/upload_video_files/{pid}")
         async def upload_video_files(pid: str, files: list[UploadFile] = File(...)):
@@ -147,6 +162,66 @@ class FakeAmc:
                 z.writestr("transforms.yml", f"project: {pid}\n")
             log("mv3dt_result", result_type=result_type)
             return Response(buf.getvalue(), media_type="application/zip")
+
+        def rect_phase(p: dict, phase: str, message: str) -> dict:
+            before = p["rect_state"]
+            p["rect_stale"] = (fake.rect_stale_reads, before)
+            p["rect_state"], p["rect_phase"], p["rect_n"] = "RUNNING", phase, 0
+            reply = fake.rect_reply
+            if reply is None:
+                reply = before if fake.rect_stale_reads else "RUNNING"
+            return {"code": 0, "message": message, **({"rectification_state": reply} if reply else {})}
+
+        @app.get("/v1/rectification/{pid}")
+        def rectification_state(pid: str):
+            p = project(pid)
+            stale_left, stale_state = p.get("rect_stale", (0, ""))
+            if stale_left:
+                p["rect_stale"] = (stale_left - 1, stale_state)
+                log("rectification_state", state=stale_state)
+                return {"code": 0, "message": "", "rectification_state": stale_state, "rectification_pid": 4242}
+            if p["rect_state"] == "RUNNING":
+                p["rect_n"] += 1
+                if p["rect_n"] > fake.rect_running_polls:
+                    if fake.rect_fail == p["rect_phase"]:
+                        p["rect_state"] = "ERROR"
+                    else:
+                        p["rect_state"] = "READY_FOR_REVIEW" if p["rect_phase"] == "estimate" else "COMPLETED"
+            log("rectification_state", state=p["rect_state"])
+            return {"code": 0, "message": "", "rectification_state": p["rect_state"], "rectification_pid": 4242}
+
+        @app.post("/v1/rectification/{pid}")
+        def start_rectification(pid: str):
+            p = project(pid)
+            reply = rect_phase(p, "estimate", "started")
+            log("start_rectification", pid=pid)
+            return reply
+
+        @app.get("/v1/rectification/{pid}/cameras")
+        def rectification_cameras(pid: str):
+            project(pid)
+            cams = [{"video_name": f"cam_{c['camera_id']:02d}.mp4", "width": 1920, "height": 1080, "cx": 960,
+                     "cy": 540, "k1_min": -1, "k1_max": 1, "k2_min": -1, "k2_max": 1, "grid_lines": [], **c}
+                    for c in fake.rect_cameras]
+            return {"code": 0, "message": "", "cameras": cams}
+
+        @app.post("/v1/rectification/{pid}/manual")
+        async def commit_rectification(pid: str, request: Request):
+            p = project(pid)
+            body = await request.json()
+            reply = rect_phase(p, "generate", "generating")
+            log("commit_rectification", body=body)
+            return reply
+
+        @app.post("/v1/linear_media/{pid}")
+        def stage_linear_media(pid: str):
+            reply = rect_phase(project(pid), "linear", "staged")
+            log("stage_linear_media", pid=pid)
+            return reply
+
+        @app.get("/v1/rectification/{pid}/log", response_class=PlainTextResponse)
+        def rectification_log(pid: str):
+            return "\n".join(f"rect line {i}" for i in range(1, 15)) + "\nno grid lines found\n"
 
         # Test-only rectification routes, reached through the configurable request() path.
         @app.post("/v1/test_rectify/{pid}")
