@@ -2,6 +2,7 @@
 
 Run from installer/: `python3 -m pytest tests/amc_control -v`
 """
+import hashlib
 import io
 import json
 import sys
@@ -18,7 +19,7 @@ pytest.importorskip("PIL")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from amc_control_fake_api import FakeAmc  # noqa: E402
+from amc_control_fake_api import DEFAULT_CONFIG, FakeAmc  # noqa: E402
 from mv3dt_amc_control import automation as automation_mod  # noqa: E402
 from mv3dt_amc_control.api import create_app  # noqa: E402
 from mv3dt_amc_control.automation import CalibrationRunner  # noqa: E402
@@ -198,11 +199,13 @@ def test_default_config_pauses_once_with_a_todo_list_then_finishes(ws):
 
     assert job["State"] == "waiting_for_user"
     states = {s["Key"]: s["State"] for s in job["Steps"]}
-    assert states == {"project_setup": "done", "video_configuration": "done", "parameters": "waiting",
+    assert states == {"project_setup": "done", "video_configuration": "done", "parameters": "done",
                       "rectification": "done", "manual_alignment": "waiting", "execute": "pending",
                       "results": "pending"}
     todo = " | ".join(job["UserActions"])
-    assert "100.00 layout px/m" in todo and "Rectification" not in todo and "Manual Alignment" in todo
+    assert "px/m" not in todo and "Rectification" not in todo and "Manual Alignment" in todo
+    # The known scale is posted on AMC's current config, even without a settings_file.
+    assert calls(fake, "config")[0]["settings"] == {**DEFAULT_CONFIG, "layout_px_per_m": 100.0}
     assert len(calls(fake, "start_rectification")) == 1   # rectification is automatic by default
     assert calls(fake, "calibrate") == []          # nothing calibrates before the user is done
     assert calls(fake, "upload_video_files")       # but everything that could be uploaded was
@@ -216,13 +219,41 @@ def test_default_config_pauses_once_with_a_todo_list_then_finishes(ws):
 def test_continue_before_the_ui_work_is_saved_pauses_again(ws):
     tmp_path, _ = ws
     (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")
-    runner, fake = make_runner(ws, {"layout": {"enabled": False}, "rectification": {"mode": "skip"},
+    runner, fake = make_runner(ws, {"layout": {"enabled": False}, "rectification": {"mode": "ui"},
                                     "parameters": {"scale": {"source": "none"}}})
     assert runner.start(spec(floorplan=False))["State"] == "waiting_for_user"
     job = runner.resume()                          # user pressed Continue too early
     assert job["State"] == "waiting_for_user"
-    assert "instead of READY" in job["UserActions"][0]
-    assert calls(fake, "calibrate") == []
+    # Every step left to the user is checked against AMC and listed, not marked done.
+    states = {s["Key"]: s["State"] for s in job["Steps"]}
+    assert states["rectification"] == "waiting" and states["manual_alignment"] == "waiting"
+    assert len(job["UserActions"]) == 2
+    assert job["UserActions"][0].endswith("until it shows COMPLETED; AMC reports NOT_STARTED")
+    assert job["UserActions"][1].endswith("AMC reports no saved alignment yet")
+    assert "step 4 Rectification, step 5 Manual Alignment" in job["Message"]
+    assert calls(fake, "verify_project") == [] and calls(fake, "calibrate") == []
+    assert calls(fake, "config") == [] and calls(fake, "get_config") == []   # scale.source none
+
+    fake.projects[INSTALLER_AMC_ID]["rect_state"] = "COMPLETED"   # the user finishes both in AMC
+    fake.ui_alignment_done = True
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert job["Steps"][3]["Message"].startswith("finished in AMC")
+    assert job["Steps"][4]["Message"].startswith("finished in AMC")
+
+
+def test_video_configuration_stays_waiting_until_amc_has_the_layout(ws):
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    assert runner.start(spec(floorplan=False))["State"] == "waiting_for_user"
+    fake.config["layout_px_per_m"] = 50.0                 # step 3 is confirmed; step 2 is not
+    job = runner.resume()
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][1]["State"] == "waiting" and job["Steps"][2]["State"] == "done"
+    assert job["UserActions"] == ["AMC reports 2 videos and no layout.png: upload layout.png in AMC's Video "
+                                  "Configuration step, then press Continue"]
+    assert "cam_00.mp4" in job["Steps"][1]["Done"]        # what was done is kept
+    fake.projects[INSTALLER_AMC_ID]["layout"] = PNG
+    assert runner.resume()["State"] == "completed"
 
 
 def test_saved_alignment_waits_for_ui_rectification_before_upload(ws):
@@ -231,6 +262,7 @@ def test_saved_alignment_waits_for_ui_rectification_before_upload(ws):
     assert job["State"] == "waiting_for_user"
     assert calls(fake, "upload_alignment") == []
     assert len(job["UserActions"]) == 1 and "Rectification" in job["UserActions"][0]  # alignment needs nothing
+    fake.projects[INSTALLER_AMC_ID]["rect_state"] = "COMPLETED"   # the user rectified in AMC's UI
     job = runner.resume()
     assert job["State"] == "completed"
     assert calls(fake, "upload_alignment") == [{"coord_space": "rectified"}]
@@ -264,15 +296,15 @@ def test_floor_plan_is_only_downloaded_from_allowed_hosts(ws):
     assert runner.downloads == []
 
 
-def test_scale_key_missing_from_settings_file_is_reported_not_invented(ws):
+def test_scale_key_missing_from_amcs_config_fails_instead_of_being_invented(ws):
     tmp_path, _ = ws
-    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    fake = FakeAmc(config={"detector": "resnet"})
+    runner, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
     (tmp_path / "settings.json").write_text(json.dumps({"detector": "resnet"}))
     job = runner.start(spec())
-    assert job["State"] == "waiting_for_user"
-    assert "layout_px_per_m" not in calls(fake, "config")[0]["settings"]
-    assert "no layout_px_per_m key" in job["Steps"][2]["Message"]
-    assert job["Steps"][2]["Done"].startswith("applied settings.json")
+    assert job["State"] == "failed"
+    assert "AMC's configuration has no layout_px_per_m" in job["Steps"][2]["Message"]
+    assert calls(fake, "config") == []
 
 
 def test_fixed_scale_overrides_the_database(ws):
@@ -399,10 +431,14 @@ def test_misspelled_setting_is_rejected(ws):
         load_config(write_config(ws[0], {"calibration": {"detector_type": "yolo"}}))
 
 
-def test_overrides_without_a_settings_file_fail_instead_of_posting_a_partial_file(ws):
-    runner, fake = make_runner(ws, {**FULLY_AUTOMATED, "parameters": {"settings_overrides": {"a": 1}}})
+def test_overrides_without_a_settings_file_merge_into_amcs_current_config(ws):
+    fake = FakeAmc()
+    fake.config["detector"] = "custom"
+    runner, _ = make_runner(ws, {**FULLY_AUTOMATED, "parameters": {"settings_overrides": {"a": 1}}}, fake=fake)
     job = runner.start(spec())
-    assert job["State"] == "failed" and calls(fake, "config") == []
+    assert job["State"] == "completed", job
+    assert calls(fake, "config")[0]["settings"] == {**DEFAULT_CONFIG, "detector": "custom", "a": 1,
+                                                    "layout_px_per_m": 100.0}
 
 
 def test_base_config_loads_on_its_own():
@@ -813,6 +849,7 @@ def test_web_project_layout_only_wait_does_not_upload_videos_twice(ws, web):
     assert len(calls(fake, "upload_video_files")) == 1
 
     fake.projects[WEB_AMC_ID]["layout"] = PNG              # the user adds the layout in AMC
+    fake.config["layout_px_per_m"] = 50.0                  # and sets its scale
     job = runner.resume()
     assert job["State"] == "completed", job
     assert len(calls(fake, "upload_video_files")) == 1
@@ -824,6 +861,7 @@ def test_web_project_videos_uploaded_flag_survives_a_restart(ws, web):
     web_runner(ws, web).start(spec(floorplan=False))
     runner2 = web_runner(ws, web)
     fake.projects[WEB_AMC_ID]["layout"] = PNG
+    fake.config["layout_px_per_m"] = 50.0
     assert runner2.resume()["State"] == "completed"
     assert len(calls(fake, "upload_video_files")) == 1
 
@@ -1353,7 +1391,7 @@ def test_rectification_waits_while_step_2_waits(ws):
     assert job["State"] == "waiting_for_user"
     rect = job["Steps"][3]
     assert rect["State"] == "waiting" and rect["Message"] == "Rectification runs once the videos are in AMC"
-    assert rect["NeedsUser"] is False and len(job["UserActions"]) == 1
+    assert rect["NeedsUser"] is False and not [a for a in job["UserActions"] if "Rectification" in a]
     assert calls(fake, "start_rectification") == [] and calls(fake, "rectification_state") == []
 
 
@@ -1373,9 +1411,12 @@ def test_skip_and_ui_modes_never_call_the_rectification_api(ws):
     runner, fake2 = make_runner(ws, {**FULLY_AUTOMATED, "rectification": {"mode": "ui"}})
     job = runner.start(spec())
     assert job["Steps"][3]["State"] == "waiting"
+    fake2.projects[INSTALLER_AMC_ID]["rect_state"] = "COMPLETED"
     assert runner.resume()["Steps"][3]["Message"].startswith("finished in AMC")
-    for f in (fake, fake2):
-        assert not [n for n, _ in f.calls if "rectification" in n or n == "stage_linear_media"]
+    assert not [n for n, _ in fake.calls if "rectification" in n or n == "stage_linear_media"]
+    # ui mode only reads the state, to check the user's work on Continue (section 5).
+    assert {n for n, _ in fake2.calls if "rectification" in n or n == "stage_linear_media"} == {
+        "rectification_state"}
 
 
 def paused_web_rectified_run(ws, web):
@@ -1414,12 +1455,273 @@ def test_cancel_undo_deletes_after_the_rectification_timeout(ws, web):
     assert names.count("delete_project") == 1 and names.index("delete_project") > names.index("rectification_state")
 
 
+# ---------------------------------------------------------------- step 3: the floor plan scale
+# installer/plan/AMC-RECTIFICATION-AND-SCALE.md section 4.
+SCALE_WAIT = automation_mod.SCALE_WAIT
+LAYOUT_SHA = hashlib.sha256(PNG).hexdigest()
+NO_SCALE = {**FULLY_AUTOMATED, "parameters": {}}           # no settings_file, scale.source database
+
+
+def scale_posts(fake):
+    return [kw["settings"]["layout_px_per_m"] for kw in calls(fake, "config")]
+
+
+def test_merge_order_is_amc_config_then_settings_file_then_overrides_then_scale(ws):
+    fake = FakeAmc()
+    fake.config = {**DEFAULT_CONFIG, "amc_only": 7, "bundle_adjustment": {"iterations": 5, "tolerance": 1}}
+    overrides = {"detector": "transformer", "bundle_adjustment": {"iterations": 20}, "layout_px_per_m": 3.0}
+    runner, _ = make_runner(ws, {**FULLY_AUTOMATED, "parameters": {"settings_file": "settings.json",
+                                                                   "settings_overrides": overrides}}, fake=fake)
+    assert runner.start(spec())["State"] == "completed"
+    assert calls(fake, "config")[0]["settings"] == {
+        "layout_px_per_m": 100.0, "detector": "transformer", "amc_only": 7,
+        "bundle_adjustment": {"iterations": 20, "tolerance": 1}}
+
+
+@pytest.mark.parametrize("source,fixed,expected,origin", [
+    ("database", 0, 100.0, "the web app's floor plan"),
+    ("fixed", 42, 42.0, "fixed_px_per_m"),
+])
+def test_known_scale_is_posted_and_saved_on_the_job(ws, source, fixed, expected, origin):
+    cfg = {**NO_SCALE, "parameters": {"scale": {"source": source, "fixed_px_per_m": fixed}}}
+    runner, fake = make_runner(ws, cfg)
+    job = runner.start(spec(px_per_m=100.0))
+    assert job["State"] == "completed", job
+    assert f"scale {expected:g} px/m from {origin}" in job["Steps"][2]["Message"]
+    assert scale_posts(fake) == [expected, expected]       # step 3, then step 6 before verifying
+    assert job_file(runner)["layout_px_per_m"] == expected
+    assert "Enter" not in " ".join(s["Message"] for s in job["Steps"])
+
+
+@pytest.mark.parametrize("cfg", [
+    {"scale": {"source": "database"}},
+    {"scale": {"source": "fixed", "fixed_px_per_m": 0}},
+])
+def test_no_scale_posts_the_factory_default_and_waits(ws, cfg):
+    fake = FakeAmc()
+    fake.config["layout_px_per_m"] = 55.0                  # left by another project
+    runner, _ = make_runner(ws, {**NO_SCALE, "parameters": cfg}, fake=fake)
+    job = runner.start(spec(px_per_m=None))
+    assert job["State"] == "waiting_for_user"
+    step = job["Steps"][2]
+    assert step["State"] == "waiting" and step["NeedsUser"] is True and step["Message"] == SCALE_WAIT
+    assert job["UserActions"] == [SCALE_WAIT]
+    assert scale_posts(fake) == [24.22] and fake.config["layout_px_per_m"] == 24.22
+    assert job_file(runner)["layout_px_per_m"] is None
+    assert calls(fake, "calibrate") == []
+
+
+def test_scale_source_none_neither_posts_nor_asks(ws):
+    runner, fake = make_runner(ws, {**NO_SCALE, "parameters": {"scale": {"source": "none"}}})
+    job = runner.start(spec(px_per_m=None))
+    assert job["State"] == "completed", job
+    assert calls(fake, "config") == [] and calls(fake, "get_config") == []   # step 6 re-posts nothing either
+    assert job["Steps"][2]["Message"] == "AMC's current settings"
+
+
+def test_continue_accepts_a_scale_set_in_amc(ws):
+    runner, fake = make_runner(ws, NO_SCALE)
+    assert runner.start(spec(px_per_m=None))["State"] == "waiting_for_user"
+    fake.config["layout_px_per_m"] = 24.2201             # the flagged way to confirm a true 24.22
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert "scale 24.2201 px/m set in AMC" in job["Steps"][2]["Message"]
+    assert job_file(runner)["layout_px_per_m"] == 24.2201
+    assert scale_posts(fake) == [24.22, 24.2201]          # step 6 re-posts the confirmed value
+
+
+@pytest.mark.parametrize("value,reported", [(24.22, "24.22 px/m, the factory default"),
+                                             (0, "no valid value"), (-3, "no valid value")])
+def test_continue_rejects_the_default_or_a_bad_scale(ws, value, reported):
+    runner, fake = make_runner(ws, NO_SCALE)
+    runner.start(spec(px_per_m=None))
+    fake.config["layout_px_per_m"] = value
+    job = runner.resume()
+    assert job["State"] == "waiting_for_user"
+    step = job["Steps"][2]
+    assert step["State"] == "waiting" and step["NeedsUser"] is True
+    assert step["Message"] == f"{SCALE_WAIT}. AMC reports layout_px_per_m {reported}"
+    assert "factory scale 24.22" in step["Done"]
+    assert job_file(runner)["layout_px_per_m"] is None
+    assert calls(fake, "verify_project") == [] and calls(fake, "calibrate") == []
+
+
+def test_step_six_takes_a_correction_made_during_the_pause_then_posts_before_verifying(ws):
+    tmp_path, _ = ws
+    (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")    # pause for Manual Alignment
+    runner, fake = make_runner(ws, NO_SCALE)
+    assert runner.start(spec())["State"] == "waiting_for_user"
+    fake.config["layout_px_per_m"] = 80.0                 # corrected in AMC during the pause
+    fake.ui_alignment_done = True
+    fake.calls.clear()
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    names = [n for n, _ in fake.calls if n in ("get_config", "config", "verify_project", "calibrate")]
+    assert names == ["get_config", "config", "verify_project", "calibrate"]
+    assert scale_posts(fake) == [80.0]
+    assert job_file(runner)["layout_px_per_m"] == 80.0
+    assert "scale corrected in AMC from 100 to 80 px/m" in job["Steps"][5]["Message"]
+
+
+def test_step_six_posts_the_jobs_scale_over_the_default(ws):
+    tmp_path, _ = ws
+    (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")
+    runner, fake = make_runner(ws, NO_SCALE)
+    runner.start(spec())
+    fake.config["layout_px_per_m"] = 24.22                # reset to the default: not a correction
+    fake.ui_alignment_done = True
+    assert runner.resume()["State"] == "completed"
+    assert scale_posts(fake) == [100.0, 100.0]
+    assert job_file(runner)["layout_px_per_m"] == 100.0
+
+
+# ---------------------------------------------------------------- remembered scale (section 4.3)
+def test_confirmed_scale_is_remembered_with_the_layout_hash_and_reused(ws, web):
+    store, folder, fake = web
+    amc_saved_alignment(ws)
+    runner = web_runner(ws, web)
+    job = runner.start(spec(px_per_m=None))
+    assert job["State"] == "waiting_for_user" and job["UserActions"] == [SCALE_WAIT]
+    assert job_file(runner)["layout_sha256"] == LAYOUT_SHA
+    fake.config["layout_px_per_m"] = 61.5
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert "remembered for this floor plan" in job["Steps"][2]["Message"]
+    b = store.get_by_folder("living-room")
+    assert (b.layout_px_per_m, b.layout_sha256) == (61.5, LAYOUT_SHA)
+
+    fake.config["layout_px_per_m"] = 24.22
+    job = runner.start(spec(px_per_m=None))                # the same floor plan: no question
+    assert job["State"] == "completed", job
+    assert "scale 61.5 px/m from remembered for this floor plan" in job["Steps"][2]["Message"]
+    assert fake.config["layout_px_per_m"] == 61.5
+
+
+def test_remembered_scale_is_not_used_for_another_floor_plan(ws, web):
+    store, _, fake = web
+    amc_saved_alignment(ws)
+    store.update("living-room", layout_px_per_m=61.5, layout_sha256="0" * 64)
+    job = web_runner(ws, web).start(spec(px_per_m=None))
+    assert job["State"] == "waiting_for_user" and job["UserActions"] == [SCALE_WAIT]
+    assert fake.config["layout_px_per_m"] == 24.22
+
+
+def test_database_scale_wins_over_the_remembered_one(ws, web):
+    store, _, fake = web
+    amc_saved_alignment(ws)
+    store.update("living-room", layout_px_per_m=61.5, layout_sha256=LAYOUT_SHA)
+    job = web_runner(ws, web).start(spec(px_per_m=90.0))
+    assert job["State"] == "completed"
+    assert scale_posts(fake)[0] == 90.0
+    assert store.get_by_folder("living-room").layout_px_per_m == 61.5   # a database scale is not written
+
+
+def test_no_uploaded_layout_means_no_remembered_scale_is_used_or_written(ws, web):
+    store, _, fake = web
+    amc_saved_alignment(ws)
+    store.update("living-room", layout_px_per_m=61.5, layout_sha256=LAYOUT_SHA)
+    runner = web_runner(ws, web, {**WEB, "layout": {"enabled": False}})
+    job = runner.start(spec(px_per_m=None))
+    assert job["State"] == "waiting_for_user" and SCALE_WAIT in job["UserActions"]
+    assert job_file(runner)["layout_sha256"] == ""
+    store.update("living-room", layout_px_per_m=None, layout_sha256=None)
+    fake.projects[WEB_AMC_ID]["layout"] = PNG              # the user uploads it in AMC
+    fake.config["layout_px_per_m"] = 70.0
+    job = runner.resume()
+    assert job["State"] == "completed", job
+    assert "not remembered: this run uploaded no layout.png" in job["Steps"][2]["Message"]
+    b = store.get_by_folder("living-room")
+    assert b.layout_px_per_m is None and b.layout_sha256 is None
+    assert job_file(runner)["layout_px_per_m"] == 70.0
+
+
+def test_step_six_correction_is_remembered(ws, web):
+    store, _, fake = web
+    runner = web_runner(ws, web)                           # no alignment: pauses for step 5
+    assert runner.start(spec())["State"] == "waiting_for_user"
+    fake.config["layout_px_per_m"] = 88.0
+    fake.ui_alignment_done = True
+    assert runner.resume()["State"] == "completed"
+    b = store.get_by_folder("living-room")
+    assert (b.layout_px_per_m, b.layout_sha256) == (88.0, LAYOUT_SHA)
+
+
+def test_cancel_undo_keeps_the_remembered_scale(ws, web):
+    store, _, fake = web
+    runner = web_runner(ws, web)
+    assert runner.start(spec(px_per_m=None))["State"] == "waiting_for_user"
+    fake.config["layout_px_per_m"] = 61.5
+    job = runner.resume()                                  # scale confirmed; still waits for step 5
+    assert job["State"] == "waiting_for_user" and job["Steps"][2]["State"] == "done"
+    assert runner.cancel()["State"] == "cancelled"
+    b = store.get_by_folder("living-room")
+    assert b.amc_project_id == NEW_AMC_ID
+    assert (b.layout_px_per_m, b.layout_sha256) == (61.5, LAYOUT_SHA)
+
+
+# ---------------------------------------------------------------- checked resume (section 5)
+def test_ui_rectification_stays_waiting_until_amc_reports_completed(ws):
+    runner, fake = make_runner(ws, {**FULLY_AUTOMATED, "rectification": {"mode": "ui"}})
+    runner.start(spec())
+    amc_project(fake)["rect_state"] = "READY_FOR_REVIEW"
+    job = runner.resume()
+    assert job["State"] == "waiting_for_user"
+    assert job["Steps"][3]["State"] == "waiting"
+    assert job["Steps"][3]["Message"].endswith("AMC reports READY_FOR_REVIEW")
+    assert calls(fake, "upload_alignment") == []
+
+
+def test_manual_alignment_stays_waiting_until_amc_has_the_file(ws):
+    tmp_path, _ = ws
+    (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    assert runner.start(spec())["State"] == "waiting_for_user"
+    job = runner.resume()
+    assert job["State"] == "waiting_for_user" and job["Steps"][4]["State"] == "waiting"
+    assert job["UserActions"] == [job["Steps"][4]["Message"]]
+    assert job["Steps"][4]["Message"].endswith("AMC reports no saved alignment yet")
+    assert "(unfinished: step 5 Manual Alignment)" in job["Message"]
+    assert calls(fake, "verify_project") == []
+    amc_project(fake)["alignment"] = [[[1, 1]]]            # saved in AMC's UI
+    assert runner.resume()["State"] == "completed"
+
+
+def test_a_step_that_waited_for_the_run_is_not_checked_on_continue(ws):
+    tmp_path, _ = ws
+    (tmp_path / "auto-magic-calib").rename(tmp_path / "moved")
+    runner, fake = make_runner(ws, FULLY_AUTOMATED)
+    runner.start(spec())
+    state = job_file(runner)
+    state["steps"][4]["NeedsUser"] = False                 # step 5 waited only for rectification
+    runner.state_path.write_text(json.dumps(state))
+    runner2, _ = make_runner(ws, FULLY_AUTOMATED, fake=fake)
+    job = runner2.resume()
+    step = job["Steps"][4]
+    assert step["State"] == "waiting" and step["NeedsUser"] is True
+    assert "AMC reports" not in step["Message"]            # a first pass asks the user to align
+
+
+def test_job_file_without_the_scale_fields_still_loads(ws):
+    runner, fake = make_runner(ws, NO_SCALE)
+    job = runner.start(spec(px_per_m=None))
+    state = job_file(runner)
+    del state["layout_sha256"], state["layout_px_per_m"]
+    runner.state_path.write_text(json.dumps(state))
+    runner2, _ = make_runner(ws, NO_SCALE, fake=fake)
+    assert runner2.status()["JobId"] == job["JobId"]
+    assert runner2._job.layout_sha256 == "" and runner2._job.layout_px_per_m is None
+    fake.config["layout_px_per_m"] = 50.0
+    assert runner2.resume()["State"] == "completed"
+
+
 @pytest.mark.parametrize("mode", ["auto", "linear"])
 def test_auto_and_linear_run_on_continue_instead_of_counting_as_finished_in_amc(ws, mode):
     runner, fake = make_runner(ws, {**AUTO, "rectification": {"mode": mode}})
     job = runner.start(spec(floorplan=False))        # step 2 waits for the layout, so step 4 waits too
     assert job["Steps"][3]["State"] == "waiting"
     fake.ui_alignment_done = True                    # the user uploads the layout in AMC
+    amc_project(fake)["layout"] = PNG
+    fake.config["layout_px_per_m"] = 50.0            # and sets the floor plan scale
     job = runner.resume()
     assert job["State"] == "completed", job
     if mode == "auto":
@@ -1460,10 +1762,13 @@ def test_alignment_waits_for_rectification_then_asks_for_the_new_footage(ws):
     assert job["Steps"][3]["State"] == "waiting"
     assert align["State"] == "waiting" and align["NeedsUser"] is False
     assert align["Message"] == "Manual Alignment comes after rectification"
-    assert len(job["UserActions"]) == 1 and job["UserActions"][0].startswith("Upload layout.png")
+    assert job["UserActions"][0].startswith("Upload layout.png") and job["UserActions"][1] == SCALE_WAIT
+    assert len(job["UserActions"]) == 2
 
     amc_project(fake)["alignment"] = [[[0, 0]]]   # stale: from footage before this run
     fake.ui_alignment_done = True                  # the layout is uploaded in AMC
+    amc_project(fake)["layout"] = PNG
+    fake.config["layout_px_per_m"] = 50.0
     job = runner.resume()
     assert job["State"] == "waiting_for_user"
     assert job["Steps"][3]["State"] == "done"

@@ -54,9 +54,16 @@ class LayoutSection(_Strict):
 
 
 class ScaleSection(_Strict):
+    """The floor plan scale (installer/plan/AMC-RECTIFICATION-AND-SCALE.md section 4).
+
+    database: the web app's floor plan scale, else (web_project) the scale remembered
+    for the same layout.png; fixed: fixed_px_per_m; none: never posted nor asked for.
+    With no scale the run waits for the user to set it in AMC's Parameters step.
+    settings_key is the (dotted) key inside AMC's configuration that holds the scale.
+    """
     source: Literal["database", "fixed", "none"] = "database"
     fixed_px_per_m: float = Field(0, ge=0)
-    settings_key: str = "layout_px_per_m"
+    settings_key: str = Field("layout_px_per_m", min_length=1)
 
 
 class ParametersSection(_Strict):

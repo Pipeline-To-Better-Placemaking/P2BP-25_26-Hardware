@@ -380,6 +380,7 @@ def test_continue_after_a_restart_does_not_record_again(recorder, web):
     assert runner2.status()["JobId"] == job["JobId"]
     assert runner2._job.record_seconds == 60 and runner2._job.footage_recorded is True
     fake.projects[WEB_AMC_ID]["layout"] = PNG
+    fake.config["layout_px_per_m"] = 50.0                                # the user sets the scale in AMC
     assert runner2.resume()["State"] == "completed"
     assert len(recorder.seen()) == 1
     assert len(calls(fake, "upload_video_files")) == 1
@@ -415,6 +416,7 @@ def test_state_file_from_before_recording_still_loads(recorder, web):
     assert runner2.status()["JobId"] == job["JobId"]
     assert runner2._job.record_seconds == 0 and runner2._job.footage_recorded is False
     fake.projects[WEB_AMC_ID]["layout"] = PNG
+    fake.config["layout_px_per_m"] = 50.0
     assert runner2.resume()["State"] == "completed"
     assert recorder.seen() == []
 

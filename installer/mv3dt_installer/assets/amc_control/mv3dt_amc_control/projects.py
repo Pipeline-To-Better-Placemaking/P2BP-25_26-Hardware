@@ -14,8 +14,10 @@ Deleting a project renames its folder to a dot-prefixed name in one
 a project (the folder rule rejects a leading dot), then removes that tree.
 
 Pure stdlib, no web framework: the API and the automation both read this.
-See installer/plan/AMC-WEB-PROJECTS.md sections 3, 4 and 7, and
-AMC-PROJECT-LIFECYCLE.md sections 3 and 4.
+See installer/plan/AMC-WEB-PROJECTS.md sections 3, 4 and 7,
+AMC-PROJECT-LIFECYCLE.md sections 3 and 4, and AMC-RECTIFICATION-AND-SCALE.md
+section 4.3 (the optional LayoutPxPerM and LayoutSha256 keys, null when an
+older project.json lacks them).
 
 Environment:
   AMC_PROJECTS_DIR   projects root, default <MV3DT_INSTALL_DIR>/amc_projects
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import posixpath
 import re
@@ -116,7 +119,12 @@ _KEYS = {
     "UpdatedAt": "updated_at",
     "LastRunAt": "last_run_at",
     "CalibRuns": "calib_runs",
+    "LayoutPxPerM": "layout_px_per_m",
+    "LayoutSha256": "layout_sha256",
 }
+# Keys an older project.json may lack; they read as null (AMC-RECTIFICATION-AND-SCALE.md section 4.3).
+_OPTIONAL = ("LayoutPxPerM", "LayoutSha256")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IMMUTABLE = ("project_id", "folder", "created_at")
 
 
@@ -133,6 +141,10 @@ class Binding:
     updated_at: int
     last_run_at: int | None
     calib_runs: int
+    # The remembered floor plan scale and the SHA-256 of the layout.png it was confirmed
+    # for, written together (AMC-RECTIFICATION-AND-SCALE.md section 4.3).
+    layout_px_per_m: float | None = None
+    layout_sha256: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"schema_version": SCHEMA_VERSION}
@@ -151,7 +163,7 @@ class Binding:
         if type(version) is not int or version != SCHEMA_VERSION:  # True == 1
             raise ValueError("not a version 1 binding")
         try:
-            b = cls(**{a: data[k] for k, a in _KEYS.items()})
+            b = cls(**{a: data.get(k) if k in _OPTIONAL else data[k] for k, a in _KEYS.items()})
         except KeyError as e:
             raise ValueError(f"binding is missing {e}") from e
         b._check()
@@ -170,7 +182,12 @@ class Binding:
               and isinstance(self.error, str)
               and is_int(self.created_at) and is_int(self.updated_at)
               and (self.last_run_at is None or is_int(self.last_run_at))
-              and is_int(self.calib_runs) and self.calib_runs >= 0)
+              and is_int(self.calib_runs) and self.calib_runs >= 0
+              and (self.layout_px_per_m is None
+                   or (isinstance(self.layout_px_per_m, (int, float)) and not isinstance(self.layout_px_per_m, bool)
+                       and math.isfinite(self.layout_px_per_m) and self.layout_px_per_m > 0))
+              and (self.layout_sha256 is None
+                   or (isinstance(self.layout_sha256, str) and SHA256_RE.fullmatch(self.layout_sha256))))
         if not ok:
             raise ValueError("binding has a field of the wrong type")
 
