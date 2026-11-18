@@ -23,7 +23,7 @@ from amc_control_fake_api import DEFAULT_CONFIG, FakeAmc  # noqa: E402
 from mv3dt_amc_control import automation as automation_mod  # noqa: E402
 from mv3dt_amc_control.api import create_app  # noqa: E402
 from mv3dt_amc_control.automation import CalibrationRunner  # noqa: E402
-from mv3dt_amc_control.automation_config import ConfigError, load_config  # noqa: E402
+from mv3dt_amc_control.automation_config import CalibrationSection, ConfigError, load_config  # noqa: E402
 from mv3dt_amc_control.calibration_spec import SPEC_SCOPE, SpecError, verify_spec  # noqa: E402
 from mv3dt_amc_control.projects import STATE_FAILED, STATE_READY, ProjectStore  # noqa: E402
 from mv3dt_amc_control.settings import Settings  # noqa: E402
@@ -353,6 +353,7 @@ def test_amc_calibration_error_reports_the_log(ws):
 
 # ---------------------------------------------------------------- step 6: AMC's calibration states
 INSTALLER_AMC_ID = "20261019_151133_2885"
+DETECTOR = CalibrationSection().detector_type     # the run's detector: these configs leave the default
 SLOW_POLLS = {**FULLY_AUTOMATED, "calibration": {"poll_seconds": 1, "timeout_seconds": 3}}
 
 
@@ -367,7 +368,7 @@ def test_calibration_finishes_on_amc_state_completed_with_project_state_back_to_
     assert job["State"] == "completed", job
     assert calibration_reads(fake)[-1] == ("READY", "COMPLETED")
     assert ("RUNNING", "RUNNING") in calibration_reads(fake)
-    assert job["Steps"][5]["Message"].startswith("calibrated with resnet in about 0 min; scale 100 px/m")
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR} in about 0 min; scale 100 px/m")
     assert job_file(runner)["calibration_started"] is True
 
 
@@ -380,7 +381,7 @@ def test_stale_completed_from_an_earlier_calibration_does_not_finish_step_6(ws):
     reads = calibration_reads(fake)
     first = reads.index(("RUNNING", "RUNNING"))
     assert reads[first - 3:first] == [("READY", "COMPLETED")] * 3   # all polled through
-    assert calls(fake, "calibrate") == [{"detector_type": "resnet"}]
+    assert calls(fake, "calibrate") == [{"detector_type": DETECTOR}]
 
 
 def test_stale_completed_beyond_the_lag_window_finishes_the_step(ws):
@@ -457,7 +458,7 @@ def test_continue_after_a_restart_while_amc_still_calibrates_polls_without_a_sec
     assert job["State"] == "completed", job
     assert len(calls(fake, "calibrate")) == 1
     assert len(calls(fake, "verify_project")) == 1
-    assert job["Steps"][5]["Message"].startswith("calibrated with resnet")
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR}")
 
 
 def test_continue_after_amc_finished_unwatched_is_done_without_a_post(ws):
@@ -485,7 +486,7 @@ def test_continue_after_a_refused_calibrate_post_recalibrates_a_reused_project(w
     job = runner.resume()
     assert job["State"] == "completed", job
     assert len(calls(fake, "calibrate_refused")) == 1 and len(calls(fake, "calibrate")) == 1
-    assert job["Steps"][5]["Message"].startswith("calibrated with resnet")
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR}")
     assert ("RUNNING", "RUNNING") in calibration_reads(fake)    # the result is the new calibration
 
 
@@ -497,7 +498,7 @@ def test_restart_between_saving_and_posting_calibrate_recalibrates(ws):
     job = interrupt_at_step_6(ws, fake, calibration_started=True, calibration_posted=False).resume()
     assert job["State"] == "completed", job
     assert len(calls(fake, "calibrate")) == 2 and len(calls(fake, "verify_project")) == 2
-    assert job["Steps"][5]["Message"].startswith("calibrated with resnet")
+    assert job["Steps"][5]["Message"].startswith(f"calibrated with {DETECTOR}")
 
 
 def test_continue_after_a_failed_calibration_calibrates_again(ws):
