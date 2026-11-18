@@ -187,7 +187,7 @@ alignment:
 
 # AMC step 6: Execute Calibration
 calibration:
-  detector_type: resnet        # resnet (faster) or transformer (better under occlusion)
+  detector_type: transformer   # transformer (default; better under occlusion) or resnet (faster)
   poll_seconds: 10
   timeout_seconds: 5400
 
