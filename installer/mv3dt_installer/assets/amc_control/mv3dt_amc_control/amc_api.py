@@ -110,7 +110,25 @@ class AmcApi:
                                 timeout=self.upload_timeout)
         self._check(r, "upload_video_files")
 
+    def _config_params(self, path: str, label: str, bare_ok: bool = False) -> dict:
+        r = self._check(self._http.get(self._url(path), timeout=self.timeout), label)
+        body = self._json(r, label)
+        params = body.get("config_params", body if bare_ok else None)
+        if not isinstance(params, dict):
+            raise AmcApiError(f"{label} reply has no config_params object")
+        return params
+
+    def get_config(self) -> dict:
+        """AMC's one current configuration (ConfigParams); AMC 3.3.0 keeps no per-project copy."""
+        return self._config_params("config", "get config")
+
+    def get_default_config(self) -> dict:
+        """AMC's factory configuration (layout_px_per_m 24.22 in AMC 3.3.0)."""
+        return self._config_params("config/defaults", "get default config", bare_ok=True)
+
     def post_config(self, project_id: str, settings: dict) -> None:
+        """Replace AMC's current configuration. ConfigParams allows no extra keys, so
+        `settings` must be a whole object: build it on get_config()."""
         self._check(self._http.post(self._url(f"config/{project_id}"), json=settings, timeout=self.timeout),
                     "config")
 

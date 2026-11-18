@@ -3,16 +3,25 @@ amc-run-video-calibration skill. It records every call so tests can check what
 the runner sent. The /v1/rectification and /v1/linear_media routes follow AMC
 3.3.0's own API description; /v1/test_rectify is invented for the generic
 rectification.mode api, whose requests are configured, not hard-coded.
+
+Like AMC 3.3.0, the fake keeps one current configuration for all projects
+(GET /v1/config), which POST /v1/config/{id} replaces whole, and serves the
+factory values at GET /v1/config/defaults.
 """
 from __future__ import annotations
 
 import io
 import json
 import zipfile
+import copy
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import PlainTextResponse, Response
+
+
+# A cut-down AMC ConfigParams; layout_px_per_m is AMC 3.3.0's factory value.
+DEFAULT_CONFIG = {"layout_px_per_m": 24.22, "detector": "resnet", "bundle_adjustment": {"iterations": 5}}
 
 
 @dataclass
@@ -40,6 +49,8 @@ class FakeAmc:
         {"camera_id": 0, "committed": None, "auto_estimate": {"model": "simple_radial", "k1": -0.12, "k2": None}},
         {"camera_id": 1, "committed": None, "auto_estimate": {"model": "simple_divisional", "k1": -0.3, "k2": 0.01}},
     ])
+    # AMC's one current configuration, starting at the factory values.
+    config: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_CONFIG))
 
     def add_project(self, pid: str, name: str = "Existing") -> None:
         self.projects[pid] = {"name": name, "state": "COMPLETED", "videos": [], "layout": None,
@@ -78,8 +89,11 @@ class FakeAmc:
                 p["polls"] += 1
                 if p["polls"] > fake.running_polls:
                     p["state"] = "ERROR" if fake.fail_calibration else "COMPLETED"
-            return {"code": 0, "project_info": {"project_state": p["state"], "project_name": p["name"],
-                                                "vggt_state": "INIT", "video_files_count": len(p["videos"])}}
+            return {"code": 0, "project_info": {
+                "project_state": p["state"], "project_name": p["name"], "vggt_state": "INIT",
+                "video_files_count": len(p["videos"]), "layout_file": p["layout"] is not None,
+                "alignment_file": p["alignment"] is not None or fake.ui_alignment_done,
+                "rectification_state": p["rect_state"]}}
 
         @app.post("/v1/upload_video_files/{pid}")
         async def upload_video_files(pid: str, files: list[UploadFile] = File(...)):
@@ -88,10 +102,22 @@ class FakeAmc:
             log("upload_video_files", names=[f.filename for f in files])
             return {"code": 0}
 
+        @app.get("/v1/config")
+        def get_config():
+            log("get_config")
+            return {"code": 0, "config_params": copy.deepcopy(fake.config)}
+
+        @app.get("/v1/config/defaults")
+        def get_default_config():
+            log("get_default_config")
+            return {"code": 0, "config_params": copy.deepcopy(DEFAULT_CONFIG)}
+
         @app.post("/v1/config/{pid}")
         async def config(pid: str, request: Request):
-            project(pid)["config"] = await request.json()
-            log("config", settings=project(pid)["config"])
+            body = await request.json()
+            project(pid)["config"] = body
+            fake.config = copy.deepcopy(body)   # AMC keeps one current config, replaced whole
+            log("config", settings=body)
             return {"code": 0}
 
         @app.post("/v1/upload_layout/{pid}")

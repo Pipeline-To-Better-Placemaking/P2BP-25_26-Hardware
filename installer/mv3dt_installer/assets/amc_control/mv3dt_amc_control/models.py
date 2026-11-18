@@ -72,6 +72,10 @@ class ProjectBinding(BaseModel):
     UpdatedAt: int
     LastRunAt: int | None = None
     CalibRuns: int = 0
+    LayoutPxPerM: float | None = Field(
+        default=None, description="The remembered floor plan scale in px/m, confirmed in AMC; null when none")
+    LayoutSha256: str | None = Field(
+        default=None, description="SHA-256 of the layout.png LayoutPxPerM was confirmed for")
     Path: str = Field(description="The folder's absolute path on the workstation")
 
 

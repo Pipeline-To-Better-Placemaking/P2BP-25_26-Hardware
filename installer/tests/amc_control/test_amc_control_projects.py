@@ -102,7 +102,7 @@ def test_create_lays_out_folder_and_binding(store):
         "schema_version": 1, "ProjectId": "pid-1", "Folder": "kevin-living-room",
         "Title": "Kevin Living Room", "AmcProjectId": None, "AmcProjectName": None,
         "State": "provisioning", "Error": "", "CreatedAt": NOW, "UpdatedAt": NOW,
-        "LastRunAt": None, "CalibRuns": 0,
+        "LastRunAt": None, "CalibRuns": 0, "LayoutPxPerM": None, "LayoutSha256": None,
     }
 
 
@@ -524,3 +524,42 @@ def test_dot_prefixed_entries_are_never_projects(store):
     assert store.get_by_folder(".lab") is None
     with pytest.raises(FileNotFoundError):
         store.list_files(".lab")
+
+
+# --- remembered scale (AMC-RECTIFICATION-AND-SCALE.md section 4.3) ---------------
+
+SHA = "ab" * 32
+
+
+def test_binding_without_the_scale_keys_still_loads(store):
+    store.create("p1", "lab", "Lab")
+    path = store.folder_path("lab") / "project.json"
+    data = json.loads(path.read_text())
+    del data["LayoutPxPerM"], data["LayoutSha256"]
+    path.write_text(json.dumps(data))
+    b = store.get_by_folder("lab")
+    assert b is not None and b.layout_px_per_m is None and b.layout_sha256 is None
+    assert json.loads(path.read_text())["schema_version"] == 1
+
+
+def test_scale_keys_round_trip_and_reach_the_wire(store):
+    store.create("p1", "lab", "Lab")
+    store.update("lab", layout_px_per_m=61.5, layout_sha256=SHA)
+    on_disk = json.loads((store.folder_path("lab") / "project.json").read_text())
+    assert on_disk["schema_version"] == 1
+    assert (on_disk["LayoutPxPerM"], on_disk["LayoutSha256"]) == (61.5, SHA)
+    b = store.get_by_folder("lab")
+    assert (b.layout_px_per_m, b.layout_sha256) == (61.5, SHA)
+    wire = b.to_wire(store.folder_path("lab"))
+    assert (wire["LayoutPxPerM"], wire["LayoutSha256"]) == (61.5, SHA)
+    # Other updates (the cancel undo's new AMC project, for one) keep the remembered scale.
+    b = store.update("lab", amc_project_id="2026", state=P.STATE_READY)
+    assert (b.layout_px_per_m, b.layout_sha256) == (61.5, SHA)
+
+
+@pytest.mark.parametrize("px,sha", [(0, SHA), (-1.0, SHA), (True, SHA), ("61.5", SHA), (float("inf"), SHA),
+                                    (61.5, "short"), (61.5, "AB" * 32), (61.5, 5)])
+def test_bad_scale_values_are_rejected(store, px, sha):
+    store.create("p1", "lab", "Lab")
+    with pytest.raises(ValueError):
+        store.update("lab", layout_px_per_m=px, layout_sha256=sha)

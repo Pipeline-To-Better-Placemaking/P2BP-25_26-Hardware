@@ -83,27 +83,49 @@ layout:
 # AMC step 3: Parameters
 parameters:
   enabled: true
+  # AMC keeps one current configuration (GET /v1/config), not one per project,
+  # and POST /v1/config/{id} replaces all of it. So every post is built in
+  # this order, each layer replacing the keys it names: AMC's current
+  # configuration, then settings_file, then settings_overrides, then
+  # scale.settings_key set to the scale. A config is posted even without a
+  # settings_file (unless scale.source is none and there is nothing to merge).
+  #
   # A settings JSON exported with the Download button on AMC's Parameters
-  # step. Posted to /v1/config as-is, which replaces UI step 3. Empty keeps
-  # AMC's defaults. Relative paths are relative to the override file's folder.
+  # step. Empty keeps AMC's current settings. Relative paths are relative to
+  # the override file's folder.
   settings_file: ""
-  # Changes merged into settings_file before it is posted, so you can switch a
-  # setting without editing the exported file. Requires settings_file, because
-  # posting a partial settings file could reset the rest.
-  # Example (key names must match your exported file):
+  # Changes merged in after settings_file, so you can switch a setting without
+  # editing the exported file. Works without a settings_file too: it is merged
+  # into AMC's current configuration.
+  # Example (key names must match AMC's configuration):
   #   settings_overrides:
   #     detector: transformer
   settings_overrides: {}
+  # The floor plan scale, in layout pixels per metre. The first source that
+  # has one wins:
+  #   database: the floor plan's scale from the web app (1000 / MmPerPixel);
+  #     otherwise, in project.mode web_project, the scale remembered in the
+  #     folder's project.json, used only when this run uploaded the same
+  #     layout.png (same SHA-256), so a new floor plan asks again.
+  #   fixed: fixed_px_per_m.
+  #   none: the run neither posts nor asks for a scale, and step 6 does not
+  #     re-post one; you manage it in AMC yourself.
+  # With no scale (database without one) the run posts AMC's factory value
+  # (24.22) and waits: set the scale in AMC's Parameters step (measure two
+  # points on the floor plan, or enter its pixels per metre), Save, then
+  # press Continue. Continue accepts only a positive value that is not the
+  # factory default; the run then remembers it with the layout's hash. A
+  # floor plan whose true scale is exactly 24.22 cannot be confirmed: enter
+  # 24.2201. Before calibrating, step 6 reads AMC's configuration again: a
+  # different, non-default value set there during the pause replaces (and is
+  # remembered as) the run's scale, which is then posted.
+  # Cancelling a web_project run keeps the remembered scale.
   scale:
-    # database: layout pixels per metre from the floor plan's scale
-    #   calibration (1000 / MmPerPixel).
-    # fixed: use fixed_px_per_m.
-    # none: leave the scale to AMC's UI.
     source: database
     fixed_px_per_m: 0
-    # Where the scale goes inside settings_file. AMC's README calls the value
-    # layout_px_per_m; confirm the key in your exported file. Without a
-    # settings_file the value is shown to the user to enter in the UI.
+    # The key inside AMC's configuration that holds the scale (dotted for a
+    # nested key). AMC 3.3.0 calls it layout_px_per_m. A key AMC's
+    # configuration does not have fails step 3.
     settings_key: layout_px_per_m
   # One focal length per camera, in pixels, or empty to let AMC estimate them.
   focal_lengths: []
@@ -125,7 +147,8 @@ rectification:
   #   (POST /v1/linear_media/{id}) and wait for COMPLETED.
   # Cancelling a web_project run waits while a rectification is RUNNING (up to
   # api.timeout_seconds), since AMC cannot stop one, then deletes the project.
-  # ui: pause with the manual step so the user runs it in AMC's UI.
+  # ui: pause with the manual step so the user runs it in AMC's UI; Continue
+  #   counts it done only once AMC reports the rectification COMPLETED.
   # api: run it with the generic requests below.
   # skip: the project is already rectified.
   mode: auto
@@ -155,7 +178,8 @@ alignment:
   # example after recalibrating the same cameras. "auto" looks for the one AMC
   # saved for the installer's project under
   # <AMC_ROOT>/projects/project_<AMC_PROJECT_ID>/manual_adjustment/.
-  # Empty always asks for the manual step.
+  # Empty always asks for the manual step; Continue counts it done only once
+  # AMC reports a saved alignment file.
   file: auto
   # Files saved by AMC's alignment tool are in rectified pixels. Use original
   # only for points picked on the raw, distorted video.

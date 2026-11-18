@@ -3,18 +3,41 @@
     1 Project Setup        automated: reuse the installer's AMC project, create one, or use
                            the web project's bound AMC project (mode web_project)
     2 Video Configuration  automated: installer footage as cam_00.mp4..., floor plan as layout.png
-    3 Parameters           automated: settings file, scale from the floor plan, focal lengths
+    3 Parameters           automated: AMC's current configuration with the settings file and
+                           overrides merged in, the floor plan scale, focal lengths; with no
+                           known scale the run waits for the user to set it in AMC
     4 Rectification        automated once the videos are in AMC: AMC's auto estimate committed
                            as its UI does (mode auto), or footage that is already linear staged
                            as is (mode linear); mode ui leaves it to the UI
     5 Manual Alignment     manual the first time; a saved alignment file is re-uploaded after that
-    6 Execute Calibration  automated: verify the project is READY, calibrate, wait
+    6 Execute Calibration  automated: re-post the run's scale, verify the project is READY,
+                           calibrate, wait
     7 Results              automated: evaluation statistics, optional result ZIP download
 
 Every step that needs a person is marked "waiting". Steps 1-5 all run first,
 so everything that can be uploaded is uploaded; the run then pauses before
 step 6 until the user presses Continue. Progress is saved to disk after every
 change, so a run can be continued after the service restarts.
+
+The floor plan scale (installer/plan/AMC-RECTIFICATION-AND-SCALE.md section 4):
+AMC keeps one current configuration, so every config post is the whole object,
+built from GET /v1/config, then settings_file, then settings_overrides, then
+parameters.scale.settings_key set to the scale. The scale comes from
+parameters.scale.source: the web app's floor plan, else (web_project) the
+scale remembered in project.json for the same layout.png hash; or
+fixed_px_per_m; or none, which neither posts nor asks for one. With no scale
+the run posts AMC's factory value and waits for the user to set the scale in
+AMC's Parameters step; Continue accepts only a positive value that is not the
+factory default, saves it on the job and remembers it with the hash of the
+layout this run uploaded. Step 6 reads AMC's configuration first, takes a
+correction made during the pause, re-posts the job's scale, then verifies.
+
+Continue never takes a step left to the user on trust (section 5): step 2 needs
+get_project_info's video_files_count of at least 1 and layout_file, step 3 a
+confirmed scale, step 4 in mode ui a COMPLETED rectification, and step 5
+alignment_file. A step AMC does not confirm stays waiting with what AMC
+reports, the other steps are still checked, and the run pauses again listing
+every unfinished step.
 
 In project.mode web_project a run is locked to the web project's workstation
 folder and its AMC project (installer/plan/AMC-WEB-PROJECTS.md section 6):
@@ -31,7 +54,8 @@ Only the run's first pass records; Continue never records again.
 Cancelling a web_project run undoes it (installer/plan/AMC-PROJECT-LIFECYCLE.md
 section 5): the AMC project is replaced by a new, empty one, footage the run
 recorded is deleted and the earlier footage moved back, and the run's
-calibration/<UTC> folder is removed. Each finished undo action is saved, so an
+calibration/<UTC> folder is removed. The remembered scale in project.json is
+kept: it describes the floor plan, not the run. Each finished undo action is saved, so an
 undo cut off by a service restart carries on without repeating any of them.
 AMC cannot stop a rectification, so the undo first waits while one is RUNNING
 (up to rectification.api.timeout_seconds), then deletes the project either way
@@ -39,7 +63,9 @@ AMC cannot stop a rectification, so the undo first waits while one is RUNNING
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import queue
 import shutil
@@ -57,7 +83,7 @@ import httpx
 
 from .controller import _read_conf
 from .amc_api import AmcApi, AmcApiError, default_base_url
-from .automation_config import AutomationConfig, ConfigError, load_config
+from .automation_config import AutomationConfig, ConfigError, deep_merge, load_config
 from .calibration_spec import CalibrationSpec, SpecError, download_floorplan_png
 from .projects import STATE_FAILED, STATE_READY, ProjectNotFound, ProjectStore, default_projects_root
 
@@ -89,6 +115,11 @@ RECORD_CANCEL_GRACE_SECONDS = 60.0
 # The recorder is cancelled once it runs this much longer than the recording.
 RECORD_OVERRUN_SECONDS = 180.0
 STDERR_TAIL_LINES = 10
+# Step 3 (AMC-RECTIFICATION-AND-SCALE.md section 4.2).
+SCALE_WAIT = ("Set the floor plan scale in AMC's Parameters step: measure two points on the floor plan, "
+              "or enter its pixels per metre, then Save and press Continue")
+# AMC 3.3.0's factory layout_px_per_m, used only when GET /v1/config/defaults lacks the key.
+FACTORY_LAYOUT_PX_PER_M = 24.22
 # The recorder's manifest in footage/ (AMC-FOOTAGE-RECORDING.md section 5).
 FOOTAGE_MANIFEST = ".mv3dt-footage.json"
 CANCELLING_MESSAGE = "Cancelling: undoing this run"
@@ -218,6 +249,11 @@ class Job:
     # (estimate, generate or linear), so a resumed run picks up the right wait.
     rectification_started: bool = False
     rectification_phase: str = ""
+    # The floor plan scale (AMC-RECTIFICATION-AND-SCALE.md section 4): the SHA-256 of the
+    # layout.png step 2 uploaded ("" when this run uploaded none), saved before the upload,
+    # and the scale step 3 posted or the user confirmed in AMC (None until there is one).
+    layout_sha256: str = ""
+    layout_px_per_m: float | None = None
     # The clips the recorder reported (its final line's files), saved with footage_recorded.
     recorded_files: list[str] = field(default_factory=list)
     # The calibration/<UTC> folder name step 7 writes, saved before it is created.
@@ -276,6 +312,18 @@ def _rectification_params(camera: dict) -> tuple[dict, bool]:
 
 def _num(v: Any) -> str:
     return f"{v:.4g}" if isinstance(v, (int, float)) else str(v)
+
+
+def _scale_value(config: Any, key: str) -> float | None:
+    """The positive, finite number at `key` in an AMC configuration, else None."""
+    v = _dig(config, key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        return None
+    return float(v)
+
+
+def _same_scale(a: float, b: float) -> bool:
+    return abs(a - b) < 1e-9
 
 
 def _plain_name(name: Any) -> bool:
@@ -824,8 +872,7 @@ class CalibrationRunner:
                 if was_waiting and not resuming:
                     continue
                 if key in GATED and any(s["State"] == "waiting" for s in job.steps if s["Key"] != key):
-                    self._finish("waiting_for_user",
-                                 "Waiting for the manual steps in AMC. Press Continue when they are saved.")
+                    self._finish("waiting_for_user", self._pause_message())
                     return
                 self._check_cancel()
                 resumed = was_waiting and resuming
@@ -842,8 +889,7 @@ class CalibrationRunner:
             for s in job.steps:
                 if s["State"] == "running":
                     s["State"], s["Message"] = "pending", ""
-            self._finish("waiting_for_user",
-                         "Waiting for the manual steps in AMC. Press Continue when they are saved.")
+            self._finish("waiting_for_user", self._pause_message())
         except _Cancelled:
             for s in job.steps:
                 if s["State"] == "running":
@@ -877,8 +923,19 @@ class CalibrationRunner:
                 self._save()
 
     def _finished_in_amc(self, key: str) -> Outcome:
+        """Done after Continue; called only once AMC has confirmed the step (section 5)."""
         earlier = self._job.step(key).get("Done", "")
         return Outcome("done", "finished in AMC" + (f"; {earlier}" if earlier else ""), done=earlier)
+
+    def _still_waiting(self, key: str, message: str, done: str = "") -> Outcome:
+        """A step AMC did not confirm after Continue: waiting again, keeping what was done."""
+        earlier = self._job.step(key).get("Done", "")
+        return Outcome("waiting", message, done="; ".join(x for x in (earlier, done) if x))
+
+    def _pause_message(self) -> str:
+        waiting = [f"{s['Number']} {s['Title']}" for s in self._job.steps if s["State"] == "waiting"]
+        listed = f" (unfinished: step {', step '.join(waiting)})" if waiting else ""
+        return f"Waiting for the manual steps in AMC{listed}. Press Continue when they are saved."
 
     def _conf(self) -> dict[str, str]:
         return _read_conf(Path(self.controller.install_dir) / "installer.conf")
@@ -1004,13 +1061,13 @@ class CalibrationRunner:
             raise StepFailed("this run's recording did not finish; start a new run to record again")
         if resumed:
             # web_project: footage copied into the folder during the pause is uploaded now,
-            # unless this run already uploaded videos. Everything else was done in AMC's UI.
+            # unless this run already uploaded videos. The rest is checked against AMC.
+            note = ""
             if web and cfg.videos.enabled and not job.videos_uploaded:
                 videos = self._videos(cfg)
                 if videos:
                     note = self._upload_videos(api, pid, videos)
-                    return Outcome("done", f"{note}; the rest finished in AMC", done=note)
-            return self._finished_in_amc("video_configuration")
+            return self._check_video_configuration(cfg, api, note)
         notes, todo = [], []
         if web and job.record_seconds and not job.footage_recorded:  # first pass only (see above)
             notes.append(self._record_footage(job.record_seconds))
@@ -1033,6 +1090,9 @@ class CalibrationRunner:
                 todo.append("Upload layout.png in AMC's Video Configuration step (this project has no "
                             "floor plan in the web app)")
             else:
+                with self._lock:  # saved before the upload it describes
+                    job.layout_sha256 = hashlib.sha256(png).hexdigest()
+                    self._save()
                 if web:
                     saved = self._folder() / "floorplan" / "layout.png"
                     saved.parent.mkdir(parents=True, exist_ok=True)
@@ -1043,6 +1103,27 @@ class CalibrationRunner:
         if todo:
             return Outcome("waiting", "; ".join(todo), done="; ".join(notes))
         return Outcome("done", "; ".join(notes))
+
+    def _check_video_configuration(self, cfg: AutomationConfig, api: AmcApi, note: str) -> Outcome:
+        """Step 2 after Continue: done only when AMC has at least one video and a layout."""
+        info = api.get_project_info(self._job.amc_project_id)
+        count = info.get("video_files_count")
+        count = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        layout = info.get("layout_file") is True
+        if count >= 1 and layout:
+            if note:
+                return Outcome("done", f"{note}; the rest finished in AMC", done=note)
+            return self._finished_in_amc("video_configuration")
+        todo = []
+        if count < 1:
+            todo.append(f"copy the footage ({cfg.videos.pattern}) into {self._footage_dir(cfg)} on the "
+                        "workstation, or upload it in AMC's Video Configuration step" if self._job.folder
+                        else "upload the videos in AMC's Video Configuration step")
+        if not layout:
+            todo.append("upload layout.png in AMC's Video Configuration step")
+        reported = f"AMC reports {count} video{'' if count == 1 else 's'} and {'a' if layout else 'no'} layout.png"
+        return self._still_waiting("video_configuration",
+                                   f"{reported}: " + "; ".join(todo) + ", then press Continue", note)
 
     # ---- step 2: recording new footage ------------------------------------------
     @property
@@ -1210,59 +1291,125 @@ class CalibrationRunner:
         return True
 
     # ---- step 3 ---------------------------------------------------------------
-    def _scale(self, cfg: AutomationConfig) -> float | None:
-        src = cfg.parameters.scale.source
-        if src == "fixed":
-            return cfg.parameters.scale.fixed_px_per_m or None
-        if src == "database":
-            fp = self._job.floorplan or {}
-            return fp.get("px_per_m")
-        return None
+    # The scale, AMC-RECTIFICATION-AND-SCALE.md section 4.
+    def _scale(self, cfg: AutomationConfig) -> tuple[float | None, str]:
+        """The scale parameters.scale.source gives (section 4.1) and where it came from."""
+        s = cfg.parameters.scale
+        if s.source == "fixed":
+            return (float(s.fixed_px_per_m), "fixed_px_per_m") if s.fixed_px_per_m > 0 else (None, "")
+        if s.source == "database":
+            value = _scale_value(self._job.floorplan or {}, "px_per_m")
+            if value is not None:
+                return value, "the web app's floor plan"
+            value = self._remembered_scale()
+            if value is not None:
+                return value, "remembered for this floor plan"
+        return None, ""
+
+    def _remembered_scale(self) -> float | None:
+        """project.json's scale, only for the layout.png this run uploaded (same SHA-256)."""
+        job = self._job
+        if not job.folder or not job.layout_sha256:
+            return None
+        binding = self.store.get_by_folder(job.folder)
+        if binding is None or binding.project_id != job.project_id or not binding.layout_px_per_m \
+                or binding.layout_sha256 != job.layout_sha256:
+            return None
+        return float(binding.layout_px_per_m)
+
+    def _factory_scale(self, cfg: AutomationConfig, api: AmcApi) -> float:
+        value = _scale_value(api.get_default_config(), cfg.parameters.scale.settings_key)
+        return FACTORY_LAYOUT_PX_PER_M if value is None else value
+
+    def _set_scale(self, cfg: AutomationConfig, config: dict, value: float) -> None:
+        key = cfg.parameters.scale.settings_key
+        if not _has_key(config, key):
+            raise StepFailed(f"AMC's configuration has no {key}; check parameters.scale.settings_key")
+        _set_key(config, key, value)
+
+    def _take_scale(self, value: float) -> str:
+        """Save a scale confirmed in AMC on the job, then remember it (section 4.3)."""
+        job = self._job
+        with self._lock:
+            job.layout_px_per_m = value
+            self._save()
+        if not job.folder:
+            return ""
+        if not job.layout_sha256:
+            return "not remembered: this run uploaded no layout.png"
+        try:
+            binding = self.store.get_by_folder(job.folder)
+            if binding is None or binding.project_id != job.project_id:
+                raise ProjectNotFound(f"workstation folder {job.folder} is no longer bound to this project")
+            self.store.update(job.folder, layout_px_per_m=value, layout_sha256=job.layout_sha256)
+        except (ProjectNotFound, OSError, ValueError) as e:
+            return f"could not remember it: {e}"
+        return "remembered for this floor plan"
 
     def _parameters(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
-        if resumed:
-            return self._finished_in_amc("parameters")
         if not cfg.parameters.enabled:
             return Outcome("skipped", "parameters are off in the config")
-        pid, p = self._job.amc_project_id, cfg.parameters
-        notes, todo = [], []
-        scale = self._scale(cfg)
-
-        if p.settings_overrides and not p.settings_file:
-            raise StepFailed("parameters.settings_overrides needs parameters.settings_file")
-        if p.settings_file:
-            path = cfg.resolve(p.settings_file)
-            try:
-                settings = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as e:
-                raise StepFailed(f"could not read settings file {path}: {e}") from e
-            if not isinstance(settings, dict):
-                raise StepFailed(f"settings file {path} must contain a JSON object")
-            from .automation_config import deep_merge
-            settings = deep_merge(settings, p.settings_overrides)
-            if scale:
-                if _has_key(settings, p.scale.settings_key):
-                    _set_key(settings, p.scale.settings_key, round(scale, 4))
-                    notes.append(f"scale {scale:.2f} px/m")
-                else:
-                    todo.append(f"Enter {scale:.2f} layout px/m on AMC's Parameters step "
-                                f"(the settings file has no {p.scale.settings_key} key)")
+        p = cfg.parameters
+        if resumed:
+            if p.scale.source == "none":  # a run paused before the config changed
+                return self._finished_in_amc("parameters")
+            return self._confirm_scale(cfg, api)
+        pid, job = self._job.amc_project_id, self._job
+        notes = []
+        scale, origin = self._scale(cfg)
+        if p.settings_file or p.settings_overrides or p.scale.source != "none":
+            # AMC keeps one whole configuration, so every post is built on the current one.
+            config = api.get_config()
+            if p.settings_file:
+                path = cfg.resolve(p.settings_file)
+                try:
+                    settings = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as e:
+                    raise StepFailed(f"could not read settings file {path}: {e}") from e
+                if not isinstance(settings, dict):
+                    raise StepFailed(f"settings file {path} must contain a JSON object")
+                config = deep_merge(config, settings)
+                notes.append(f"applied {path.name}")
+            if p.settings_overrides:
+                config = deep_merge(config, p.settings_overrides)
+                notes.append("applied settings_overrides")
+            if scale is not None:
+                scale = round(scale, 4)
+                self._set_scale(cfg, config, scale)
+                with self._lock:  # saved before the post it describes
+                    job.layout_px_per_m = scale
+                    self._save()
+                notes.append(f"scale {scale:g} px/m from {origin}")
+            elif p.scale.source != "none":
+                # The factory value, so a scale another project left in AMC cannot pass Continue.
+                default = self._factory_scale(cfg, api)
+                self._set_scale(cfg, config, default)
+                notes.append(f"AMC's factory scale {default:g} px/m posted")
             self._changing_amc()
-            api.post_config(pid, settings)
-            notes.insert(0, f"applied {path.name}")
+            api.post_config(pid, config)
         else:
-            notes.append("AMC default settings")
-            if scale:
-                todo.append(f"Enter {scale:.2f} layout px/m on AMC's Parameters step (Floor-plan to 3D scale)")
-        if scale is None and p.scale.source != "none":
-            notes.append("no floor plan scale available")
+            notes.append("AMC's current settings")
         if p.focal_lengths:
             self._changing_amc()
             api.upload_focal_lengths(pid, p.focal_lengths)
             notes.append(f"{len(p.focal_lengths)} focal lengths")
-        if todo:
-            return Outcome("waiting", "; ".join(todo), done="; ".join(notes))
+        if scale is None and p.scale.source != "none":
+            return Outcome("waiting", SCALE_WAIT, done="; ".join(notes))
         return Outcome("done", "; ".join(notes))
+
+    def _confirm_scale(self, cfg: AutomationConfig, api: AmcApi) -> Outcome:
+        """Step 3 after Continue (section 4.2 item 3): a positive, non-default scale in AMC."""
+        key = cfg.parameters.scale.settings_key
+        value = _scale_value(api.get_config(), key)
+        default = self._factory_scale(cfg, api)
+        if value is None or _same_scale(value, default):
+            reported = f"{value:g} px/m, the factory default" if value is not None else "no valid value"
+            return self._still_waiting("parameters", f"{SCALE_WAIT}. AMC reports {key} {reported}")
+        remembered = self._take_scale(value)
+        note = f"scale {value:g} px/m set in AMC" + (f" ({remembered})" if remembered else "")
+        earlier = self._job.step("parameters").get("Done", "")
+        done = "; ".join(x for x in (earlier, note) if x)
+        return Outcome("done", done, done=done)
 
     # ---- step 4 ---------------------------------------------------------------
     def _rectification(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
@@ -1281,10 +1428,13 @@ class CalibrationRunner:
                 return no_videos
             return self._rectify(cfg, api, linear=r.mode == "linear")
         if r.mode == "ui":
+            todo = "Run Rectification in AMC (Auto, Manual, or Videos Are Rectified) until it shows COMPLETED"
             if resumed:
-                return self._finished_in_amc("rectification")
-            return Outcome("waiting", "Run Rectification in AMC (Auto, Manual, or Videos Are Rectified) "
-                                      "until it shows COMPLETED")
+                state = api.rectification_state(self._job.amc_project_id)
+                if state == "COMPLETED":
+                    return self._finished_in_amc("rectification")
+                return self._still_waiting("rectification", f"{todo}; AMC reports {state}")
+            return Outcome("waiting", todo)
         if not r.api.start.path or not r.api.status.path or not r.api.status.state_field:
             raise StepFailed("rectification.mode is api but rectification.api start/status paths are not set "
                              "(take them from AMC's /openapi.yaml)")
@@ -1470,10 +1620,13 @@ class CalibrationRunner:
             # In auto and linear the run rectifies by itself, so never ask for alignment before that.
             if rect_waiting and cfg.rectification.mode in ("auto", "linear"):
                 return Outcome("waiting", "Manual Alignment comes after rectification", needs_user=False)
-            if resumed:
-                return self._finished_in_amc("manual_alignment")
-            return Outcome("waiting", "Do Manual Alignment in AMC: mark at least 4 matching point sets "
-                                      "(6-8 recommended) on each camera and the layout, then Save")
+            todo = ("Do Manual Alignment in AMC: mark at least 4 matching point sets "
+                    "(6-8 recommended) on each camera and the layout, then Save")
+            if resumed:  # checked against AMC (AMC-RECTIFICATION-AND-SCALE.md section 5)
+                if api.get_project_info(self._job.amc_project_id).get("alignment_file") is True:
+                    return self._finished_in_amc("manual_alignment")
+                return self._still_waiting("manual_alignment", f"{todo}; AMC reports no saved alignment yet")
+            return Outcome("waiting", todo)
         if rect_waiting:
             return Outcome("waiting", f"Nothing to do: the saved {path.name} is uploaded after rectification",
                            needs_user=False)
@@ -1482,8 +1635,30 @@ class CalibrationRunner:
         return Outcome("done", f"re-used saved alignment {path} ({cfg.alignment.coord_space} coordinates)")
 
     # ---- step 6 ---------------------------------------------------------------
+    def _repost_scale(self, cfg: AutomationConfig, api: AmcApi) -> str:
+        """Section 4.2 item 4: take a correction made in AMC during the pause, post the job's scale.
+
+        Nothing to do when the job has no scale or parameters.scale.source is none.
+        """
+        job = self._job
+        if job.layout_px_per_m is None or cfg.parameters.scale.source == "none":
+            return ""
+        config = api.get_config()
+        value = _scale_value(config, cfg.parameters.scale.settings_key)
+        note = ""
+        if value is not None and not _same_scale(value, job.layout_px_per_m) \
+                and not _same_scale(value, self._factory_scale(cfg, api)):
+            old = job.layout_px_per_m
+            remembered = self._take_scale(value)
+            note = f"scale corrected in AMC from {old:g} to {value:g} px/m" + (f" ({remembered})" if remembered else "")
+        self._set_scale(cfg, config, job.layout_px_per_m)
+        self._changing_amc()
+        api.post_config(job.amc_project_id, config)
+        return note or f"scale {job.layout_px_per_m:g} px/m"
+
     def _execute(self, cfg: AutomationConfig, api: AmcApi, resumed: bool) -> Outcome:
         pid = self._job.amc_project_id
+        scale_note = self._repost_scale(cfg, api)
         self._changing_amc()
         state = api.verify_project(pid)
         if state != "READY":
@@ -1501,7 +1676,8 @@ class CalibrationRunner:
             state = api.project_state(pid)
             minutes = int((self._clock() - start) // 60)
             if state == "COMPLETED":
-                return Outcome("done", f"calibrated with {c.detector_type} in about {minutes} min")
+                return Outcome("done", f"calibrated with {c.detector_type} in about {minutes} min"
+                               + (f"; {scale_note}" if scale_note else ""))
             if state == "ERROR":
                 raise StepFailed("AMC calibration ended in ERROR. Last log lines:\n" + api.calibration_log(pid))
             if self._clock() - start >= c.timeout_seconds:
