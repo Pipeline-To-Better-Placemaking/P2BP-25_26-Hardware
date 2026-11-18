@@ -174,7 +174,7 @@ def test_fully_configured_run_needs_no_user(ws):
     assert calls(fake, "upload_focal_length") == [{"values": [1269.0, 1099.5]}]
     # Step 5: saved alignment re-uploaded in rectified coordinates. Step 6: detector from the config.
     assert calls(fake, "upload_alignment") == [{"coord_space": "rectified"}]
-    assert calls(fake, "calibrate") == [{"detector_type": "resnet"}]
+    assert calls(fake, "calibrate") == [{"detector_type": "transformer"}]
     # Step 7: result ZIP saved.
     assert job["Result"]["ResultFile"].endswith(".zip")
     assert (ws[0] / "results").exists()
@@ -213,7 +213,7 @@ def test_default_config_pauses_once_with_a_todo_list_then_finishes(ws):
     fake.ui_alignment_done = True                  # the user finishes steps 3-5 in AMC
     job = runner.resume()
     assert job["State"] == "completed"
-    assert calls(fake, "calibrate") == [{"detector_type": "resnet"}]
+    assert calls(fake, "calibrate") == [{"detector_type": "transformer"}]
 
 
 def test_continue_before_the_ui_work_is_saved_pauses_again(ws):
@@ -480,7 +480,7 @@ def test_routes_run_a_calibration(api):
     r = client.post("/amc/automation/start", json={"Spec": make_spec()})
     assert r.status_code == 202 and r.json()["State"] == "completed"
     assert client.get("/amc/automation/status").json()["State"] == "completed"
-    assert client.get("/amc/automation/config").json()["calibration"]["detector_type"] == "resnet"
+    assert client.get("/amc/automation/config").json()["calibration"]["detector_type"] == "transformer"
 
 
 def test_routes_need_a_ticket(api):
