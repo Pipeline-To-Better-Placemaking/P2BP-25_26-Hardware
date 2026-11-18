@@ -1796,6 +1796,11 @@ class Step4CalibOutputWiring:
             f"waiting for AMC project {inputs.project_name} to complete"
         )
         try:
+            # One read first: a project that is already COMPLETED needs no
+            # wait, which a --non-interactive run would otherwise skip
+            # without ever asking AMC (STEP-4 section 3.3).
+            if _project_state(ctx, inputs) == "COMPLETED":
+                return StepResult(status=StepStatus.COMPLETE)
             outcome = _wait_for_completed(ctx, inputs)
         except AmcApiError as exc:
             return StepResult(status=StepStatus.FAILED, message=str(exc))

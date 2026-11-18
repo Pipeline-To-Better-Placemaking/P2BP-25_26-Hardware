@@ -137,12 +137,17 @@ The shared wait helper from
 [`00` §9](00-FRAMEWORK-AND-BOOTSTRAP.md#9-user-action-display--privilegesudo-contract)
 owns timing and cancellation.
 
+The project's state is read once before any wait: a project that is already
+`COMPLETED` continues to `run()` without waiting, in an interactive or a
+`--non-interactive` run alike. Only a project that is not yet `COMPLETED`
+reaches the wait helper.
+
 | Outcome | Cause | Step result |
 |---|---|---|
 | `SATISFIED` | state reached `COMPLETED` | continue to `run()` |
 | `TIMEOUT` | `AMC_EXPORT_WAIT_S` elapsed | `USER_ACTION_REQUIRED` |
 | `CANCELLED` | operator pressed Ctrl-C | `USER_ACTION_REQUIRED` |
-| `SKIPPED` | `--non-interactive` | immediate `USER_ACTION_REQUIRED` |
+| `SKIPPED` | `--non-interactive`, and the read before the wait was not `COMPLETED` | immediate `USER_ACTION_REQUIRED` |
 
 The hint names the persisted project and the AMC UI URL. It does not instruct
 the operator to export a file or run a watcher script.
