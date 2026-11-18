@@ -195,14 +195,16 @@ The automated workflow, against AMC 3.3.0's seven steps:
 |---|---|
 | 1 Project Setup | starts AMC if needed; reuses `AMC_PROJECT_ID` or creates a project |
 | 2 Video Configuration | uploads the recorded footage as `cam_00.mp4`, …; uploads the project's floor plan as `layout.png` |
-| 3 Parameters | posts a settings file with the floor plan scale; uploads focal lengths |
-| 4 Rectification | configured API requests, or done in the UI (default) |
+| 3 Parameters | posts the floor plan scale (waits for it in AMC when unknown); uploads focal lengths |
+| 4 Rectification | automatic through AMC's API (default), or done in the UI |
 | 5 Manual Alignment | re-uploads a saved `alignment_data.json` if present; otherwise the user |
 | 6 Execute | `verify_project` must be `READY`; `calibrate`; wait for `COMPLETED` |
 | 7 Results | evaluation statistics; optional result ZIP; Step 4 ingests the installer's project |
 
 Steps 1 to 5 all run first; if any needs the user the run pauses once before
-step 6 with a to-do list and continues on request.
+step 6 with a to-do list and continues on request. A step left to the user
+counts as done only when AMC confirms it
+([`AMC-RECTIFICATION-AND-SCALE` section 5](AMC-RECTIFICATION-AND-SCALE.md#5-checked-resume-required)).
 
 ---
 
@@ -311,8 +313,9 @@ updated floor plan.
   NVIDIA's documented REST API (`skills/amc-run-video-calibration` in
   NVIDIA/DeepStream).
 - Whether uploading videos to an existing AMC project replaces or appends.
-- Rectification's API paths, which NVIDIA documents only through the UI; take
-  them from `python3 -m mv3dt_amc_control openapi`.
+- Automatic rectification end to end; its API calls were read from AMC's
+  OpenAPI document and UI bundle
+  ([`AMC-RECTIFICATION-AND-SCALE` section 2](AMC-RECTIFICATION-AND-SCALE.md#2-amcs-rectification-api)).
 - AMC's UI and API ports listen on every interface with no login
   ([`LIVE-BASELINE-AND-EDIT-PROTECTION.md`](LIVE-BASELINE-AND-EDIT-PROTECTION.md)),
   so tailnet ACLs decide who can open AMC once it is running.
