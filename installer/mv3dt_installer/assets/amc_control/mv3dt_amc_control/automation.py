@@ -12,7 +12,9 @@
     5 Manual Alignment     manual the first time; a saved alignment file is re-uploaded after that
     6 Execute Calibration  automated: re-post the run's scale, verify the project is READY,
                            calibrate, wait until AMC's amc_state is COMPLETED
-    7 Results              automated: evaluation statistics, optional result ZIP download
+    7 Results              automated: evaluation statistics; AMC's Layout Post-processing
+                           (POST /v1/postprocess) when the export is not ready, waiting until
+                           postprocess_state is COMPLETED; optional result ZIP download
 
 Every step that needs a person is marked "waiting". Steps 1-5 all run first,
 so everything that can be uploaded is uploaded; the run then pauses before
@@ -59,7 +61,8 @@ kept: it describes the floor plan, not the run. Each finished undo action is sav
 undo cut off by a service restart carries on without repeating any of them.
 AMC cannot stop a rectification, so the undo first waits while one is RUNNING
 (up to rectification.api.timeout_seconds), then deletes the project either way
-(installer/plan/AMC-RECTIFICATION-AND-SCALE.md section 3.3).
+(installer/plan/AMC-RECTIFICATION-AND-SCALE.md section 3.3). It waits the same
+way while post-processing is RUNNING (up to results.postprocess_timeout_seconds).
 """
 from __future__ import annotations
 
@@ -255,6 +258,11 @@ class Job:
     # Step 6: True once AMC accepted this run's calibrate post or was seen calibrating after it.
     # Only then is a COMPLETED amc_state this run's result rather than an earlier calibration's.
     calibration_posted: bool = False
+    # Step 7, the same pair for AMC's Layout Post-processing (POST /v1/postprocess), which
+    # builds the export: started is saved before the post, posted once AMC accepted it or
+    # was seen post-processing. Only then is a COMPLETED postprocess_state this run's.
+    postprocess_started: bool = False
+    postprocess_posted: bool = False
     # The floor plan scale (AMC-RECTIFICATION-AND-SCALE.md section 4): the SHA-256 of the
     # layout.png step 2 uploaded ("" when this run uploaded none), saved before the upload,
     # and the scale step 3 posted or the user confirmed in AMC (None until there is one).
@@ -724,6 +732,7 @@ class CalibrationRunner:
                 return False
             if AMC_DELETED not in job.undone:
                 self._await_rectification(cfg, api, old)
+                self._await_postprocess(cfg, api, old)
                 try:
                     api.delete_project(old)  # False (AMC's 404) counts as deleted
                 except (AmcApiError, httpx.HTTPError) as e:
@@ -761,6 +770,24 @@ class CalibrationRunner:
             if left <= 0:
                 return
             self._sleep(min(r.poll_seconds, left))
+
+    def _await_postprocess(self, cfg: AutomationConfig, api: AmcApi, pid: str) -> None:
+        """Wait while AMC post-processes the project, up to results.postprocess_timeout_seconds.
+
+        Like _await_rectification: the caller deletes the project either way.
+        """
+        poll = max(cfg.calibration.poll_seconds, 1.0)
+        deadline = self._clock() + cfg.results.postprocess_timeout_seconds
+        while True:
+            try:
+                if api.postprocess_state(pid, cfg.results.result_type)[0] != "RUNNING":
+                    return
+            except Exception:  # an AMC that cannot answer: nothing to wait for
+                return
+            left = deadline - self._clock()
+            if left <= 0:
+                return
+            self._sleep(min(poll, left))
 
     def _undo_footage(self, job: Job, undone: list[str], problems: list[str]) -> None:
         footage = self._folder() / "footage"
@@ -1750,6 +1777,9 @@ class CalibrationRunner:
         if stats:
             job.result["EvaluationStatistics"] = stats
             notes.append("evaluation statistics saved")
+        postprocessed = self._postprocess(cfg, api)
+        if postprocessed:
+            notes.append(postprocessed)
         if job.folder:
             # Saved before the folder exists, so a cancel always knows what to remove. A retried
             # step 7 reuses it rather than leaving an earlier attempt's folder behind.
@@ -1778,3 +1808,85 @@ class CalibrationRunner:
             notes.append("the installer's ingest timer installs the new result (when auto-ingest is on)")
         return Outcome("done", "; ".join(notes) or "done")
 
+    def _postprocess(self, cfg: AutomationConfig, api: AmcApi) -> str:
+        """Make sure AMC's export exists, running AMC's Layout Post-processing when it does not.
+
+        AMC 3.3.0 answers mv3dt_result with HTTP 400 until POST /v1/postprocess has built
+        the export: get_project_info's postprocess_state goes READY, RUNNING, COMPLETED and
+        <result_type>_export_ready becomes true. A ready export is trusted only after this
+        run's post-processing, or when this run did not calibrate: a reused project may still
+        report the export of an earlier calibration. A Continue polls a post-processing AMC is
+        running instead of posting again. Returns a note for the step, "" when the export was
+        already there.
+        """
+        job = self._job
+        pid = job.amc_project_id
+        r = cfg.results
+        state, ready = api.postprocess_state(pid, r.result_type)
+        if ready and job.postprocess_posted:
+            return "post-processing had finished in AMC"
+        if ready and not job.calibration_posted:
+            return ""
+        if state == "RUNNING":
+            return self._poll_postprocess(cfg, api, None)
+        if state == "COMPLETED" and job.postprocess_posted:
+            raise self._postprocess_failed(f"is COMPLETED but AMC reports no {r.result_type} export")
+        self._set_step("results", "running", "starting AMC's post-processing")
+        self._changing_amc()
+        with self._lock:
+            job.postprocess_started, job.postprocess_posted = True, False
+            self._save()
+        reply = api.start_postprocess(pid)
+        self._postprocess_posted()
+        return self._poll_postprocess(cfg, api, reply)
+
+    def _postprocess_posted(self) -> None:
+        """Record that AMC took this run's post-processing: the post was accepted or AMC runs it."""
+        job = self._job
+        if not job.postprocess_posted:
+            with self._lock:
+                job.postprocess_posted = True
+                self._save()
+
+    def _postprocess_failed(self, what: str) -> StepFailed:
+        """AMC serves no post-processing log (its log route refuses the type), so point at it."""
+        root = self._conf().get("AMC_ROOT")
+        log = (str(Path(os.path.expanduser(root)) / "projects" / f"project_{self._job.amc_project_id}"
+                   / "postprocess.log") if root else "postprocess.log in the AMC project's directory")
+        return StepFailed(f"AMC post-processing {what}; see {log}, then run Layout Post-processing in AMC's "
+                          "Results step or press Continue to run it again")
+
+    def _poll_postprocess(self, cfg: AutomationConfig, api: AmcApi, reply: str | None) -> str:
+        """Poll postprocess_state until COMPLETED with the export ready.
+
+        The lag window is step 6's: after the post (reply is its answer's postprocess_state,
+        "" in AMC 3.3.0) AMC may still report the state from before it, so every state keeps
+        the poll going until RUNNING is seen or for at most LAG_POLLS polls. reply is None
+        when nothing was posted because AMC was already seen post-processing.
+        """
+        pid = self._job.amc_project_id
+        r = cfg.results
+        start = self._clock()
+        lagging = reply is not None and reply != "RUNNING"
+        lag_polls = 0
+        while True:
+            self._wait(cfg.calibration.poll_seconds)
+            state, ready = api.postprocess_state(pid, r.result_type)
+            minutes = int((self._clock() - start) // 60)
+            if state == "RUNNING":
+                lagging = False
+                self._postprocess_posted()
+            elif lagging and lag_polls < LAG_POLLS:
+                lag_polls += 1
+            elif state == "COMPLETED" and ready:
+                return f"post-processed in about {minutes} min"
+            elif state == "COMPLETED":
+                raise self._postprocess_failed(f"is COMPLETED but AMC reports no {r.result_type} export")
+            elif state in ("ERROR", "FAILED"):
+                raise self._postprocess_failed(f"ended in {state}")
+            else:
+                raise self._postprocess_failed(f"stopped without finishing (postprocess_state "
+                                               f"{state or 'missing'})")
+            if self._clock() - start >= r.postprocess_timeout_seconds:
+                raise self._postprocess_failed(f"still {state or 'in no state'} after {minutes} min")
+            self._set_step("results", "running", f"post-processing for {minutes} min")
